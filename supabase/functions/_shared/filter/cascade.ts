@@ -23,6 +23,8 @@
 // Row and enum shapes from the schema owner. Never redefined — a redefined type does
 // not fail, it drifts.
 import type { FilterRuleRow, FilterRuleType, Json, PostedAtSource } from "../contracts/shared-types.ts";
+// The location-free twin identity (T12). Imported, never re-derived: the loader and this rule must fold identically.
+import { crossSourceKey } from "../normalize/fingerprint.ts";
 
 // Exactly the job columns the Screener reads.
 //
@@ -35,6 +37,15 @@ export interface ScreenableJob {
   readonly title: string;
   // Joined against the company blocklist (the weekly cap that also read it was retired 2026-11-10).
   readonly companySlug: string;
+  // The board's display name, for the cross-source twin check in already_applied (T12, 2026-11-10). REQUIRED, so the
+  // compiler finds every builder: an optional field here would let a builder forget it and the twin check pass vacuously
+  // (CLAUDE.md section 6). Null is still a real answer (a row stored without a name): twinOf then builds no entry.
+  readonly companyName: string | null;
+  // True only for an aggregator copy (jobs.ats_provider = 'other': Jobicy, RemoteOK, Arbeitnow). A cross-source
+  // match needs at least one aggregator side: two ATS rows with one title at one employer are usually two postings
+  // (another country, another req), which the location-bearing fingerprint keeps apart on purpose. Required, so
+  // a builder cannot forget it and silently widen the twin check.
+  readonly isAggregatorCopy: boolean;
   // Parsed locations, matched against the allowlist.
   readonly locations: readonly string[];
   // Kept because a board that gave no parsed locations may still have prose worth
@@ -65,6 +76,14 @@ export interface ScreenContext {
   // `UNIQUE(user_id, job_id)` constraint — the constraint is the real guarantee, this
   // just avoids spending a Gemini call to discover it.
   readonly appliedFingerprints: ReadonlySet<string>;
+  // The SAME history seen location-free: crossSourceKey(company, title) of every committed application (T12). A
+  // separate set, never merged into appliedFingerprints, so each name means one thing. It exists because the
+  // fingerprint includes location, and an aggregator copy ("Anywhere") of an applied ATS job ("Remote, Global")
+  // gets a new fingerprint. Build entries with twinOf below, which refuses a nameless or untitled job.
+  readonly appliedCrossKeys: ReadonlySet<string>;
+  // The subset of that history whose job was itself an aggregator copy. This is what lets an incoming ATS posting
+  // match: only when the applied side was the aggregator copy, never ATS against ATS (review, fix round 1).
+  readonly appliedAggregatorCrossKeys: ReadonlySet<string>;
   // Company slugs currently blocked.
   readonly blockedCompanySlugs: ReadonlySet<string>;
   // (applicationsThisWeekByCompany was here, for the per-company weekly cap: removed 2026-11-10 with that rule, so no
@@ -250,13 +269,37 @@ function employmentType(job: ScreenableJob, config: Json): RuleVerdict {
     : { drop: true, reason: `employment type "${job.employmentType}" is not permitted` };
 }
 
+// The twin identity of one job, or null when it has none. Shared by the history loader (screen/context.ts) and
+// already_applied, so both sides refuse the same inputs.
+//
+// NULL, NEVER A DEGENERATE ENTRY. Folding a missing part to "" would build "|" (or "acme|"), and every other
+// nameless row would then match it: a fail-open that DROPS real jobs (CLAUDE.md section 6). So a part must be a string
+// AND fold to something; `typeof` also rejects the undefined an old fixture or a partial join row carries.
+export function twinOf(company: string | null | undefined, title: string | null | undefined): string | null {
+  // Not a string means the column was absent or null: no identity to match on.
+  if (typeof company !== "string" || typeof title !== "string") return null;
+  // The production fold, unchanged, so this side and the loader cannot disagree.
+  const twin = crossSourceKey(company, title);
+  // "|" never occurs inside either half (the fold removed it), so an edge "|" means that half folded to nothing.
+  return twin.startsWith("|") || twin.endsWith("|") ? null : twin;
+}
+
 // Already applied. A cheap pre-check ahead of the database constraint.
 function alreadyApplied(job: ScreenableJob, _config: Json, context: ScreenContext): RuleVerdict {
   // THE DATABASE IS THE REAL GUARANTEE — `UNIQUE(user_id, job_id)` is constraint #7 as
   // a constraint, and it is what survives a race between two runs. This check exists
   // only to avoid spending a Gemini call to discover something we already know.
-  return context.appliedFingerprints.has(job.fingerprint)
-    ? { drop: true, reason: "already applied to this posting" }
+  if (context.appliedFingerprints.has(job.fingerprint)) return { drop: true, reason: "already applied to this posting" };
+  // T12: the same posting under another fingerprint (aggregator vs ATS location). UNIQUE(user_id, job_id) cannot
+  // catch this one, the two are different jobs rows, so this check is the only thing between Teja and a duplicate.
+  const twin = twinOf(job.companyName, job.title);
+  // AT LEAST ONE SIDE MUST BE AN AGGREGATOR COPY. An incoming copy may match any applied row; an incoming ATS
+  // posting may match only an applied copy. ATS against ATS never matches: history is not windowed, so it would
+  // drop every later same-title posting at that employer forever.
+  const isTwin = twin !== null && ((job.isAggregatorCopy && context.appliedCrossKeys.has(twin)) || context.appliedAggregatorCrossKeys.has(twin));
+  // Its own reason, naming the pair, so the event says why a never-seen fingerprint was dropped.
+  return isTwin
+    ? { drop: true, reason: `already applied to this posting via another source (${job.companyName} | ${job.title})` }
     : { drop: false };
 }
 

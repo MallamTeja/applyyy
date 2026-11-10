@@ -239,8 +239,8 @@ async function main(): Promise<void> {
   // THE SCREENER'S CONTEXT, LOADED ONCE FOR THE WHOLE RUN. The rules, the blocklist, the
   // application history and the stage-0 preferences are properties of the USER, not of
   // the board being polled, so re-reading them per board would pay forty times for one
-  // answer. The clock is shared too, so a run spanning midnight applies the same
-  // staleness window to its last board as to its first.
+  // answer. The clock is shared too, so every board in a run is judged at one instant (the staleness window
+  // this once protected was retired in W10, 2026-11-10; the shared clock still keeps the context's reads consistent).
   const screenContext = await loadScreenContext(supabaseScreenQueries(client, now), now);
 
   // A FAILED CONTEXT LOAD MUST NOT SILENTLY BECOME AN EMPTY CONTEXT. Three cascade rules

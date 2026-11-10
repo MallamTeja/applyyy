@@ -19,6 +19,8 @@ import assert from "node:assert/strict";
 import { toScreenableJob, planScreenedApplications, type ScreenPreferences } from "./screen-batch.ts";
 // The cascade itself — the module under wiring.
 import type { ScreenContext } from "../filter/cascade.ts";
+// The cross-source key the context builds, so the T12 wiring test uses the real fold (2026-11-10).
+import { crossSourceKey } from "../normalize/fingerprint.ts";
 // Row shapes from the schema owner.
 import type { FilterRuleRow, Json, JobInsert } from "../contracts/shared-types.ts";
 
@@ -52,6 +54,10 @@ const BASE_CONTEXT: ScreenContext = {
   now: NOW,
   appliedFingerprints: new Set(),
   blockedCompanySlugs: new Set(),
+  // The cross-source half of already_applied (T12, 2026-11-10): empty, like the fingerprint half.
+  appliedCrossKeys: new Set(),
+  // The aggregator-only half (fix round 1): empty too.
+  appliedAggregatorCrossKeys: new Set(),
 };
 
 // Build one enabled rule row with real config. `sort_order` defaults to 0 because most
@@ -528,4 +534,37 @@ test("missing description: the tech gate still runs first", () => {
   );
   // The title verdict wins.
   assert.equal(planned.inserts[0]!.drop_reason, "tech_gate");
+});
+
+// T12 (2026-11-10): the WIRING proof. The cascade's twin check reads job.companyName, and toScreenableJob is its only
+// builder; the cascade's own tests build the job by hand, so only this test fails if the adapter stops passing it.
+test("T12: a board row whose company and title match an applied job from another source is born dropped already_applied", () => {
+  // The applied job's cross-source entry, built by the same function the context uses.
+  const appliedTwin = crossSourceKey(BASE_ROW.company_name, BASE_ROW.title);
+  // The same posting from another source: a different fingerprint, so only the cross-source set can catch it.
+  const planned = planScreenedApplications(
+    // ats_provider 'other' is what makes it an aggregator copy; toScreenableJob must carry that through (fix round 1).
+    [{ jobId: "job-twin", row: { ...BASE_ROW, fingerprint: "fp-aggregator-copy", ats_provider: "other" } }],
+    [rule("already_applied", {})],
+    { ...BASE_CONTEXT, appliedCrossKeys: new Set([appliedTwin]) },
+    OPEN_PREFS,
+  );
+  // Dropped, and named by its rule.
+  assert.deepEqual([planned.inserts[0]!.status, planned.inserts[0]!.drop_reason], ["dropped_filter", "already_applied"]);
+});
+
+// The other half of the wiring proof: an ATS row (BASE_ROW is greenhouse) with the same company and title is a
+// different posting, so it must survive. Red if toScreenableJob ever marks every row as an aggregator copy.
+test("T12: an ATS board row sharing company and title with an applied ATS job is born passed_filters", () => {
+  // The applied ATS job's entry, in the all-rows set only, as the loader puts an ATS application.
+  const appliedTwin = crossSourceKey(BASE_ROW.company_name, BASE_ROW.title);
+  // Another ATS posting: a different fingerprint, same company and title.
+  const planned = planScreenedApplications(
+    [{ jobId: "job-ats", row: { ...BASE_ROW, fingerprint: "fp-ats-elsewhere" } }],
+    [rule("already_applied", {})],
+    { ...BASE_CONTEXT, appliedCrossKeys: new Set([appliedTwin]) },
+    OPEN_PREFS,
+  );
+  // Passed the cascade: no drop reason at all.
+  assert.deepEqual([planned.inserts[0]!.status, planned.inserts[0]!.drop_reason ?? null], ["passed_filters", null]);
 });

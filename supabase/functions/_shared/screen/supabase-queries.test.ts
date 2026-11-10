@@ -118,7 +118,8 @@ test("nested job rows are flattened into fingerprint and company slug", async ()
             status: "applied",
             approved_at: "2026-09-15T00:00:00.000Z",
             applied_at: "2026-09-16T00:00:00.000Z",
-            jobs: { fingerprint: "fp-1", company_slug: "zomato" },
+            // company_name and title feed the cross-source set (T12, 2026-11-10), so the input carries them too.
+            jobs: { fingerprint: "fp-1", company_slug: "zomato", company_name: "Zomato", title: "Backend Engineer", ats_provider: "greenhouse" },
           },
         ],
         error: null,
@@ -128,7 +129,8 @@ test("nested job rows are flattened into fingerprint and company slug", async ()
   );
   assert.deepEqual((await queries.applicationHistory()).rows, [
     // applied_at wins over approved_at: submission is the later, precise commit event.
-    { fingerprint: "fp-1", company_slug: "zomato", committed_at: "2026-09-16T00:00:00.000Z" },
+    // The job's company and title pass through unchanged (T12): the context folds them, the adapter does not.
+    { fingerprint: "fp-1", company_slug: "zomato", company_name: "Zomato", title: "Backend Engineer", ats_provider: "greenhouse", committed_at: "2026-09-16T00:00:00.000Z" },
   ]);
 });
 

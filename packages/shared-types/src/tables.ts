@@ -1217,7 +1217,8 @@ export type EmailEventInsert = {
   // The tracker's verdict, written in the SAME insert since the classifier runs before the
   // row is stored (email-tracker-intake decide.ts `emailEventRowOf`). Optional because each
   // column has a default or is nullable. Added 2026-11-02 (W20): before this the intake
-  // typed its row as `EmailEventInsert & Record<string, unknown>` to smuggle them in.
+  // typed its row as `EmailEventInsert & Record<string, unknown>` to smuggle them in. That
+  // intersection outlived the fix until 2026-11-10 (T17), when decide.ts and index.ts dropped it.
   /** Defaults to 'unclassified' when omitted. */
   classification?: EmailClassification;
   classification_confidence?: number | null;

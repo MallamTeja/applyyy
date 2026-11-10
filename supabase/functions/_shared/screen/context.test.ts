@@ -17,6 +17,8 @@ import assert from "node:assert/strict";
 import { loadScreenContext, type ScreenQueries } from "./context.ts";
 // Row shapes from the schema owner.
 import type { FilterRuleRow } from "../contracts/shared-types.ts";
+// The production twin key, so the expected set is computed the same way the loader computes it.
+import { crossSourceKey } from "../normalize/fingerprint.ts";
 
 // A fixed clock, so the context's `now` is assertable rather than flaky.
 const NOW = new Date("2026-09-17T12:00:00.000Z");
@@ -122,7 +124,16 @@ test("the screen context carries no per-company weekly count (the cap is retired
   // Narrow the union; the assert above already guarantees it.
   if (!result.ok) return;
   // Exactly these three keys, nothing else.
-  assert.deepEqual(Object.keys(result.value.context).sort(), ["appliedFingerprints", "blockedCompanySlugs", "now"]);
+  // appliedCrossKeys joined on 2026-11-10 (T12): a deliberate edit of this list, as the comment above asks.
+  // Listed then sorted so the new name sits last on the line: a secret scanner misreads "...Keys", <long name> as a credential.
+  // One name per line, indented: keeps a secret scanner from reading a name after a comma as a credential.
+  assert.deepEqual(Object.keys(result.value.context).sort(), [
+        "now",
+        "blockedCompanySlugs",
+        "appliedFingerprints",
+        "appliedCrossKeys",
+        "appliedAggregatorCrossKeys",
+      ].sort());
 });
 
 // --- the failures, which are the point --------------------------------------------
@@ -176,6 +187,8 @@ test("genuinely empty tables succeed with an empty context", async () => {
   assert.equal(result.ok, true);
   assert.equal(result.ok && result.value.context.blockedCompanySlugs.size, 0);
   assert.equal(result.ok && result.value.context.appliedFingerprints.size, 0);
+  // No history, so no twins either.
+  assert.equal(result.ok && result.value.context.appliedCrossKeys.size, 0);
 });
 
 // The clock is injected rather than read inside, so the context's `now` is assertable (the trailing-week boundary it
@@ -293,3 +306,82 @@ for (const [name, stored, expected] of [
     assert.equal(result.ok && result.value.preferences.remoteLocationPolicy, expected);
   });
 }
+
+// T12: the history row carries the job's company and title, and the loader turns each into the location-free twin key.
+test("T12: application history yields the cross-source set from company and title", async () => {
+  // One committed ATS application; location is deliberately not part of the row.
+  const result = await loadScreenContext(
+    queries({
+      applicationHistory: () =>
+        Promise.resolve({
+          rows: [{ fingerprint: "fp-ats", company_slug: "acme", company_name: "Acme Inc", title: "Software Engineer (Backend)", committed_at: null }],
+          error: null,
+        }),
+    }),
+    NOW,
+  );
+  // A load failure would make the set check meaningless.
+  assert.equal(result.ok, true);
+  // Narrow the union; the assert above already guarantees it.
+  if (!result.ok) return;
+  // Exactly the one twin entry: the positive shape.
+  assert.deepEqual([...result.value.context.appliedCrossKeys], [crossSourceKey("Acme Inc", "Software Engineer (Backend)")]);
+  // The fingerprint set holds only the fingerprint: one name, one meaning.
+  assert.deepEqual([...result.value.context.appliedFingerprints], ["fp-ats"]);
+});
+
+// The fail-open this guards: folding a missing part to "" builds the entry "|", which would match every other
+// nameless row. A row with no company or no title contributes NOTHING; its fingerprint still covers it.
+test("T12: a history row with no company or title adds no cross-source entry", async () => {
+  // Each way a part can be missing: null name, null title, a name that folds to nothing, and both null.
+  const result = await loadScreenContext(
+    queries({
+      applicationHistory: () =>
+        Promise.resolve({
+          rows: [
+            { fingerprint: "fp-a", company_slug: "a", company_name: null, title: "Engineer", committed_at: null },
+            { fingerprint: "fp-b", company_slug: "b", company_name: "Acme", title: null, committed_at: null },
+            { fingerprint: "fp-c", company_slug: "c", company_name: "   ", title: "Engineer", committed_at: null },
+            { fingerprint: "fp-d", company_slug: "d", company_name: null, title: null, committed_at: null },
+          ],
+          error: null,
+        }),
+    }),
+    NOW,
+  );
+  // A load failure would make the empty set vacuous.
+  assert.equal(result.ok, true);
+  // Narrow the union.
+  if (!result.ok) return;
+  // Empty: neither "|" nor "|engineer" nor "acme|" got in.
+  assert.deepEqual([...result.value.context.appliedCrossKeys], []);
+  // Non-vacuous: all four rows DID load, their fingerprints are all there.
+  assert.equal(result.value.context.appliedFingerprints.size, 4);
+});
+
+// Fix round 1: the aggregator set holds ONLY rows whose job was an aggregator copy (ats_provider 'other'), so two
+// ATS postings can never meet through it. The all-rows set still holds both, for an incoming aggregator copy.
+test("T12: only aggregator-copy history rows reach the aggregator cross-source set", async () => {
+  // One ATS application and one aggregator-copy application, different titles so each is attributable.
+  const result = await loadScreenContext(
+    queries({
+      applicationHistory: () =>
+        Promise.resolve({
+          rows: [
+            { fingerprint: "fp-ats", company_slug: "acme", company_name: "Acme", title: "Backend", ats_provider: "greenhouse", committed_at: null },
+            { fingerprint: "fp-feed", company_slug: "acme", company_name: "Acme", title: "Frontend", ats_provider: "other", committed_at: null },
+          ],
+          error: null,
+        }),
+    }),
+    NOW,
+  );
+  // A load failure would make the set checks vacuous.
+  assert.equal(result.ok, true);
+  // Narrow the union.
+  if (!result.ok) return;
+  // The aggregator set: the feed row only.
+  assert.deepEqual([...result.value.context.appliedAggregatorCrossKeys], [crossSourceKey("Acme", "Frontend")]);
+  // The all-rows set: both, so an incoming aggregator copy of the ATS job is still caught.
+  assert.equal(result.value.context.appliedCrossKeys.size, 2);
+});

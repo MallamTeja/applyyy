@@ -138,6 +138,12 @@ export function toScreenableJob(row: JobInsert | JobRow): ScreenableJob {
   return {
     // UNTRUSTED, straight from the board. What the title blocklist matches on.
     title: row.title,
+    // The company as the source spelled it (T12, 2026-11-10): already_applied folds it with the title into the
+    // cross-source set, so an aggregator copy of an applied ATS job is caught. Never the slug: slugs differ by source.
+    companyName: row.company_name,
+    // 'other' is the aggregator lane (remote feeds). The twin check needs one aggregator side, so ATS-vs-ATS
+    // same-title postings stay distinct (fix round 1). `ats_provider` is optional on JobInsert: absent = not a copy.
+    isAggregatorCopy: row.ats_provider === "other",
     // The normalised join key for the company blocklist. (It also keyed the per-company
     // weekly cap until that rule was retired on 2026-11-10 — Teja: "remove it".)
     companySlug: row.company_slug,

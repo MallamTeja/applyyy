@@ -517,16 +517,18 @@ export function mayAdvanceStatus(systemEnabled: boolean | null): boolean {
  * The email_events row for one decided message. Pure and exported so the stored shape is
  * node-testable — thread_id was captured by Apps Script and validated by the contract
  * since 2026-10-09, then silently dropped by an inline index.ts map no test could reach
- * (found 2026-10-23). The intersection type mirrors index.ts's upsert typing:
- * EmailEventInsert lacks the later-added columns (thread_id, classification, ...), and
- * the Record half is the deliberate escape that lets them ride along.
+ * (found 2026-10-23). Typed as plain EmailEventInsert (W20, closed 2026-11-10): the type has carried
+ * every column written here since 2026-11-02 (thread_id/recipient_to/label_ids since 2026-10-23, the
+ * verdict columns since 2026-11-02), matched to the live email_events columns, so the old
+ * `& Record<string, unknown>` escape only hid typos. Without it, a misspelled column in the literal
+ * below is a compile error (excess-property check) instead of a silently dropped insert field.
  */
 export function emailEventRowOf(
   message: StorableMessage,
   decision: Pick<MessageDecision, "classification" | "confidence">,
   matchedApplicationId: string | null,
   processedAt: string,
-): EmailEventInsert & Record<string, unknown> {
+): EmailEventInsert {
   // W33 (2026-11-02): an email the classifier read nothing in AND that matched no application
   // carries no tracker value, so its words are not kept. Live on 2026-11-01, 97/97 rows were
   // exactly this, including Google security mail (OAuth grants). WHY A MINIMAL ROW, NOT NO ROW:

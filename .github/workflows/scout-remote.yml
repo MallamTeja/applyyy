@@ -97,6 +97,9 @@ jobs:
           APPLYY_APP_USER_EMAIL: ${{ secrets.APPLYY_APP_USER_EMAIL }}
           # Its password: the reason this block is step-scoped at all.
           APPLYY_APP_USER_PASSWORD: ${{ secrets.APPLYY_APP_USER_PASSWORD }}
+          # The agent identity the duplicate sweep needs (T12, 2026-11-10): advance_application_status refuses an agent
+          # move without it. Same secret as apply.yml; the CLI sends it as a header and never prints it.
+          APPLYY_AGENT_KEY: ${{ secrets.APPLYY_AGENT_KEY }}
           # 'true' only for a manual run that ticked the box; a scheduled run has no inputs,
           # so it is always a real run.
           SCOUT_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}

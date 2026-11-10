@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 // `.ts` extension is mandatory: Deno requires it and Node 24 accepts it, so one
 // specifier serves both runtimes (see stream-2 notes).
-import { canonicalJobKey, jobFingerprint } from "./fingerprint.ts";
+import { canonicalJobKey, crossSourceKey, jobFingerprint, normalizeCompany } from "./fingerprint.ts";
 
 // Every case is a pair that MUST collapse. Table-driven per §19 so adding a new
 // real-world spelling is one line, not a new test function.
@@ -154,4 +154,37 @@ test("jobFingerprint collapses the same pairs the canonical key does", async () 
   const b = await jobFingerprint({ company: "Zomato", title: "Backend Engineer", location: "Hyderabad" });
   // Equal digests are what the database's UNIQUE constraint actually sees.
   assert.equal(a, b);
+});
+
+// crossSourceKey (2026-11-10, T12): the SAME posting reached through an aggregator (Jobicy, RemoteOK, Arbeitnow) and
+// through the employer's ATS. The feeds report a feed region ("Anywhere") where the ATS reports the board location
+// ("Remote, Global"), so the location-bearing fingerprint never matched them: 257 live pairs on 2026-11-10.
+test("crossSourceKey ignores location: one key whatever region each source reports", () => {
+  // The function takes no location at all, so a Jobicy "Anywhere" and a Greenhouse "Remote, Global" cannot differ.
+  assert.equal(crossSourceKey("Canonical Ltd", "Python Engineer"), crossSourceKey("Canonical", "Python Engineer"));
+});
+
+// The company and title halves fold exactly as the fingerprint does, so the two keys can never drift apart.
+test("crossSourceKey folds company and a bracket-free title exactly like canonicalJobKey", () => {
+  // Same posting, no brackets: the cross key is the canonical key minus its (empty) location part.
+  assert.equal(`${crossSourceKey("Zomato Pvt Ltd", "BACKEND Engineer")}|`, canonicalJobKey({ company: "Zomato Pvt Ltd", title: "BACKEND Engineer" }));
+});
+
+// A false twin DROPS a real job, so bracketed qualifiers stay (measured 2026-11-10: "(New Grad 2027)", "(L3)" and
+// "(Spanish speaking)" variants are different roles at Sierra, Twilio and Databricks that the fingerprint fold merges).
+test("crossSourceKey keeps a bracketed qualifier: a New Grad role is not the base role's twin", () => {
+  // The fingerprint's title fold strips the parenthetical; the cross key must not.
+  assert.notEqual(crossSourceKey("Sierra", "Software Engineer, Agent (New Grad 2027)"), crossSourceKey("Sierra", "Software Engineer, Agent"));
+});
+
+// Seniority is a different job, as in the fingerprint.
+test("crossSourceKey separates a Senior role from the base role", () => {
+  // "Senior" survives the fold.
+  assert.notEqual(crossSourceKey("Zomato", "Senior Backend Engineer"), crossSourceKey("Zomato", "Backend Engineer"));
+});
+
+// normalizeCompany is exported for the scout's twin lookup (company_slug is a separate, dash-joined slug).
+test("normalizeCompany peels stacked legal suffixes and folds punctuation", () => {
+  // "Pvt" and "Ltd" both go; the dot in "Checkout.com" becomes a space.
+  assert.deepEqual([normalizeCompany("Zomato Pvt Ltd"), normalizeCompany("Checkout.com")], ["zomato", "checkout com"]);
 });

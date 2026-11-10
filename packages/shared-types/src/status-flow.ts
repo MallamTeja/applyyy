@@ -80,6 +80,16 @@ export const STATUS_TRANSITIONS: readonly StatusTransition[] = [
   { from: 'discovered', to: 'dropped_duplicate', allowedAgents: ['normalizer'], note: 'Same posting already present from another board.' },
   { from: 'discovered', to: 'failed', allowedAgents: ['normalizer', 'human'], note: 'Unparseable posting.' },
 
+  // ---- Aggregator twin of an employer-ATS posting (T12, 2026-11-10, migration 20261110160000) ---------------
+  // The remote scout's sweep (agent scout_aggregator) moves the AGGREGATOR copy only, from any pre-approval status. No
+  // edge from approved or later: a human decision is never re-judged by an agent.
+  { from: 'passed_filters', to: 'dropped_duplicate', allowedAgents: ['scout_aggregator'], note: 'Aggregator (Jobicy/RemoteOK/Arbeitnow) copy whose employer-ATS twin exists; the ATS copy is always kept.' },
+  { from: 'scored', to: 'dropped_duplicate', allowedAgents: ['scout_aggregator'], note: 'Aggregator (Jobicy/RemoteOK/Arbeitnow) copy whose employer-ATS twin exists; the ATS copy is always kept.' },
+  { from: 'tailored', to: 'dropped_duplicate', allowedAgents: ['scout_aggregator'], note: 'Aggregator (Jobicy/RemoteOK/Arbeitnow) copy whose employer-ATS twin exists; the ATS copy is always kept.' },
+  { from: 'audit_clean', to: 'dropped_duplicate', allowedAgents: ['scout_aggregator'], note: 'Aggregator (Jobicy/RemoteOK/Arbeitnow) copy whose employer-ATS twin exists; the ATS copy is always kept.' },
+  { from: 'audit_flagged', to: 'dropped_duplicate', allowedAgents: ['scout_aggregator'], note: 'Aggregator (Jobicy/RemoteOK/Arbeitnow) copy whose employer-ATS twin exists; the ATS copy is always kept.' },
+  { from: 'awaiting_approval', to: 'dropped_duplicate', allowedAgents: ['scout_aggregator'], note: 'Aggregator (Jobicy/RemoteOK/Arbeitnow) copy whose employer-ATS twin exists; the ATS copy is always kept.' },
+
   // ---- The cheap deterministic filter cascade, before any LLM spend ---------
   // Human added 2026-10-31 (20261031200000): a pasted link takes a deduped row past the screener.
   { from: 'deduped', to: 'passed_filters', allowedAgents: ['screener', 'human'], note: 'Survived every enabled filter rule.' },

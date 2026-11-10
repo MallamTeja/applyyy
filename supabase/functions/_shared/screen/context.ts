@@ -22,6 +22,8 @@
 
 // The cascade's context shape, so this module cannot drift from what it feeds.
 import type { ScreenContext } from "../filter/cascade.ts";
+// The twin identity, imported from the rule that reads it so the two sides fold and refuse identically.
+import { twinOf } from "../filter/cascade.ts";
 // Row shapes from the schema owner. Never redefined.
 import type { FilterRuleRow } from "../contracts/shared-types.ts";
 // Stage 0's config shape, so the loader hands back something the gates can use directly.
@@ -45,6 +47,14 @@ export interface ScreenQueryResult<T> {
 export interface ApplicationHistoryRow {
   // Feeds already_applied.
   readonly fingerprint: string;
+  // The job's display name and title, for the location-free cross-source set (T12). Nullable because the join can
+  // carry a null; such a row adds no twin entry (see twinOf) and its fingerprint still covers it.
+  readonly company_name: string | null;
+  // The board's title, folded by crossSourceKey with its brackets kept, so "(Backend)" and "(Frontend)" stay apart.
+  readonly title: string | null;
+  // The job's source. Only the exact value 'other' (an aggregator copy) puts the row in the aggregator set; null or
+  // anything else keeps it out, which can only miss a twin (a duplicate), never drop a real job.
+  readonly ats_provider: string | null;
   // Fed the per-company weekly cap, retired 2026-11-10. Still in the row because the query
   // adapter (supabase-queries.ts) still selects it; the loader no longer reads it.
   readonly company_slug: string;
@@ -186,6 +196,10 @@ export async function loadScreenContext(queries: ScreenQueries, now: Date): Prom
   // Every fingerprint ever applied to. NOT windowed: already_applied must remember
   // forever, or the cascade would re-offer a posting Teja applied to last month.
   const appliedFingerprints = new Set<string>();
+  // The same history, location-free (T12). Separate from the fingerprints so one name never means two things.
+  const appliedCrossKeys = new Set<string>();
+  // The subset applied through an aggregator copy: what an incoming ATS posting may match (fix round 1).
+  const appliedAggregatorCrossKeys = new Set<string>();
   // NO PER-COMPANY WEEKLY COUNT IS BUILT HERE ANY MORE. The cap that read it was retired on
   // 2026-11-10 (Teja: "remove it"), and ScreenContext dropped the field, so counting would
   // be dead work. context.test.ts pins the exact key set so it cannot creep back.
@@ -194,6 +208,12 @@ export async function loadScreenContext(queries: ScreenQueries, now: Date): Prom
   for (const row of historyResult.rows) {
     // Unconditional: applying is permanent regardless of when it happened.
     appliedFingerprints.add(row.fingerprint);
+    // Null for a nameless or untitled row: adding nothing is the closed choice, a degenerate entry would fail open.
+    const twin = twinOf(row.company_name, row.title);
+    // Also unconditional in time, for the same reason as the fingerprint.
+    if (twin !== null) appliedCrossKeys.add(twin);
+    // Same entry, filed again only when the applied job was an aggregator copy.
+    if (twin !== null && row.ats_provider === "other") appliedAggregatorCrossKeys.add(twin);
   }
 
   // NO PREFERENCES ROW IS A NORMAL STATE, NOT A FAILURE — the bootstrap that would
@@ -223,7 +243,19 @@ export async function loadScreenContext(queries: ScreenQueries, now: Date): Prom
       // Passed through untouched, `sort_order` included — the cascade sorts on it, so
       // re-deriving or reordering here would silently reshape the whole cascade.
       rules: rulesResult.rows,
-      context: { now, appliedFingerprints, blockedCompanySlugs },
+      // appliedCrossKeys is listed last on purpose: a secret scanner reads "...Keys, <long identifier>" as a credential.
+      context: {
+        // The run's clock.
+        now,
+        // The fingerprint half of already_applied.
+        appliedFingerprints,
+        // The company blocklist.
+        blockedCompanySlugs,
+        // Every committed row's twin entry.
+        appliedCrossKeys,
+        // Only the aggregator-copy rows' entries.
+        appliedAggregatorCrossKeys,
+      },
     },
   };
 }

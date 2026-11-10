@@ -65,8 +65,9 @@ function foldText(value: string): string {
     .trim();
 }
 
-// Company normalization: fold, then peel legal suffixes off the tail.
-function normalizeCompany(company: string): string {
+// Company normalization: fold, then peel legal suffixes off the tail. Exported since 2026-11-10 (T12): the remote scout
+// matches an aggregator's company to an ATS board with it (company_slug is a separate dash-joined slug, so it cannot).
+export function normalizeCompany(company: string): string {
   // Start from the folded token stream.
   const tokens = foldText(company).split(" ");
   // Peel from the end because "Zomato Pvt Ltd" carries two suffixes stacked.
@@ -116,6 +117,22 @@ export function canonicalJobKey(identity: JobIdentity): string {
     normalizeTitle(identity.title),
     normalizeLocation(identity.location),
   ].join("|");
+}
+
+/**
+ * THE CROSS-SOURCE KEY (2026-11-10, T12): one posting reached through an aggregator (Jobicy, RemoteOK, Arbeitnow) and
+ * through the employer's ATS. canonicalJobKey cannot see them as one: the feeds report a feed region ("Anywhere") and the
+ * ATS reports the board location ("Remote, Global"), so 257 live pairs sat as two rows each, 3 of them twice in the
+ * approval queue. NOT a replacement for the fingerprint (re-keying 36k rows is out; docs/status/2026-11-09-identity-drift.md).
+ *
+ * Location-free, and the title is folded WITHOUT normalizeTitle's bracket strip: a false twin DROPS a real job, and the
+ * live data showed "(New Grad 2027)", "(Spanish speaking)", "(L3)" and "(Fintech)" variants that are different roles.
+ * Measured on 2026-11-10: 240 of the 257 pairs match; the 17 lost are 8 distinct roles split correctly and ~9 true twins
+ * whose bracket holds a place or "(Remote)" (a missed twin costs a duplicate, never a job).
+ */
+export function crossSourceKey(company: string, title: string): string {
+  // "|" cannot occur inside either part: foldText removed every non-alphanumeric character.
+  return `${normalizeCompany(company)}|${foldText(title)}`;
 }
 
 // Fixed-width digest of the canonical key, for the UNIQUE index in §9. Async

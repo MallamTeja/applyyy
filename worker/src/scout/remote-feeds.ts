@@ -7,8 +7,8 @@
 // WHY THIS FILE EXISTS (2026-10-24). scout-remote.ts used to build rows inline and wrote
 // them with none of the safety the ATS scout has: apply_url was stored unchecked (a
 // `javascript:` URL from a feed would be saved and later rendered), every row carried
-// posted_at_source 'unknown' (which FAILS the screener's staleness rule, so every remote
-// job would have been dropped once screened), and an unparseable date threw away the
+// posted_at_source 'unknown' (which then FAILED the screener's staleness rule, so every remote
+// job was dropped once screened; that rule itself was retired in 8ba2b06, W10, 2026-11-10), and an unparseable date threw away the
 // whole feed. Each of those is decided here now, once, and tested.
 
 // The shared apply-URL and text readers, so remote rows pass the same http(s) gate as ATS rows (d153a2a).
@@ -300,7 +300,8 @@ function detectEmploymentType(title: string): EmploymentType {
   return 'unknown';
 }
 
-// URL-safe company slug, as before: the blocklist and weekly cap join on it.
+// URL-safe company slug, as before: the blocklist joins on it (the weekly cap that also did was retired, W10 2026-11-10).
+// NOT the ATS board's slug: the twin lookup in remote-run.ts matches companies through normalizeCompany instead (T12).
 function slugify(name: string): string {
   // Lower-case, collapse non-alphanumerics to dashes, trim edge dashes.
   return name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
@@ -313,8 +314,9 @@ async function remoteRow(job: RemoteJob, now: Date, firstSeenAt: Date): Promise<
   // Which ATS the apply URL points at.
   const atsProvider = detectAtsProvider(job.applyUrl);
   // The shared extractor. isFirstPollOfBoard is FALSE on purpose: a feed lists only its newest
-  // postings, so "first seen" is sound, and the cold-start guard's `unknown` would FAIL the
-  // screener's staleness rule for every undated remote job (the bug the old CLI shipped).
+  // postings, so "first seen" is sound, and the cold-start guard's `unknown` once FAILED the
+  // screener's staleness rule for every undated remote job (the bug the old CLI shipped; the rule is retired since W10,
+  // 2026-11-10, so today this only keeps posted_at honest).
   const { postedAt: posted_at, postedAtSource: posted_at_source } = extractPostedAt({ source: "remote_feed", published: job.published }, { now, firstSeenAt, isFirstPollOfBoard: false });
   // The per-source sighting record.
   const sourceRef: JobSourceRef = {
@@ -339,7 +341,7 @@ async function remoteRow(job: RemoteJob, now: Date, firstSeenAt: Date): Promise<
     title: job.title,
     // The company as the feed spelled it; remote feeds have no watchlist spelling to prefer.
     company_name: job.company,
-    // What the blocklist and the weekly cap join on.
+    // What the blocklist joins on (the weekly cap was retired, W10 2026-11-10).
     company_slug: slugify(job.company),
     // Kept verbatim, so a location parse bug is diagnosable against what arrived.
     location_raw: job.location,

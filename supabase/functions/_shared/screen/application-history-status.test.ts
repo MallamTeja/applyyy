@@ -53,6 +53,8 @@ const EXPECTED_COMMITTED = [
 function fakeClient(rowsForApplications: Array<Record<string, unknown>> = APPLICATION_ROWS) {
   // Every `.in()` call, so the test can assert the exact predicate sent.
   const inCalls: Array<[string, readonly string[]]> = [];
+  // Every column list passed to select(), so a test can pin what the join reads.
+  const selectColumns: string[] = [];
   // The client itself; other tables answer empty so only history is under test.
   const client = {
     from(table: string) {
@@ -61,7 +63,9 @@ function fakeClient(rowsForApplications: Array<Record<string, unknown>> = APPLIC
       return {
         // `options` is read because the history read asks for `{ count: "exact" }` to
         // detect a max_rows cut; supabase-js answers count null when it was not asked.
-        select: (_columns: string, options?: { count?: string }) =>
+        select: (columns: string, options?: { count?: string }) =>
+          // Recorded first (the comma expression), then the builder is returned as before.
+          (selectColumns.push(columns),
           // A real Promise (awaitable, like the builder) with `.in()` bolted on.
           Object.assign(Promise.resolve({ data: rows, error: null, count: options?.count === "exact" ? rows.length : null }), {
             in(column: string, values: readonly string[]) {
@@ -73,12 +77,12 @@ function fakeClient(rowsForApplications: Array<Record<string, unknown>> = APPLIC
               // fixtures stay under 1000 rows, so count equals data.length (a complete read).
               return Promise.resolve({ data: kept, error: null, count: options?.count === "exact" ? kept.length : null });
             },
-          }),
+          })),
       };
     },
   };
   // Both halves: the client for the code, the recorder for the assertions.
-  return { client, inCalls };
+  return { client, inCalls, selectColumns };
 }
 
 // Case A: only committed rows reach already_applied.
@@ -137,3 +141,30 @@ test("a failed row counts as applied only if it was ever approved", async () => 
 
 // (The "weekly cap is windowed on COMMIT time" cases (a)-(d) lived here. They tested only
 // the per-company weekly count, removed 2026-11-10 with the cap — Teja: "remove it".)
+
+// T12: the twin entry needs the job's company and title, so the history join must read both.
+test("T12: the history select reads the job's company_name and title", async () => {
+  // A fresh recorder.
+  const { client, selectColumns } = fakeClient();
+  // Only the history read touches `applications`.
+  await supabaseQueries.supabaseScreenQueries(client, NOW).applicationHistory();
+  // The exact column list, the positive shape, so a dropped column is a named failure.
+  // ats_provider joined in fix round 1: it decides which rows reach the aggregator set.
+  assert.deepEqual(selectColumns, ["status, approved_at, applied_at, jobs(fingerprint, company_slug, company_name, title, ats_provider)"]);
+});
+
+// T12 end to end through the adapter: the nested job's name and title reach the cross-source set.
+test("T12: a committed row's company and title reach the cross-source set through the adapter", async () => {
+  // One applied row carrying the two new join columns.
+  const { client } = fakeClient([
+    { status: "applied", approved_at: TODAY, jobs: { fingerprint: "fp-ats", company_slug: "acme", company_name: "Acme Inc", title: "Software Engineer" } },
+  ]);
+  // The full production path minus the network.
+  const result = await loadScreenContext(supabaseQueries.supabaseScreenQueries(client, NOW), NOW);
+  // A load failure would make the next assertion meaningless.
+  assert.equal(result.ok, true);
+  // Narrow the union.
+  if (!result.ok) return;
+  // Exactly one entry, so the adapter mapped both columns rather than dropping them.
+  assert.equal(result.value.context.appliedCrossKeys.size, 1);
+});

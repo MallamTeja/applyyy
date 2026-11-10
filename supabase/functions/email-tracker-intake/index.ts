@@ -396,8 +396,11 @@ Deno.serve(async (request: Request): Promise<Response> => {
 
   // Event rows for the upsert. Built by the pure, node-tested mapper (decide.ts): the
   // inline map it replaces silently dropped thread_id for two weeks because no test
-  // could see it (2026-10-23).
-  const rowsToInsert: (EmailEventInsert & Record<string, unknown>)[] = decided.map(({ message, decision, matchedApplicationId }) =>
+  // could see it (2026-10-23). Plain EmailEventInsert[] since 2026-11-10 (W20): the old
+  // `& Record<string, unknown>` let any misspelled column through the type checker. The callback's
+  // return type is annotated too: a literal returned from an un-annotated callback is inferred, and
+  // inferred types skip the excess-property check, so an inline extra/misspelled column would pass.
+  const rowsToInsert: EmailEventInsert[] = decided.map(({ message, decision, matchedApplicationId }): EmailEventInsert =>
     emailEventRowOf(message, decision, matchedApplicationId, processedAtTimestamp)
   );
 

@@ -1,7 +1,7 @@
 // The Supabase adapter behind the Screener's four reads.
 //
 // WHY THIS IS SEPARATE FROM `context.ts`: that module owns the POLICY — what counts as
-// a failure, how the trailing week is computed, which error message an operator sees.
+// a failure, which history rows become the already-applied sets, which error message an operator sees.
 // This one owns the PLUMBING. Keeping them apart is what lets every policy decision be
 // tested under `node --test`, where no Supabase client can be constructed at all.
 //
@@ -19,8 +19,8 @@ import type { ApplicationStatus, FilterRuleRow } from "../contracts/shared-types
 //
 // EVERYTHING BEFORE `approved` IS PIPELINE-ONLY. `applications` holds every discovered
 // job, including the very row being screened (at `deduped`) and every row the filters
-// dropped. Counting those as history made a row its own already_applied duplicate and
-// charged every dropped posting against the weekly cap as if it had been sent.
+// dropped. Counting those as history made a row its own already_applied duplicate (and,
+// until the weekly cap was retired on 2026-11-10, charged every dropped posting against it).
 //
 // `failed` IS INCLUDED, BUT NOT ALONE. The graph has failed → needs_verification →
 // applied, so a failed row may already have been submitted. But `failed` is ALSO reached
@@ -103,7 +103,20 @@ interface HistoryRow {
   readonly approved_at: string | null;
   // Stamped only on entering `applied`: the precise moment of submission.
   readonly applied_at: string | null;
-  readonly jobs: { readonly fingerprint: string; readonly company_slug: string } | null;
+  // The joined job. company_name and title feed the cross-source set (T12); null-typed because a join row is data,
+  // and the loader's twinOf refuses a null part rather than folding it to an empty entry.
+  readonly jobs: {
+    // The location-bearing identity: the fingerprint half of already_applied.
+    readonly fingerprint: string;
+    // Still selected and flattened; the loader no longer reads it (the weekly cap retired 2026-11-10).
+    readonly company_slug: string;
+    // The display name the twin entry folds.
+    readonly company_name: string | null;
+    // The board title the twin entry folds.
+    readonly title: string | null;
+    // 'other' marks an aggregator copy, which decides the aggregator set (fix round 1).
+    readonly ats_provider: string | null;
+  } | null;
 }
 
 // Normalise one postgrest response into the loader's result shape.
@@ -125,8 +138,8 @@ function toResult<T>(response: QueryResponse, map: (rows: unknown[]) => readonly
 // Refuse a history page that is not the whole set; null means "complete, carry on".
 //
 // WHY: PostgREST cuts every read at max_rows (1000) WITHOUT an error. A user with 1001
-// committed applications would get 1000, and already_applied and the weekly cap would
-// UNDERCOUNT. That is a fail-open (CLAUDE.md §6). The server's exact count is compared to the rows
+// committed applications would get 1000, and already_applied would MISS the rest and
+// re-offer postings already applied to. That is a fail-open (CLAUDE.md §6). The server's exact count is compared to the rows
 // received, and any mismatch, or a missing count, is a named error rather than an answer.
 //
 // WHY NOT A `.range()` PAGE LOOP: paging needs a stable `.order()`, and a row inserted or
@@ -193,24 +206,27 @@ export function supabaseScreenQueries(client: { from(table: string): unknown }, 
       );
     },
 
-    // One join serving two rules. Selecting the job's fingerprint and slug alongside the
-    // application's commit stamps means already_applied and the weekly cap are derived
-    // from the same rows and cannot disagree with each other. Only COMMITTED rows are
+    // One join serving both halves of already_applied. Selecting the job's fingerprint AND its
+    // company name and title from the same rows means the fingerprint set and the cross-source
+    // set (T12) describe one history and cannot disagree with each other. Only COMMITTED rows are
     // read, and the status predicate is server-side so pipeline rows never eat into
     // max_rows. One exception: a pre-approval `failed` passes `.in()` and is dropped in
-    // JS below, so it still costs a row of the cap (live count 0 today). Moving it
+    // JS below, so it still costs one of the max_rows (live count 0 today). Moving it
     // server-side needs `.or()` on the port, which re-triggers the TS2589 fixed above.
-    // `created_at` is NOT read: it is discovery time, and the cap counts commitments.
+    // `created_at` is NOT read: it is discovery time, and already_applied is not windowed at all.
     applicationHistory(): Promise<ScreenQueryResult<ApplicationHistoryRow>> {
       return Promise.resolve(
         // The join the cascade needs, narrowed by Postgres to committed statuses.
         // `status, approved_at` ride along so a pre-approval `failed` can be dropped below;
-        // `applied_at, approved_at` are the commit stamps the weekly window runs on.
+        // `applied_at` rides along to build `committed_at`, which no rule reads since the weekly
+        // cap was retired (2026-11-10); the loader's row type still carries it.
         // `count: "exact"` makes PostgREST report the TOTAL rows matching this filter, so
         // the one page can be proven complete (see `checkComplete`).
         db
           .from("applications")
-          .select("status, approved_at, applied_at, jobs(fingerprint, company_slug)", { count: "exact" })
+          // company_name and title joined 2026-11-10 (T12): the location-free twin of an applied job. ats_provider
+          // says whether that job was an aggregator copy, which a cross-source match requires on one side.
+          .select("status, approved_at, applied_at, jobs(fingerprint, company_slug, company_name, title, ats_provider)", { count: "exact" })
           .in("status", COMMITTED_STATUSES),
       ).then(
         (response) =>
@@ -231,6 +247,12 @@ export function supabaseScreenQueries(client: { from(table: string): unknown }, 
               .map((row) => ({
                 fingerprint: row.jobs.fingerprint,
                 company_slug: row.jobs.company_slug,
+                // `?? null` turns a field the response omitted into the null the loader refuses, never undefined.
+                company_name: row.jobs.company_name ?? null,
+                // Same: an absent title is no title, so the row adds no twin entry.
+                title: row.jobs.title ?? null,
+                // Absent reads as null: not an aggregator copy, the direction that can only miss a twin.
+                ats_provider: row.jobs.ats_provider ?? null,
                 // The coalesce lives HERE, beside the column names, so the loader's row
                 // type says only "when committed". Applied is the later, precise event;
                 // approved covers rows not yet submitted. `?? null` turns an absent

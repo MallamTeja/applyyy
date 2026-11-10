@@ -13,6 +13,8 @@ import assert from "node:assert/strict";
 import { screenJob, type ScreenableJob, type ScreenContext } from "./cascade.ts";
 // Row shapes from the schema owner.
 import type { FilterRuleRow, FilterRuleType, Json } from "../contracts/shared-types.ts";
+// The production twin key, so the tests build the cross-source set exactly as the loader does.
+import { crossSourceKey } from "../normalize/fingerprint.ts";
 
 // A fixed clock, so "posted 3 days ago" is assertable rather than flaky at midnight.
 const NOW = new Date("2026-09-10T12:00:00.000Z");
@@ -21,6 +23,10 @@ const NOW = new Date("2026-09-10T12:00:00.000Z");
 const BASE_JOB: ScreenableJob = {
   title: "Backend Engineering Intern",
   companySlug: "zomato",
+  // The display name the cross-source check folds (required since T12).
+  companyName: "Zomato",
+  // An ATS row by default, so a test that needs an aggregator copy has to ask for one.
+  isAggregatorCopy: false,
   locations: ["bangalore"],
   locationRaw: "Bengaluru, India",
   employmentType: "internship",
@@ -35,6 +41,10 @@ const BASE_JOB: ScreenableJob = {
 const BASE_CONTEXT: ScreenContext = {
   now: NOW,
   appliedFingerprints: new Set(),
+  // No twin of an applied job either, so the cross-source check passes by default.
+  appliedCrossKeys: new Set(),
+  // Nor an applied aggregator copy, so the ATS-side half of the check passes by default too.
+  appliedAggregatorCrossKeys: new Set(),
   blockedCompanySlugs: new Set(),
 };
 
@@ -323,6 +333,65 @@ test("an unknown employment type is not dropped", () => {
 test("a fingerprint already in history is dropped", () => {
   // This posting has been applied to.
   const result = screen([rule("already_applied", {})], {}, { appliedFingerprints: new Set(["fp-clean"]) });
+  assert.equal(result.passed, false);
+});
+
+// T12: an aggregator copy (Jobicy, "Anywhere") and its ATS original (Greenhouse, "Remote, Global") carry
+// different fingerprints because the fingerprint includes location. The cross-source set is what sees them as one.
+test("T12: already_applied catches a twin of an applied ATS job (different fingerprint, same company and title)", () => {
+  // The ATS original was applied to; only its company and title reach the set, never its location.
+  const applied = new Set([crossSourceKey("Acme Inc", "Software Engineer (Backend)")]);
+  // The aggregator copy: its own fingerprint, which the fingerprint set has never seen.
+  // isAggregatorCopy: only an aggregator copy may match an ATS history row (fix round 1).
+  const result = screen([rule("already_applied", {})], { companyName: "Acme Inc", title: "Software Engineer (Backend)", fingerprint: "fp-jobicy", isAggregatorCopy: true }, { appliedCrossKeys: applied });
+  // Dropped, so no Gemini call is spent and no duplicate reaches the approval queue.
+  assert.equal(result.passed, false);
+  // Narrow the union for the reason check.
+  if (result.passed) return;
+  // The reason names the cross-source path and the pair, so the event says WHY a new fingerprint was dropped.
+  assert.equal(result.reason, "already applied to this posting via another source (Acme Inc | Software Engineer (Backend))");
+});
+
+// The other direction: a false twin DROPS a real job, so the same company with a different role must pass.
+test("T12: a same-company different-title job is not caught by the cross-source set", () => {
+  // Applied to the backend role at Acme.
+  const applied = new Set([crossSourceKey("Acme Inc", "Software Engineer (Backend)")]);
+  // The bracket is kept by the key, so the frontend role is a different posting.
+  // An aggregator copy, so the only thing keeping it alive is the title difference itself.
+  const result = screen([rule("already_applied", {})], { companyName: "Acme Inc", title: "Software Engineer (Frontend)", fingerprint: "fp-other", isAggregatorCopy: true }, { appliedCrossKeys: applied });
+  // Passed: a different role is a different job.
+  assert.equal(result.passed, true);
+});
+
+// THE OVER-REACH THIS PINS (review, fix round 1). Two ATS rows with one title at one employer are usually two
+// postings (another country, another req), which is exactly what the location-bearing fingerprint keeps apart.
+// History is never windowed, so a match here would drop every later "Software Engineer" there, forever.
+test("T12: an ATS job sharing company and title with an applied ATS job is NOT dropped (different location, different posting)", () => {
+  // An ATS application: it lands in the all-rows set, and NOT in the aggregator set.
+  const applied = new Set([crossSourceKey("Acme Inc", "Software Engineer")]);
+  // Another ATS posting, same company and title, another location and so another fingerprint.
+  const result = screen([rule("already_applied", {})], { companyName: "Acme Inc", title: "Software Engineer", fingerprint: "fp-ats-berlin", isAggregatorCopy: false }, { appliedCrossKeys: applied });
+  // Passed: neither side is an aggregator copy, so this is not a twin.
+  assert.equal(result.passed, true);
+});
+
+// Direction one of the two the check exists for: the aggregator copy arrives after the ATS original was applied to.
+test("T12: an aggregator copy of an applied ATS job is dropped", () => {
+  // The ATS application, in the all-rows set only.
+  const applied = new Set([crossSourceKey("Acme Inc", "Software Engineer")]);
+  // The Jobicy copy: aggregator, its own fingerprint.
+  const result = screen([rule("already_applied", {})], { companyName: "Acme Inc", title: "Software Engineer", fingerprint: "fp-jobicy", isAggregatorCopy: true }, { appliedCrossKeys: applied });
+  // Dropped: one side is an aggregator copy.
+  assert.equal(result.passed, false);
+});
+
+// Direction two: the aggregator copy was applied to first, and now the employer's own ATS posting arrives.
+test("T12: an ATS posting whose aggregator copy was applied to is dropped", () => {
+  // The applied aggregator copy sits in BOTH sets, as the loader builds them.
+  const twin = crossSourceKey("Acme Inc", "Software Engineer");
+  // The ATS original: not an aggregator copy itself, so only the aggregator set can catch it.
+  const result = screen([rule("already_applied", {})], { companyName: "Acme Inc", title: "Software Engineer", fingerprint: "fp-ats", isAggregatorCopy: false }, { appliedCrossKeys: new Set([twin]), appliedAggregatorCrossKeys: new Set([twin]) });
+  // Dropped: the applied side was the aggregator copy.
   assert.equal(result.passed, false);
 });
 

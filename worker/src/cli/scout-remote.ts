@@ -13,6 +13,8 @@
 import { createClient } from '@supabase/supabase-js';
 // The testable run.
 import { runRemoteScout } from '../scout/remote-run.ts';
+// The agent-key header the database checks (T12, 2026-11-10): the duplicate sweep advances rows as scout_aggregator.
+import { AGENT_KEY_ENV_VAR, agentKeyHeaders } from '../../../supabase/functions/_shared/db/agent-key.ts';
 
 // A required env var, or a clear error naming it.
 function required(name: string): string {
@@ -43,7 +45,14 @@ async function main(): Promise<void> {
   // The kill-switch override, read the same two ways as scout.ts.
   const force = process.argv.includes('--force') || process.env.SCOUT_FORCE === 'true';
   // The project and the app user's credentials.
-  const client = createClient(required('SUPABASE_URL'), required('SUPABASE_ANON_KEY'), { auth: { persistSession: false, autoRefreshToken: false } });
+  const client = createClient(required('SUPABASE_URL'), required('SUPABASE_ANON_KEY'), {
+    // The duplicate sweep (T12, 2026-11-10) advances aggregator copies as scout_aggregator, which the database refuses
+    // without the agent key (fail-closed since 20261102210000). From the APPLYY_AGENT_KEY Actions secret, the same form as
+    // cli/apply.ts; unset means no header, so the forward inserts still work and only the sweep is refused (and reported).
+    global: { headers: agentKeyHeaders(process.env[AGENT_KEY_ENV_VAR]) },
+    // A runner has no browser storage and is thrown away after the run: never persist or refresh a session.
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
   // Sign in, so every read and write is the app user's under RLS.
   const auth = await client.auth.signInWithPassword({ email: required('APPLYY_APP_USER_EMAIL'), password: required('APPLYY_APP_USER_PASSWORD') });
   // No session: nothing can be read or written honestly.
