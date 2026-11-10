@@ -33,7 +33,7 @@ import type { FilterRuleRow, FilterRuleType, Json, PostedAtSource } from "../con
 export interface ScreenableJob {
   // Matched against the title blocklist.
   readonly title: string;
-  // Joined against the company blocklist and the weekly cap.
+  // Joined against the company blocklist (the weekly cap that also read it was retired 2026-11-10).
   readonly companySlug: string;
   // Parsed locations, matched against the allowlist.
   readonly locations: readonly string[];
@@ -67,8 +67,8 @@ export interface ScreenContext {
   readonly appliedFingerprints: ReadonlySet<string>;
   // Company slugs currently blocked.
   readonly blockedCompanySlugs: ReadonlySet<string>;
-  // Applications sent per company in the trailing week, for the per-company cap.
-  readonly applicationsThisWeekByCompany: ReadonlyMap<string, number>;
+  // (applicationsThisWeekByCompany was here, for the per-company weekly cap: removed 2026-11-10 with that rule, so no
+  // code path can count applications per company again. See retiredRule.)
 }
 
 // The verdict on one job.
@@ -136,9 +136,6 @@ function configStringList(config: Json, key: string): readonly string[] | null {
   // Keep genuine non-empty strings, folded for case-insensitive matching.
   return raw.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "").map((entry) => entry.trim().toLowerCase());
 }
-
-// Milliseconds in a day, named so the staleness arithmetic reads as intent.
-const MS_PER_DAY = 86_400_000;
 
 // --- the rules ------------------------------------------------------------------
 //
@@ -272,37 +269,18 @@ function companyBlocklist(job: ScreenableJob, _config: Json, context: ScreenCont
     : { drop: false };
 }
 
-// Posted more than N days ago. The §13 rule, and the one with the subtle case.
-function staleness(job: ScreenableJob, config: Json, context: ScreenContext): RuleVerdict {
-  // The window is a setting.
-  const windowDays = configNumber(config, "window_days");
-  // No window configured: report rather than invent three days.
-  if (windowDays === null) return { drop: false, warning: "staleness has no window_days configured" };
-  // THE UNKNOWN CASE, AND IT IS A SETTING RATHER THAN A BURIED CONSTANT.
-  // `posted_at_source = 'unknown'` has exactly ONE cause — the cold-start guard,
-  // meaning "this board is not yet trusted". It NEVER means a parse failure.
-  // It FAILS the staleness check rather than bypassing it, so a new board's entire
-  // back catalogue is excluded rather than waved through as fresh.
-  if (job.postedAtSource === "unknown") {
-    // Default false: exclude. Overridable, because it is a policy Teja may want to
-    // relax when seeding a large watchlist and accepting the quota cost knowingly.
-    const treatAsFresh = configBoolean(config, "treat_unknown_posted_at_as_fresh", false);
-    // Honour the setting in both directions.
-    return treatAsFresh ? { drop: false } : { drop: true, reason: "posting date is unknown (board not yet trusted)" };
-  }
-  // Parse the stored date.
-  const posted = Date.parse(job.postedAt);
-  // An unparseable stored date is our bug, not the job's fault, so it must not drop
-  // the job silently — it is reported instead. The value is board-supplied and this warning
-  // lands in agent_runs.error_detail, whose segments split on "; " and " | " (run-summary.ts);
-  // JSON.stringify quotes and escapes it so a hostile date cannot forge a separator.
-  if (Number.isNaN(posted)) return { drop: false, warning: `job has an unparseable posted_at ${JSON.stringify(job.postedAt)}` };
-  // How old it is, in days.
-  const ageInDays = (context.now.getTime() - posted) / MS_PER_DAY;
-  // Drop only when genuinely outside the window.
-  return ageInDays > windowDays
-    ? { drop: true, reason: `posted ${Math.floor(ageInDays)} days ago, window is ${windowDays}` }
-    : { drop: false };
+// RETIRED RULES: staleness (job age) and per_company_weekly_cap. Teja, 2026-11-10 11:31 IST: the cap "remove it"; age
+// "dont ever skip even though they are 1 mon 2 mont old". Both used to drop: staleness by posted_at against window_days,
+// and EVERY posted_at_source = 'unknown' job by default; the cap by a trailing-week count per company. Now neither can
+// drop or warn, whatever a live row's config says.
+// Why a no-drop function and not a deleted key: Postgres cannot drop an enum value, so 'staleness' and
+// 'per_company_weekly_cap' stay in filter_rule_type, and RULE_IMPLEMENTATIONS below is keyed by that enum (a missing
+// key is a compile error, by design). The rows are deleted and the seed no longer creates them (migration
+// 20261110120000); this function is the code-side guarantee for any row that survives or comes back.
+// No warning either: an unconfigured live row would otherwise put one warning per job into agent_runs.error_detail.
+function retiredRule(): RuleVerdict {
+  // Never a drop, never a warning.
+  return { drop: false };
 }
 
 // The JD requires a Master's or PhD.
@@ -321,22 +299,6 @@ function degreeMismatch(job: ScreenableJob, config: Json): RuleVerdict {
   return { drop: true, reason: "JD requires an advanced degree" };
 }
 
-// Max N applications per company per week. §18.5: five in a week from one candidate
-// is a visible negative in most ATSs.
-function perCompanyWeeklyCap(job: ScreenableJob, config: Json, context: ScreenContext): RuleVerdict {
-  // The cap is a setting.
-  const maxPerWeek = configNumber(config, "max_per_week");
-  // Unconfigured: report rather than invent two.
-  if (maxPerWeek === null) return { drop: false, warning: "per_company_weekly_cap has no max_per_week configured" };
-  // How many have already gone to this company this week. Absent means none.
-  const sentThisWeek = context.applicationsThisWeekByCompany.get(job.companySlug) ?? 0;
-  // `>=` NOT `>`: the cap is the number of applications ALLOWED, so at the cap the
-  // next one is the one too many. An off-by-one here sends three when Teja set two.
-  return sentThisWeek >= maxPerWeek
-    ? { drop: true, reason: `${sentThisWeek} applications to "${job.companySlug}" this week, cap is ${maxPerWeek}` }
-    : { drop: false };
-}
-
 // The rule table. Keyed by the enum so a new `FilterRuleType` is a compile error here
 // until it has an implementation — which is what stops a rule existing in the database
 // and silently doing nothing.
@@ -347,9 +309,11 @@ const RULE_IMPLEMENTATIONS: Readonly<Record<FilterRuleType, (job: ScreenableJob,
   employment_type: employmentType,
   already_applied: alreadyApplied,
   company_blocklist: companyBlocklist,
-  staleness: staleness,
+  // Retired 2026-11-10 (Teja): age never skips a job. Kept as a key because the enum value cannot be dropped.
+  staleness: retiredRule,
   degree_mismatch: degreeMismatch,
-  per_company_weekly_cap: perCompanyWeeklyCap,
+  // Retired 2026-11-10 (Teja): no per-company cap. Kept as a key because the enum value cannot be dropped.
+  per_company_weekly_cap: retiredRule,
 };
 
 // Run the cascade over one job.
@@ -360,7 +324,7 @@ const RULE_IMPLEMENTATIONS: Readonly<Record<FilterRuleType, (job: ScreenableJob,
 // that consequently never happens, three times over.
 export function screenJob(job: ScreenableJob, rules: readonly FilterRuleRow[], context: ScreenContext): ScreenOutcome {
   // Misconfigurations accumulate rather than aborting: a broken rule must be visible
-  // without stopping the other eight from protecting the quota.
+  // without stopping the other live rules (seven since the two retirements of 2026-11-10) from protecting the quota.
   const warnings: string[] = [];
   // ORDER COMES FROM THE DATABASE. `sort_order` is the cascade's shape, so re-ordering
   // the cheap tests ahead of the expensive ones is a settings change, not a deploy.

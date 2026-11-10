@@ -151,14 +151,14 @@ export interface SystemSettingsRow {
   gemini_calls_today: number;
   /** The date `gemini_calls_today` refers to, so the reset is data-driven and needs no cron. */
   gemini_budget_date: string;
-  /** Section 18.5 — at most this many applications to one company in a rolling week. */
-  max_applications_per_company_per_week: number;
   /** The Actions-minutes ceiling expressed as a number, ~35/day. NULL = no daily limit (P1-6, 2026-11-05). */
   max_applications_per_day: number | null;
   /** P1-6 (2026-11-05): approving a job starts the applier (dispatch-apply). Default false. */
   auto_apply_on_approve: boolean;
-  /** The freshness window in days. A setting, not a constant, because supply trades directly against it. */
-  freshness_window_days: number;
+  // RETIRED 2026-11-10 (migration 20261110120000): `max_applications_per_company_per_week`
+  // and `freshness_window_days` were dropped. Teja ruled "remove it" on the per-company
+  // weekly cap and "dont ever skip even though they are 1 mon 2 mont old" on job age;
+  // neither column had a reader. Do not re-add them without a new ruling.
   /** How long a claim is held before the sweeper may reclaim it. */
   claim_lease_seconds: number;
   created_at: string;
@@ -242,7 +242,7 @@ export interface JobRow {
   title: Untrusted;
   /** UNTRUSTED — comes from the board. */
   company_name: Untrusted;
-  /** Lower-cased, punctuation-stripped company name. What the blocklist and the per-company weekly cap actually join on. */
+  /** Lower-cased, punctuation-stripped company name. What the blocklist actually joins on (the per-company weekly cap did too, until it was retired 2026-11-10). */
   company_slug: string;
   /** UNTRUSTED — the board's own location string, kept verbatim for debugging the parse. */
   location_raw: Untrusted | null;
@@ -297,9 +297,12 @@ export interface JobRow {
    * string, epoch 0, missing field, unparseable prose) resolves to `derived` via
    * first_seen_at. Assuming `unknown` signals a bad parse will get you the wrong filter.
    *
-   * `unknown` FAILS the staleness check rather than bypassing it, so a cold-start
+   * Until 2026-11-10, `unknown` FAILED the staleness check rather than bypassing it, so a cold-start
    * board's back catalogue is excluded rather than waved through. That policy is a
    * setting: `filter_rules.config.treat_unknown_posted_at_as_fresh`, default false.
+   * RETIRED 2026-11-10: the staleness rule is inert (Teja: job age never skips a job),
+   * so this config key no longer decides anything. The enum value stays because
+   * Postgres cannot drop enum values.
    *
    * On a board's first poll only `derived` degrades to `unknown` — a genuine `exact`
    * date from Lever or Ashby stays `exact`, because the cold-start bug lives entirely
@@ -999,7 +1002,7 @@ export interface CompanyWatchlistRow {
   /** The board token the ATS API wants, e.g. the company slug in the Greenhouse URL. */
   board_token: string;
   company_name: string;
-  /** Normalised name, so the blocklist and the weekly cap can join against jobs. */
+  /** Normalised name, so the blocklist can join against jobs (the weekly cap did too, until it was retired 2026-11-10). */
   company_slug: string;
   enabled: boolean;
   /** How many times this board has been polled to completion. Zero means never. */
@@ -1014,7 +1017,8 @@ export interface CompanyWatchlistRow {
    * GENERATED COLUMN: `poll_count >= 1`.
    *
    * False means everything found on this board must be stored with
-   * posted_at_source = 'unknown' and excluded from the freshness filter. Generated
+   * posted_at_source = 'unknown' (which the freshness/staleness filter excluded until that rule was retired
+   * 2026-11-10; today it only labels the date's confidence). Generated
    * rather than computed by callers so the answer is already on the row — a peer
    * cannot forget to work it out.
    */

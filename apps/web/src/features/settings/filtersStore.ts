@@ -3,7 +3,8 @@
  * Implements the Filter Cascade (PROJECT_PLAN.md section 8):
  * - Evaluates rules cheapest-first (short-circuit)
  * - Restricts jobs to Tech & Software Engineering roles
- * - Enforces title blocklist, location allowlist, experience ceiling, and staleness
+ * - Enforces title blocklist, location allowlist, and experience ceiling (staleness and the
+ *   per-company weekly cap were retired 2026-11-10: see RETIRED_FILTER_RULE_TYPES)
  * - Persists configuration to Supabase `public.filter_rules` + localStorage cache
  */
 
@@ -23,6 +24,19 @@ export interface FilterRuleConfig {
 // SDE" preset: both wrote 2 until 2026-11-04 20:35 IST, while migration 20261104193000 had set the
 // live rule to 1, so a single preset click would have let every "2+ years" job back in.
 export const EARLY_CAREER_MAX_YEARS = 1;
+
+/* Rule types retired from the web on 2026-11-10 (Teja, 11:31 IST). The per-company weekly cap: "remove
+ * it". Job age: "dont ever skip even though they are 1 mon 2 mont old". The keys stay in
+ * FILTER_RULE_TYPES because Postgres cannot drop an enum value; this list is what keeps them out of
+ * load, save and the Filters page. Without it, load refilled them from the defaults after the
+ * migration deleted the live rows, and the next save wrote them back enabled with thresholds. */
+export const RETIRED_FILTER_RULE_TYPES: readonly FilterRuleType[] = ['staleness', 'per_company_weekly_cap'];
+
+// One predicate for every skip below, so load, save and the page cannot disagree on what is retired.
+export function isRetiredFilterRuleType(ruleType: FilterRuleType): boolean {
+  // A plain membership test over the two-entry list.
+  return RETIRED_FILTER_RULE_TYPES.includes(ruleType);
+}
 
 export const DEFAULT_FILTER_RULES: readonly FilterRuleConfig[] = [
   {
@@ -73,19 +87,9 @@ export const DEFAULT_FILTER_RULES: readonly FilterRuleConfig[] = [
     config: {},
   },
   {
-    ruleType: 'staleness',
-    isEnabled: true,
-    config: { window_days: 7 },
-  },
-  {
     ruleType: 'degree_mismatch',
     isEnabled: true,
     config: {},
-  },
-  {
-    ruleType: 'per_company_weekly_cap',
-    isEnabled: true,
-    config: { max_per_week: 3 },
   },
 ];
 
@@ -212,6 +216,8 @@ export async function loadFilterRules(
 
   // Cache first; it is this browser's last save.
   for (const r of localRules) {
+    // A cache written before 2026-11-10 can still hold a retired rule; never show it.
+    if (isRetiredFilterRuleType(r.ruleType)) continue;
     // One entry per rule type.
     ruleMap.set(r.ruleType, r);
   }
@@ -242,6 +248,8 @@ export async function loadFilterRules(
         for (const row of data) {
           // The stored enum value.
           const rType = row.rule_type as FilterRuleType;
+          // A retired row still stored (before the migration deletes it) is skipped, not shown.
+          if (isRetiredFilterRuleType(rType)) continue;
           ruleMap.set(rType, {
             ruleType: rType,
             // `enabled`, NOT `is_enabled`. The column is declared `enabled` at
@@ -295,8 +303,12 @@ export async function saveFilterRules(
     };
   }
 
+  // Retired types are dropped here, the one function every save crosses, so a tab loaded before
+  // 2026-11-10 (or any stale state) cannot write staleness or the weekly cap back enabled.
+  const liveRules = rules.filter((r) => !isRetiredFilterRuleType(r.ruleType));
+
   // Cache first so the Discovered page sees the change even if the remote write fails.
-  writeCachedFilterRules(rules);
+  writeCachedFilterRules(liveRules);
 
   // Remote sync only when a backend exists.
   if (client !== null) {
@@ -305,7 +317,8 @@ export async function saveFilterRules(
       const userId = userData?.user?.id;
 
       let sortOrder = 0;
-      for (const rule of rules) {
+      // Only the live rules: the retired ones were filtered out above.
+      for (const rule of liveRules) {
         sortOrder += 10;
         const payload = {
           rule_type: rule.ruleType,

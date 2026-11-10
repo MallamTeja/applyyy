@@ -56,7 +56,7 @@ export type PortResult<T> =
 //
 // A PROJECTION RATHER THAN `SystemSettingsRow` ON PURPOSE: it documents exactly what
 // the runtime depends on, so adding a dependency is a visible edit here. It also keeps
-// every test fixture a five-field literal instead of a twelve-column row.
+// every test fixture a three-field literal instead of a full-width row.
 export interface SettingsSnapshot {
   // THE KILL SWITCH (§18.1). Defaults FALSE in the schema so a fresh deploy cannot
   // start submitting.
@@ -66,10 +66,8 @@ export interface SettingsSnapshot {
   // NULL = uncapped. The only number in the schema permitted to stop work — and note
   // it is a HUMAN-SET budget, not a guess about Google's quota (§18.2, and rule 5).
   readonly geminiDailyCallBudget: number | null;
-  // §18.5's knob. The count itself is always derived by query, never stored.
-  readonly maxApplicationsPerCompanyPerWeek: number;
-  // §13's window, in days.
-  readonly freshnessWindowDays: number;
+  // §18.5's per-company weekly cap and §13's freshness window were removed 2026-11-10:
+  // Teja retired both rulings and migration 20261110120000 drops their columns.
 }
 
 // What `sweep_stale_claims()` returned.
@@ -193,9 +191,8 @@ export interface ScreenPort {
   // Fingerprints already in the application history — a cheap pre-check ahead of the
   // `UNIQUE(user_id, job_id)` constraint, which remains the real guarantee.
   loadAppliedFingerprints(): Promise<PortResult<ReadonlySet<string>>>;
-  // Applications sent per company in the trailing week, for §18.5's cap. DERIVED BY
-  // QUERY, never a stored counter: a `COUNT(*)` cannot drift from the rows it counts.
-  loadWeeklyApplicationCounts(): Promise<PortResult<ReadonlyMap<string, number>>>;
+  // (loadWeeklyApplicationCounts was here, for §18.5's per-company weekly cap. Removed 2026-11-10: Teja retired the cap
+  // ("remove it"), and the method had no caller and no real adapter, only the test fake.)
 }
 
 // One versioned, immutable master profile.

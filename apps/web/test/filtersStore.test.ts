@@ -16,10 +16,18 @@ import {
   DEFAULT_FILTER_RULES,
   evaluateJobMatch,
   isTechRole,
+  // Load/save under a fake client, for the retired-rules tests (2026-11-10).
+  loadFilterRules,
+  RETIRED_FILTER_RULE_TYPES,
   readCachedFilterRules,
+  saveFilterRules,
   writeCachedFilterRules,
 } from '../src/features/settings/filtersStore.ts';
+// The stale in-memory state in the save test is typed as the page holds it.
+import type { FilterRuleConfig } from '../src/features/settings/filtersStore.ts';
 import type { JobRow } from '../src/data/contract.ts';
+// Type-only: the fake client is cast to the real client type once.
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 // Mock localStorage for node test runner
 const mockStorage: Record<string, string> = {};
@@ -226,7 +234,8 @@ test('evaluateJobMatch passes clean entry-level tech jobs', () => {
 test('filter rules read and write cache operates correctly', () => {
   localStorage.clear();
   const rules = readCachedFilterRules();
-  assert.equal(rules.length, 9);
+  // 7, not 9: staleness and per_company_weekly_cap were retired from the defaults (Teja, 2026-11-10).
+  assert.equal(rules.length, 7);
 
   writeCachedFilterRules([
     {
@@ -239,4 +248,102 @@ test('filter rules read and write cache operates correctly', () => {
   const updated = readCachedFilterRules();
   assert.equal(updated.length, 1);
   assert.equal(updated[0]?.isEnabled, false);
+});
+
+/* Retired rules (Teja, 2026-11-10 11:31 IST): the per-company weekly cap ("remove it") and job age
+ * ("dont ever skip even though they are 1 mon 2 mont old"). A migration deletes the 2 live rows; these
+ * tests guard the web half, where load used to refill them from the defaults and the next save wrote
+ * them back enabled, silently re-enabling both. */
+
+// The two rule types that must never come back through load or save.
+const RETIRED = ['staleness', 'per_company_weekly_cap'];
+
+// Same shape as storeReadErrorBlocksSave.test.ts's fake, but it keeps every upsert payload so the
+// test can say WHICH rule types were written, not only how many.
+function fakeClient(read: { data: unknown; error: { message: string } | null }) {
+  // Every rule_type the save tried to write, in order.
+  const written: string[] = [];
+  // Only the calls the store makes: from().select().order() and from().upsert().
+  const client = {
+    from: () => ({
+      // Read path resolves to the canned answer.
+      select: () => ({ order: async () => read }),
+      // Write path records the rule type, then succeeds.
+      upsert: async (payload: { rule_type: string }) => {
+        written.push(payload.rule_type);
+        return { error: null };
+      },
+    }),
+    // saveFilterRules asks who is signed in before writing.
+    auth: { getUser: async () => ({ data: { user: { id: 'u1' } } }) },
+  };
+  // Cast once: the fake implements only what the store calls.
+  return { client: client as unknown as SupabaseClient, written };
+}
+
+test('loadFilterRules over rows missing staleness and per_company_weekly_cap yields neither, and saving that state writes neither', async () => {
+  // Empty cache, so the defaults are the only possible source of the retired rows.
+  localStorage.clear();
+  // The post-migration database: stored rows exist, none of the retired types.
+  const { client, written } = fakeClient({
+    data: [{ rule_type: 'experience_ceiling', enabled: true, config: { max_years: 1 } }],
+    error: null,
+  });
+  // Load through the fake.
+  const rules = await loadFilterRules(client);
+  // Neither retired type was filled in from the defaults.
+  assert.deepEqual(rules.filter((r) => RETIRED.includes(r.ruleType)).map((r) => r.ruleType), []);
+  // Saving exactly what was loaded must not write a retired type back.
+  const res = await saveFilterRules(rules, client);
+  // The save itself succeeded.
+  assert.equal(res.ok, true);
+  // And no upsert named a retired type.
+  assert.deepEqual(written.filter((t) => RETIRED.includes(t)), []);
+});
+
+test('loadFilterRules drops stored live rows of the retired types instead of passing them through', async () => {
+  // Empty cache, so only the remote rows matter.
+  localStorage.clear();
+  // The pre-migration database: both retired rows still stored, enabled.
+  const { client } = fakeClient({
+    data: [
+      { rule_type: 'staleness', enabled: true, config: { window_days: 7 } },
+      { rule_type: 'per_company_weekly_cap', enabled: true, config: { max_per_week: 3 } },
+    ],
+    error: null,
+  });
+  // Load through the fake.
+  const rules = await loadFilterRules(client);
+  // The stored rows were skipped, not shown.
+  assert.deepEqual(rules.filter((r) => RETIRED.includes(r.ruleType)).map((r) => r.ruleType), []);
+});
+
+test('saveFilterRules never writes a retired type, even when a stale in-memory state still holds one', async () => {
+  // Cache clear; the save writes it, so start from nothing.
+  localStorage.clear();
+  // A successful read first, so the save is not blocked by an old read error.
+  const { client, written } = fakeClient({ data: [], error: null });
+  // Clears lastReadError.
+  await loadFilterRules(client);
+  // An open tab from before the retirement still holds both rules.
+  const stale: FilterRuleConfig[] = [
+    { ruleType: 'staleness', isEnabled: true, config: { window_days: 7 } },
+    { ruleType: 'experience_ceiling', isEnabled: true, config: { max_years: 1 } },
+    { ruleType: 'per_company_weekly_cap', isEnabled: true, config: { max_per_week: 3 } },
+  ];
+  // Save that state.
+  const res = await saveFilterRules(stale, client);
+  // The save still succeeds for the live rule.
+  assert.equal(res.ok, true);
+  // Only the live rule reached the database.
+  assert.deepEqual(written, ['experience_ceiling']);
+  // And the local cache did not keep the retired ones either.
+  assert.deepEqual(readCachedFilterRules().map((r) => r.ruleType), ['experience_ceiling']);
+});
+
+test('RETIRED_FILTER_RULE_TYPES names exactly the two retired rules, and the defaults carry neither', () => {
+  // The exported list is the one place the page and the store read from.
+  assert.deepEqual([...RETIRED_FILTER_RULE_TYPES].sort(), [...RETIRED].sort());
+  // No default refills them.
+  assert.deepEqual(DEFAULT_FILTER_RULES.filter((r) => RETIRED.includes(r.ruleType)), []);
 });

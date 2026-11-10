@@ -6,12 +6,13 @@
 // four things it cannot fetch itself. This is that something, and it is kept narrow so
 // the impurity lives in one place both scouts share.
 //
-// THE FAILURE THAT MATTERS, and it is not a crash. Three of the nine rules —
-// already_applied, company_blocklist, per_company_weekly_cap — read nothing from the job
-// row; they read this context and nothing else. So if a query fails and this function
-// hands back an empty context anyway, those three rules return drop:false for every job,
-// forever, and the cascade reports a clean pass. No error, no warning, no log line. A
-// third of the screener stops working and every observable signal says it is fine.
+// THE FAILURE THAT MATTERS, and it is not a crash. Two of the rules — already_applied and
+// company_blocklist — read nothing from the job row; they read this context and nothing
+// else. So if a query fails and this function hands back an empty context anyway, those
+// rules return drop:false for every job, forever, and the cascade reports a clean pass. No
+// error, no warning, no log line. Part of the screener stops working and every observable
+// signal says it is fine. (A third such rule, per_company_weekly_cap, was retired on
+// 2026-11-10 — Teja: "remove it" — so this context no longer carries a weekly count.)
 //
 // Hence the rule this module is built around: AN ERROR AND AN EMPTY TABLE ARE DIFFERENT
 // THINGS AND MUST NEVER COLLAPSE INTO EACH OTHER. An empty table is a legitimate and
@@ -44,13 +45,15 @@ export interface ScreenQueryResult<T> {
 export interface ApplicationHistoryRow {
   // Feeds already_applied.
   readonly fingerprint: string;
-  // Feeds the per-company weekly cap.
+  // Fed the per-company weekly cap, retired 2026-11-10. Still in the row because the query
+  // adapter (supabase-queries.ts) still selects it; the loader no longer reads it.
   readonly company_slug: string;
   // WHEN TEJA COMMITTED: `applied_at ?? approved_at`, coalesced by the adapter that knows
   // the columns. Decides whether this one falls inside the trailing week. RENAMED from
   // `created_at` (2026-10-08): that column is DISCOVERY time, and windowing on it let a
-  // job found last month and approved today escape this week's cap. Null when neither
-  // stamp exists, which the loader counts as this week (fail closed).
+  // job found last month and approved today escape this week's cap. UNREAD since 2026-11-10:
+  // the cap it windowed is retired, and already_applied is not windowed at all. Kept in the
+  // type only because the query adapter still returns it.
   readonly committed_at: string | null;
 }
 
@@ -61,9 +64,8 @@ export interface ApplicationHistoryRow {
 // `node --test`, so a module that reaches for one directly is a module whose failure
 // handling is untestable — and the failure handling is the entire point here.
 //
-// FOUR CALLS SERVING FIVE NEEDS: applied fingerprints and weekly counts both come from
-// the application history, so one round trip serves both rules. Two separate queries
-// could also disagree with each other, which this cannot. The fourth call is stage 0's
+// FOUR CALLS: the application history now serves only applied fingerprints (it also fed
+// the weekly counts until the cap was retired on 2026-11-10). The fourth call is stage 0's
 // config, which is not part of the cascade at all.
 export interface ScreenQueries {
   // The cascade's rules, thresholds and ORDER. Nothing is hardcoded — §8 says every row
@@ -72,7 +74,7 @@ export interface ScreenQueries {
   // Slugs currently blocked.
   blockedCompanies(): Promise<ScreenQueryResult<{ readonly company_slug: string }>>;
   // Every application Teja has COMMITTED to (a committed status; a `failed` row only if
-  // it was ever approved), with enough detail to serve both dependent rules.
+  // it was ever approved), with the fingerprint already_applied needs.
   applicationHistory(): Promise<ScreenQueryResult<ApplicationHistoryRow>>;
   // Stage 0's config. Teja's decision of 2026-09-17 put the tech definition in these
   // existing columns rather than in a new FilterRuleType, so the gate reads them
@@ -114,25 +116,8 @@ export type LoadResult =
   | { readonly ok: true; readonly value: LoadedScreenContext }
   | { readonly ok: false; readonly reason: string };
 
-// Seven days, named so the window arithmetic reads as intent rather than as a magic
-// number. §18.5's cap is explicitly per WEEK.
-const TRAILING_WINDOW_MS = 7 * 86_400_000;
-
-// The shape PostgREST serialises a timestamptz in: date, `T`, time, optional fraction,
-// then `Z` or a ±hh:mm offset. Checked BEFORE `Date.parse` because that parser is
-// lenient: `Date.parse("-5")` is year −5, which would read as "long ago" and quietly
-// drop a row out of the cap's window. No strict ISO helper existed in `_shared`.
-const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$/;
-
-// Epoch ms for a well-formed timestamp, or null for anything else.
-function strictTimestampMs(value: string | null): number | null {
-  // Not a string, or not the expected shape: we don't know when it was.
-  if (typeof value !== "string" || !ISO_TIMESTAMP.test(value)) return null;
-  // The right shape can still be an impossible date (month 13); NaN catches that.
-  const ms = Date.parse(value);
-  // Only a finite instant is an answer.
-  return Number.isFinite(ms) ? ms : null;
-}
+// (TRAILING_WINDOW_MS and the strict ISO timestamp check lived here. They existed only to
+// window the per-company weekly count, removed 2026-11-10 with the cap — Teja: "remove it".)
 
 // The usable entries of a stored country list, or null when there are none. An EMPTY list is
 // read as "never set", not "nowhere": the Settings page saves null for an empty box, so an
@@ -161,8 +146,9 @@ export function remoteLocationPolicy(value: unknown): RemoteLocationPolicy {
 
 // Fetch everything the cascade needs that is not on the job row.
 //
-// The clock is INJECTED rather than read here, so the trailing-week boundary is
-// assertable rather than flaky — the same reason the cascade takes `now` in its context.
+// The clock is INJECTED rather than read here and passed straight into the context, for
+// the same reason the cascade takes `now`: so any time-based rule is assertable rather
+// than flaky.
 export async function loadScreenContext(queries: ScreenQueries, now: Date): Promise<LoadResult> {
   // Four independent reads, issued together rather than in sequence: none depends on
   // another, and a scout polling forty boards should not pay four serial round trips
@@ -200,27 +186,14 @@ export async function loadScreenContext(queries: ScreenQueries, now: Date): Prom
   // Every fingerprint ever applied to. NOT windowed: already_applied must remember
   // forever, or the cascade would re-offer a posting Teja applied to last month.
   const appliedFingerprints = new Set<string>();
-  // Only the trailing week, per company. Windowed, because the cap is a RATE.
-  const applicationsThisWeekByCompany = new Map<string, number>();
-  // The boundary, computed once from the injected clock.
-  const windowStart = now.getTime() - TRAILING_WINDOW_MS;
+  // NO PER-COMPANY WEEKLY COUNT IS BUILT HERE ANY MORE. The cap that read it was retired on
+  // 2026-11-10 (Teja: "remove it"), and ScreenContext dropped the field, so counting would
+  // be dead work. context.test.ts pins the exact key set so it cannot creep back.
 
-  // One pass serves both structures.
+  // One pass over the history.
   for (const row of historyResult.rows) {
     // Unconditional: applying is permanent regardless of when it happened.
     appliedFingerprints.add(row.fingerprint);
-    // The commit instant, or null when it is missing or not a real timestamp.
-    const committedAt = strictTimestampMs(row.committed_at);
-    // A MISSING OR MALFORMED COMMIT TIME COUNTS AS THIS WEEK — fail closed. The two
-    // errors are not symmetric: an unstamped row never ages out, so it over-counts that
-    // company EVERY week (reachable only via a legacy or hand-edited row: the guard
-    // stamps approved_at on the only road into a committed status); under-counting lets
-    // the cap be blown past. So only a provably old
-    // commitment leaves the window.
-    // Outside the window: it still counts as applied, just not against this week.
-    if (committedAt !== null && committedAt < windowStart) continue;
-    // Inside the window: increment this company's tally.
-    applicationsThisWeekByCompany.set(row.company_slug, (applicationsThisWeekByCompany.get(row.company_slug) ?? 0) + 1);
   }
 
   // NO PREFERENCES ROW IS A NORMAL STATE, NOT A FAILURE — the bootstrap that would
@@ -250,7 +223,7 @@ export async function loadScreenContext(queries: ScreenQueries, now: Date): Prom
       // Passed through untouched, `sort_order` included — the cascade sorts on it, so
       // re-deriving or reordering here would silently reshape the whole cascade.
       rules: rulesResult.rows,
-      context: { now, appliedFingerprints, blockedCompanySlugs, applicationsThisWeekByCompany },
+      context: { now, appliedFingerprints, blockedCompanySlugs },
     },
   };
 }

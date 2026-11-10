@@ -31,12 +31,11 @@ const BASE_JOB: ScreenableJob = {
   fingerprint: "fp-clean",
 };
 
-// An empty context: nothing applied to, nothing blocked, no weekly usage.
+// An empty context: nothing applied to, nothing blocked.
 const BASE_CONTEXT: ScreenContext = {
   now: NOW,
   appliedFingerprints: new Set(),
   blockedCompanySlugs: new Set(),
-  applicationsThisWeekByCompany: new Map(),
 };
 
 // Build one enabled rule row. `sort_order` defaults to 0 because most tests run a
@@ -65,19 +64,20 @@ function screen(rules: FilterRuleRow[], jobOverrides: Partial<ScreenableJob> = {
 // The economic point of the whole module: a job rejected by the cheap title check
 // never has its description examined and never reaches the Matcher.
 test("the first matching rule short-circuits and later rules do not run", () => {
-  // Title blocks first (sort_order 1); staleness would also drop it (sort_order 2).
+  // Title blocks first (sort_order 1); the experience ceiling would also drop it (sort_order 2). Was staleness until
+  // that rule was retired (2026-11-10), when it stopped dropping anything.
   const result = screen(
     [
       rule("title_blocklist", { blocked_titles: ["senior"] }, 1),
-      rule("staleness", { window_days: 3 }, 2),
+      rule("experience_ceiling", { max_years: 1 }, 2),
     ],
-    { title: "Senior Backend Engineer", postedAt: "2020-01-01T00:00:00.000Z" },
+    { title: "Senior Backend Engineer", minExperienceYears: "5" },
   );
   // Dropped.
   assert.equal(result.passed, false);
   if (result.passed) return;
-  // BY THE TITLE RULE, not by staleness. If the cascade evaluated everything and
-  // reported the last match, this would say `staleness` — and the saving the cascade
+  // BY THE TITLE RULE, not by the experience ceiling. If the cascade evaluated everything and
+  // reported the last match, this would say `experience_ceiling` — and the saving the cascade
   // exists for would not be happening.
   assert.equal(result.ruleType, "title_blocklist");
 });
@@ -85,13 +85,13 @@ test("the first matching rule short-circuits and later rules do not run", () => 
 // The evaluation order is a setting, so re-ordering the cheap tests ahead of the
 // expensive ones is a settings change rather than a deploy.
 test("evaluation order comes from sort_order, not from array position", () => {
-  // Staleness is listed FIRST in the array but ordered SECOND.
+  // The experience ceiling is listed FIRST in the array but ordered SECOND.
   const result = screen(
     [
-      rule("staleness", { window_days: 3 }, 20),
+      rule("experience_ceiling", { max_years: 1 }, 20),
       rule("title_blocklist", { blocked_titles: ["senior"] }, 10),
     ],
-    { title: "Senior Backend Engineer", postedAt: "2020-01-01T00:00:00.000Z" },
+    { title: "Senior Backend Engineer", minExperienceYears: "5" },
   );
   // Dropped.
   assert.equal(result.passed, false);
@@ -104,7 +104,7 @@ test("evaluation order comes from sort_order, not from array position", () => {
 // kind of side effect that surfaces three modules away.
 test("the caller's rule array is not reordered in place", () => {
   // Two rules in a deliberately non-sorted order.
-  const rules = [rule("staleness", { window_days: 3 }, 20), rule("title_blocklist", { blocked_titles: ["senior"] }, 10)];
+  const rules = [rule("experience_ceiling", { max_years: 1 }, 20), rule("title_blocklist", { blocked_titles: ["senior"] }, 10)];
   // Remember the original first element.
   const firstBefore = rules[0];
   // Run.
@@ -336,65 +336,6 @@ test("a blocklisted company is dropped", () => {
   assert.match(result.reason, /zomato/);
 });
 
-// --- staleness, and its one subtle case -------------------------------------------
-
-test("staleness drops a posting older than the configured window", () => {
-  // Ten days old against a three-day window.
-  const result = screen([rule("staleness", { window_days: 3 })], { postedAt: "2026-08-31T12:00:00.000Z" });
-  assert.equal(result.passed, false);
-  if (result.passed) return;
-  assert.match(result.reason, /window is 3/);
-});
-
-// A job inside the window is the whole point of the pipeline.
-test("staleness admits a fresh posting", () => {
-  // One day old.
-  assert.equal(screen([rule("staleness", { window_days: 3 })], { postedAt: "2026-09-09T12:00:00.000Z" }).passed, true);
-});
-
-// `unknown` has exactly ONE cause — the cold-start guard, meaning "this board is not
-// yet trusted". It FAILS the check rather than bypassing it, so a new board's back
-// catalogue is excluded rather than waved through as fresh.
-test("an unknown posting date fails the staleness check by default", () => {
-  // Recent by the stored date, but the confidence says do not believe it.
-  const result = screen([rule("staleness", { window_days: 3 })], { postedAtSource: "unknown" });
-  // Dropped.
-  assert.equal(result.passed, false);
-  if (result.passed) return;
-  assert.match(result.reason, /not yet trusted/);
-});
-
-// The policy is a SETTING rather than a buried constant, because Teja may want to
-// relax it while seeding a large watchlist and accept the quota cost knowingly.
-test("treat_unknown_posted_at_as_fresh flips that decision when set", () => {
-  // Same job, opposite setting.
-  const result = screen([rule("staleness", { window_days: 3, treat_unknown_posted_at_as_fresh: true })], { postedAtSource: "unknown" });
-  // Now admitted.
-  assert.equal(result.passed, true);
-});
-
-// An unparseable stored date is OUR bug, not the job's fault, so it must be reported
-// rather than silently costing the job.
-test("an unparseable stored posted_at warns rather than dropping", () => {
-  // Junk in the column.
-  const result = screen([rule("staleness", { window_days: 3 })], { postedAt: "not-a-date" });
-  // Kept.
-  assert.equal(result.passed, true);
-  // And reported.
-  assert.equal(result.warnings.length, 1);
-});
-
-// The warning lands in agent_runs.error_detail, whose segments are split on "; " and
-// " | ". A board-supplied date carrying those separators must not forge extra segments.
-test("an unparseable posted_at is JSON-quoted in its warning so separators stay inert", () => {
-  // Both separators run-summary.ts uses, plus a fake label, inside one hostile value.
-  const hostile = '"; x: | y';
-  // Not a date, so the staleness rule reaches the warning branch.
-  const result = screen([rule("staleness", { window_days: 3 })], { postedAt: hostile });
-  // JSON.stringify escapes the embedded quote, so the value stays one string literal.
-  assert.ok((result.warnings[0] ?? "").includes(JSON.stringify(hostile)), result.warnings[0]);
-});
-
 // --- degree mismatch ---------------------------------------------------------------
 
 test("degree mismatch drops a JD requiring an advanced degree", () => {
@@ -418,33 +359,33 @@ test("degree mismatch stops dropping once the candidate has an advanced degree",
   assert.equal(screen([rule("degree_mismatch", { candidate_has_advanced_degree: true })], { requiresAdvancedDegree: true }).passed, true);
 });
 
-// --- per-company weekly cap ---------------------------------------------------------
+// --- retired rules: staleness and the per-company weekly cap ----------------------
+//
+// Teja, 2026-11-10 11:31 IST: the weekly cap "remove it"; job age "dont ever skip even though they are 1 mon 2 mont old".
+// The enum keys stay (Postgres cannot drop an enum value, and RULE_IMPLEMENTATIONS is keyed by the enum), so a live
+// row of either type must be inert: never a drop, never a warning, whatever its config says.
 
-// §18.5: five in a week from one candidate is a visible negative in most ATSs.
-test("the per-company cap drops once the weekly count reaches the limit", () => {
-  // Two already sent, cap is two.
-  const result = screen([rule("per_company_weekly_cap", { max_per_week: 2 })], {}, {
-    applicationsThisWeekByCompany: new Map([["zomato", 2]]),
-  });
-  // Dropped.
-  assert.equal(result.passed, false);
+test("retired rules (Teja 2026-11-10): a 60-day-old job and a 5th same-company job both PASS", () => {
+  // Both retired rules ENABLED with the strictest thresholds the old code honoured, and a context carrying the old
+  // weekly-count field (cast: the field is gone from ScreenContext), so a reverted evaluator drops for the real reason.
+  const rules = [rule("staleness", { window_days: 3 }, 1), rule("per_company_weekly_cap", { max_per_week: 2 }, 2)];
+  // Four already sent to zomato this week: this job would be the 5th.
+  const oldContext = { applicationsThisWeekByCompany: new Map([["zomato", 4]]) } as unknown as Partial<ScreenContext>;
+  // 60 days before NOW (2026-09-10), from a trusted date.
+  const sixtyDaysOld = screen(rules, { postedAt: "2026-07-12T12:00:00.000Z" }, oldContext);
+  // Passes, with nothing to report: the positive shape, so a drop OR a stray warning both fail here.
+  assert.deepEqual([sixtyDaysOld.passed, sixtyDaysOld.warnings], [true, []]);
+  // The cold-start case the old staleness rule dropped by default: an untrusted posting date.
+  const unknownDate = screen(rules, { postedAtSource: "unknown" }, oldContext);
+  // Also kept: age is never a reason to skip.
+  assert.deepEqual([unknownDate.passed, unknownDate.warnings], [true, []]);
 });
 
-// `>=` NOT `>`. The cap is the number ALLOWED, so at the cap the next one is the one
-// too many — an off-by-one here sends three when Teja set two.
-test("the per-company cap admits the application that reaches but does not exceed the limit", () => {
-  // One already sent, cap is two, so this is the second and is allowed.
-  const result = screen([rule("per_company_weekly_cap", { max_per_week: 2 })], {}, {
-    applicationsThisWeekByCompany: new Map([["zomato", 1]]),
-  });
-  // Allowed.
-  assert.equal(result.passed, true);
-});
-
-// A company with no history this week must not be treated as being at the cap.
-test("a company with no applications this week is not capped", () => {
-  // Nothing recorded.
-  assert.equal(screen([rule("per_company_weekly_cap", { max_per_week: 2 })]).passed, true);
+test("retired rules stay inert with no config or a junk date: no warning floods agent_runs", () => {
+  // Unconfigured live rows (the 2 seeded rows today) used to warn on every job; junk dates used to warn too.
+  const result = screen([rule("staleness", {}, 1), rule("per_company_weekly_cap", {}, 2)], { postedAt: "not-a-date" });
+  // Kept, silently.
+  assert.deepEqual([result.passed, result.warnings], [true, []]);
 });
 
 // --- the whole cascade together -----------------------------------------------------

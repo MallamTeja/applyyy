@@ -75,7 +75,7 @@ export async function checkKillSwitch(port: RunPort): Promise<KillSwitchVerdict>
   // THE DELIBERATE STOP. Checked last of the three so a genuine off-switch is never
   // misreported as a configuration problem.
   if (!result.value.systemEnabled) return { allowed: false, reason: "disabled", detail: null };
-  // Permitted. The settings travel with the verdict so the caller has the budget, the
-  // dry-run flag and the freshness window without a second query.
+  // Permitted. The settings travel with the verdict so the caller has the budget and
+  // the dry-run flag without a second query.
   return { allowed: true, settings: result.value };
 }

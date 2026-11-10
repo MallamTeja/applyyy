@@ -79,7 +79,7 @@ export interface FakePortOptions {
   // Screening context.
   readonly blockedCompanySlugs?: readonly string[];
   readonly appliedFingerprints?: readonly string[];
-  readonly weeklyCounts?: Readonly<Record<string, number>>;
+  // (weeklyCounts removed 2026-11-10 with loadWeeklyApplicationCounts: the per-company cap is retired.)
   // Master profiles by version, plus which version is latest.
   readonly masters?: readonly MasterSnapshot[];
   // Queued Gemini answers, consumed in order — one per `generate` call, so a test can
@@ -264,13 +264,6 @@ export function makeFakePort(options: FakePortOptions = {}): FakePort {
       record("loadAppliedFingerprints");
       // Same wrapping.
       return Promise.resolve({ ok: true, value: new Set(options.appliedFingerprints ?? []) });
-    },
-    // The per-company weekly counts behind §18.5's cap.
-    loadWeeklyApplicationCounts(): Promise<PortResult<ReadonlyMap<string, number>>> {
-      // Recorded.
-      record("loadWeeklyApplicationCounts");
-      // Converted to a Map, exactly as the real adapter does.
-      return Promise.resolve({ ok: true, value: new Map(Object.entries(options.weeklyCounts ?? {})) });
     },
 
     // ---- MasterPort ---------------------------------------------------------------

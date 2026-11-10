@@ -27,8 +27,6 @@ const ENABLED: SettingsSnapshot = {
   systemEnabled: true,
   dryRun: true,
   geminiDailyCallBudget: null,
-  maxApplicationsPerCompanyPerWeek: 2,
-  freshnessWindowDays: 3,
 };
 
 // Three claimable rows, so "the loop stopped early" is distinguishable from "the loop

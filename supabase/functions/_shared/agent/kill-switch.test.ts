@@ -20,8 +20,6 @@ const ENABLED: SettingsSnapshot = {
   systemEnabled: true,
   dryRun: true,
   geminiDailyCallBudget: null,
-  maxApplicationsPerCompanyPerWeek: 2,
-  freshnessWindowDays: 3,
 };
 
 // NON-VACUITY TWIN, and it comes first deliberately: a guard that refuses everything
@@ -35,7 +33,9 @@ test("an enabled system is allowed to proceed, and carries its settings forward"
   // Allowed.
   assert.equal(verdict.allowed, true);
   // And the settings are handed back, so the caller does not read them twice.
-  assert.equal(verdict.allowed === true && verdict.settings.freshnessWindowDays, 3);
+  // dryRun is the sentinel now that freshnessWindowDays is retired (2026-11-10): any
+  // field that only the fixture sets proves the same row came back.
+  assert.equal(verdict.allowed === true && verdict.settings.dryRun, true);
 });
 
 test("system_enabled = false halts the agent", async () => {

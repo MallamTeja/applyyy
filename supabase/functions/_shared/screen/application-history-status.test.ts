@@ -3,11 +3,12 @@
 // THE BUG THESE PIN. `applications` holds every pipeline row, not just submitted ones:
 // the very row being screened sits there at `deduped`. An unfiltered history read put
 // that row into its own applied-set (already_applied would drop it) and counted every
-// discovered/dropped row toward the weekly cap as if it had been sent. The read was
+// discovered/dropped row toward the weekly cap as if it had been sent (that cap was
+// retired on 2026-11-10; the applied-set half of the bug still matters). The read was
 // also truncated by PostgREST's max_rows, so the filter must run SERVER-side — these
 // tests therefore check both the outcome and the exact predicate sent to the server.
 import { test } from "node:test";
-// Strict, so a missing Map entry (undefined) never compares equal to a number.
+// Strict, so a missing value never quietly compares equal to an expected one.
 import assert from "node:assert/strict";
 // The loader, so the assertion is on what the cascade actually receives.
 import { loadScreenContext } from "./context.ts";
@@ -15,9 +16,9 @@ import { loadScreenContext } from "./context.ts";
 // assertion rather than breaking module linking before any test runs.
 import * as supabaseQueries from "./supabase-queries.ts";
 
-// A fixed clock, so "created today" is inside the trailing week by construction.
+// A fixed clock, so the adapter and loader see one deterministic instant.
 const NOW = new Date("2026-09-17T12:00:00.000Z");
-// Same day as NOW, so every canned row would count toward this week's cap if kept.
+// Same day as NOW, so recency can never be the reason a canned row is excluded.
 const TODAY = "2026-09-17T08:00:00.000Z";
 
 // The canned `applications` rows: one per side of the committed/pipeline line.
@@ -26,7 +27,7 @@ const APPLICATION_ROWS = [
   { status: "deduped", created_at: TODAY, jobs: { fingerprint: "fp-self", company_slug: "acme" } },
   // A genuine submission. The only row that should reach the cascade.
   { status: "applied", created_at: TODAY, jobs: { fingerprint: "fp-applied", company_slug: "acme" } },
-  // A screened-out row. Never sent, so it must not count toward the cap.
+  // A screened-out row. Never sent, so it must not count as applied.
   { status: "dropped_filter", created_at: TODAY, jobs: { fingerprint: "fp-dropped", company_slug: "acme" } },
 ];
 
@@ -80,8 +81,8 @@ function fakeClient(rowsForApplications: Array<Record<string, unknown>> = APPLIC
   return { client, inCalls };
 }
 
-// Case A: only committed rows reach already_applied and the weekly cap.
-test("history excludes pipeline-only rows from applied fingerprints and the weekly cap", async () => {
+// Case A: only committed rows reach already_applied.
+test("history excludes pipeline-only rows from applied fingerprints", async () => {
   // Build the real adapter over the fake, then run the real loader.
   const { client } = fakeClient();
   // The full production path minus the network.
@@ -96,8 +97,6 @@ test("history excludes pipeline-only rows from applied fingerprints and the week
   assert.equal(result.value.context.appliedFingerprints.has("fp-self"), false);
   // A dropped row was never applied to.
   assert.equal(result.value.context.appliedFingerprints.has("fp-dropped"), false);
-  // Exactly one application was SENT to acme this week, not three.
-  assert.equal(result.value.context.applicationsThisWeekByCompany.get("acme"), 1);
 });
 
 // Case B: the predicate is sent to the server, on `status`, with exactly the 11 members.
@@ -117,7 +116,7 @@ test("history filters server-side on status with exactly the committed statuses"
 // not mean "sent". `approved_at` is stamped only on entering `approved`, which makes it
 // the witness: never approved → never sent; approved → may have been sent.
 test("a failed row counts as applied only if it was ever approved", async () => {
-  // One row per side of the approved_at line, on separate companies so the cap is per-row.
+  // One row per side of the approved_at line, on separate companies so each is attributable.
   const { client } = fakeClient([
     // Failed in the pipeline, never approved: provably never submitted.
     { status: "failed", approved_at: null, created_at: TODAY, jobs: { fingerprint: "fp-failed-early", company_slug: "early" } },
@@ -130,60 +129,11 @@ test("a failed row counts as applied only if it was ever approved", async () => 
   assert.equal(result.ok, true);
   // Narrow the union for the compiler; the assert above already guarantees it.
   if (!result.ok) return;
-  // Never approved: not an application, so it must not block a re-offer...
+  // Never approved: not an application, so it must not block a re-offer.
   assert.equal(result.value.context.appliedFingerprints.has("fp-failed-early"), false);
-  // ...and must not be charged against its company's weekly cap.
-  assert.equal(result.value.context.applicationsThisWeekByCompany.get("early"), undefined);
   // Approved, then failed: possibly submitted, so it stays in the applied-set.
   assert.equal(result.value.context.appliedFingerprints.has("fp-failed-late"), true);
 });
 
-// --- the weekly cap is windowed on COMMIT time, not discovery time -------------------
-//
-// `created_at` is when the scout DISCOVERED the job. The cap limits how many applications
-// Teja SENDS per company per week, so it must window on applied_at ?? approved_at (both
-// stamped only by the status-transition trigger). A job discovered ten days ago and
-// approved today is this week's application.
-
-// Ten days before NOW: outside the trailing week by three days, so no boundary ambiguity.
-const TEN_DAYS_AGO = "2026-09-07T12:00:00.000Z";
-
-// Run one row through the real adapter and loader; return that company's weekly count.
-async function weeklyCountFor(row: Record<string, unknown>): Promise<number | undefined> {
-  // One row, company "co", so the count is attributable to this row alone.
-  const { client } = fakeClient([{ ...row, jobs: { fingerprint: "fp-co", company_slug: "co" } }]);
-  // The full production path minus the network.
-  const result = await loadScreenContext(supabaseQueries.supabaseScreenQueries(client, NOW), NOW);
-  // A load failure would make the count meaningless, so fail on it here.
-  assert.equal(result.ok, true);
-  // Narrow the union; undefined is never a valid count, so it cannot mask a failure.
-  return result.ok ? result.value.context.applicationsThisWeekByCompany.get("co") : undefined;
-}
-
-// (a) Discovered long ago, approved today: this week's commitment.
-test("a job discovered 10 days ago but approved today counts toward this week's cap", async () => {
-  // Only approved_at is set; applied_at is null because it is not submitted yet.
-  assert.equal(await weeklyCountFor({ status: "approved", created_at: TEN_DAYS_AGO, approved_at: TODAY, applied_at: null }), 1);
-});
-
-// (b) A committed row with no stamp at all: the commit time is unknown, so it counts.
-test("a committed row with neither approved_at nor applied_at counts toward the cap (fail closed)", async () => {
-  // Both stamps null on an `applied` row: not supposed to exist, so it must not escape the cap.
-  assert.equal(await weeklyCountFor({ status: "applied", created_at: TEN_DAYS_AGO, approved_at: null, applied_at: null }), 1);
-});
-
-// (c) The window still excludes genuinely old commitments.
-test("a job approved and applied 10 days ago does not count toward this week's cap", async () => {
-  // Both stamps old: a past week's application, so the cap must not charge it now.
-  assert.equal(
-    await weeklyCountFor({ status: "applied", created_at: TEN_DAYS_AGO, approved_at: TEN_DAYS_AGO, applied_at: TEN_DAYS_AGO }),
-    undefined,
-  );
-});
-
-// (d) A malformed stamp. `Date.parse("-5")` is year -5, which a lenient check would
-// call "long ago" and drop from the window; the shape check makes it count instead.
-test("a malformed commit stamp counts toward the cap rather than reading as long ago", async () => {
-  // "-5" parses (to year -5) but is not a timestamp; it must not leave the window.
-  assert.equal(await weeklyCountFor({ status: "approved", created_at: TEN_DAYS_AGO, approved_at: "-5", applied_at: null }), 1);
-});
+// (The "weekly cap is windowed on COMMIT time" cases (a)-(d) lived here. They tested only
+// the per-company weekly count, removed 2026-11-10 with the cap — Teja: "remove it".)

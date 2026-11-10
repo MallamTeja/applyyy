@@ -1,11 +1,11 @@
 // Tests for loading the Screener's database context.
 //
-// WHAT IS ACTUALLY AT RISK HERE, and it is not the happy path. Three of the nine
-// cascade rules — already_applied, company_blocklist, per_company_weekly_cap — read
-// nothing from the job row. They read this context. If a query fails and the loader
-// hands back an EMPTY context anyway, all three return drop:false for every job and the
-// cascade reports a clean pass. Nothing errors. Nothing warns. The screener appears to
-// work and silently stops enforcing a third of its rules.
+// WHAT IS ACTUALLY AT RISK HERE, and it is not the happy path. Two cascade rules —
+// already_applied and company_blocklist — read nothing from the job row. They read this
+// context. If a query fails and the loader hands back an EMPTY context anyway, both return
+// drop:false for every job and the cascade reports a clean pass. Nothing errors. Nothing
+// warns. The screener appears to work and silently stops enforcing those rules. (A third,
+// per_company_weekly_cap, was retired on 2026-11-10; its count is gone from the context.)
 //
 // That is the failure pattern this whole parcel exists to clean up — missing data
 // becoming an answer — so the loader must distinguish "no rows" from "the query
@@ -18,7 +18,7 @@ import { loadScreenContext, type ScreenQueries } from "./context.ts";
 // Row shapes from the schema owner.
 import type { FilterRuleRow } from "../contracts/shared-types.ts";
 
-// A fixed clock, so the trailing-week window is assertable rather than flaky.
+// A fixed clock, so the context's `now` is assertable rather than flaky.
 const NOW = new Date("2026-09-17T12:00:00.000Z");
 
 // One stored rule, to prove rules are passed through rather than re-derived.
@@ -62,18 +62,16 @@ test("blocked company slugs arrive as a set the cascade can test membership agai
   assert.equal(result.ok && result.value.context.blockedCompanySlugs.has("badcorp"), true);
 });
 
-// One query serves two rules. Application history carries both the fingerprint (for
-// already_applied) and the company slug plus a date (for the weekly cap), so deriving
-// both from a single round trip is cheaper and cannot let the two disagree.
-test("application history yields both applied fingerprints and weekly counts", async () => {
+// Application history carries the fingerprint already_applied needs; every committed row
+// lands in the applied-set.
+test("application history yields applied fingerprints", async () => {
   const result = await loadScreenContext(
     queries({
       applicationHistory: () =>
         Promise.resolve({
           rows: [
-            // Inside the trailing week, so it counts toward the cap.
-            // committed_at = applied_at ?? approved_at (renamed from created_at, which is
-            // discovery time). A null one now COUNTS: see application-history-status.test.ts.
+            // committed_at = applied_at ?? approved_at; the loader no longer reads it (the
+            // weekly cap it windowed is retired), but the row type still carries it.
             { fingerprint: "fp-old", company_slug: "zomato", committed_at: "2026-09-15T12:00:00.000Z" },
             { fingerprint: "fp-older", company_slug: "zomato", committed_at: "2026-09-16T12:00:00.000Z" },
           ],
@@ -82,13 +80,14 @@ test("application history yields both applied fingerprints and weekly counts", a
     }),
     NOW,
   );
+  // Both rows are remembered as applied.
   assert.equal(result.ok && result.value.context.appliedFingerprints.has("fp-old"), true);
-  assert.equal(result.ok && result.value.context.applicationsThisWeekByCompany.get("zomato"), 2);
+  assert.equal(result.ok && result.value.context.appliedFingerprints.has("fp-older"), true);
 });
 
-// The cap is a TRAILING-WEEK count, so an older application must still block a repeat
-// application (already_applied) without inflating this week's tally.
-test("an application older than a week counts as applied but not toward the weekly cap", async () => {
+// already_applied is NOT windowed, so an application from long ago must still block a
+// repeat application.
+test("an application older than a week still counts as applied", async () => {
   const result = await loadScreenContext(
     queries({
       applicationHistory: () =>
@@ -101,8 +100,29 @@ test("an application older than a week counts as applied but not toward the week
   );
   // Still remembered, because we genuinely did apply to it.
   assert.equal(result.ok && result.value.context.appliedFingerprints.has("fp-ancient"), true);
-  // But outside the window, so it must not consume this week's quota.
-  assert.equal(result.ok && result.value.context.applicationsThisWeekByCompany.get("zomato"), undefined);
+});
+
+// The retired cap must not creep back through the loader. Pinning the EXACT key set (a
+// positive shape) rather than asserting one key is absent means any new field is a
+// deliberate test edit, and putting applicationsThisWeekByCompany back turns this red.
+test("the screen context carries no per-company weekly count (the cap is retired, Teja 2026-11-10)", async () => {
+  // History with a row, so a resurrected count would have something to count.
+  const result = await loadScreenContext(
+    queries({
+      applicationHistory: () =>
+        Promise.resolve({
+          rows: [{ fingerprint: "fp-recent", company_slug: "zomato", committed_at: "2026-09-16T12:00:00.000Z" }],
+          error: null,
+        }),
+    }),
+    NOW,
+  );
+  // A load failure would make the key check meaningless.
+  assert.equal(result.ok, true);
+  // Narrow the union; the assert above already guarantees it.
+  if (!result.ok) return;
+  // Exactly these three keys, nothing else.
+  assert.deepEqual(Object.keys(result.value.context).sort(), ["appliedFingerprints", "blockedCompanySlugs", "now"]);
 });
 
 // --- the failures, which are the point --------------------------------------------
@@ -130,7 +150,7 @@ test("a failed blocklist query is reported, never treated as nothing blocked", a
   assert.match(!result.ok ? result.reason : "", /company_blocklist/);
 });
 
-// Same shape again for the history query, which backs two rules rather than one.
+// Same shape again for the history query, which backs already_applied (it also backed the weekly cap until 2026-11-10).
 test("a failed history query is reported, never treated as no history", async () => {
   const result = await loadScreenContext(
     queries({ applicationHistory: () => Promise.resolve({ rows: null, error: "timeout" }) }),
@@ -158,8 +178,8 @@ test("genuinely empty tables succeed with an empty context", async () => {
   assert.equal(result.ok && result.value.context.appliedFingerprints.size, 0);
 });
 
-// The clock is injected rather than read inside, so the trailing-week boundary is
-// assertable. This pins that the loader uses the clock it was given.
+// The clock is injected rather than read inside, so the context's `now` is assertable (the trailing-week boundary it
+// once fed went with the weekly cap, 2026-11-10). This pins that the loader uses the clock it was given.
 test("the injected clock is the one the context carries", async () => {
   const result = await loadScreenContext(queries(), NOW);
   assert.equal(result.ok && result.value.context.now.toISOString(), "2026-09-17T12:00:00.000Z");

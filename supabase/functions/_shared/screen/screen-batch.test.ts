@@ -22,7 +22,7 @@ import type { ScreenContext } from "../filter/cascade.ts";
 // Row shapes from the schema owner.
 import type { FilterRuleRow, Json, JobInsert } from "../contracts/shared-types.ts";
 
-// A fixed clock, so staleness assertions do not flake at midnight.
+// A fixed clock, so the context's `now` is deterministic (it fed the staleness rule until that rule was retired, 2026-11-10).
 const NOW = new Date("2026-09-17T12:00:00.000Z");
 
 // An ordinary row as `toJobInsert` emits it, so each test can break exactly one thing.
@@ -46,13 +46,12 @@ const BASE_ROW: JobInsert = {
   raw_payload: { id: 1 },
 };
 
-// Nothing applied to, nothing blocked, no weekly usage — so a test that wants one of
-// those effects has to ask for it explicitly.
+// Nothing applied to, nothing blocked — so a test that wants one of those effects has to
+// ask for it explicitly. (The weekly-usage Map left with the retired cap, 2026-11-10.)
 const BASE_CONTEXT: ScreenContext = {
   now: NOW,
   appliedFingerprints: new Set(),
   blockedCompanySlugs: new Set(),
-  applicationsThisWeekByCompany: new Map(),
 };
 
 // Build one enabled rule row with real config. `sort_order` defaults to 0 because most
@@ -356,31 +355,33 @@ test("an unclassified posting under an empty gate passes and surfaces a warning"
 // i.e. the planner carries no batch-accumulated state. Parity over the pure planner because
 // screener/index.ts imports jsr: and has no seam; the `?application_id=bad` -> 400 path is
 // left to a live smoke test.
-test("a one-entry plan equals that entry's verdict inside a batch, including a weekly-cap drop", () => {
-  // The cap counted from history (context.ts), never from the batch: 2 already this week.
-  const capContext: ScreenContext = { ...BASE_CONTEXT, applicationsThisWeekByCompany: new Map([["acme", 2]]) };
-  // Title blocklist first, then a cap of 2, so the two drops are attributable to different rules.
-  const rules = [TITLE_RULE, rule("per_company_weekly_cap", { max_per_week: 2 }, 10)];
-  // One pass, one title-rule drop, one cap drop.
+// The second drop used to be the weekly cap; that rule was retired 2026-11-10, so a
+// company-blocklist drop (also read from the context snapshot, never the row) stands in.
+test("a one-entry plan equals that entry's verdict inside a batch, including a context-driven drop", () => {
+  // The blocklist comes from the loaded context (context.ts), never from the batch.
+  const blockContext: ScreenContext = { ...BASE_CONTEXT, blockedCompanySlugs: new Set(["acme"]) };
+  // Title blocklist first, then the company blocklist, so the two drops are attributable to different rules.
+  const rules = [TITLE_RULE, rule("company_blocklist", {}, 10)];
+  // One pass, one title-rule drop, one blocklist drop.
   const entries = [
     // Survives both rules.
     { jobId: "pass-1", row: BASE_ROW },
     // Dropped by the title blocklist.
     { jobId: "title-1", row: { ...BASE_ROW, fingerprint: "fp-t", title: "Senior Backend Engineer" } },
-    // Dropped by the weekly cap: acme is already at 2 of 2 in the history snapshot.
+    // Dropped by the company blocklist: acme is blocked in the context snapshot.
     { jobId: "cap-1", row: { ...BASE_ROW, fingerprint: "fp-c", company_slug: "acme", company_name: "Acme" } },
   ];
   // The batch plan.
-  const batch = planScreenedApplications(entries, rules, capContext, OPEN_PREFS);
-  // Sanity: the fixture really exercises a pass, a rule drop and a cap drop.
+  const batch = planScreenedApplications(entries, rules, blockContext, OPEN_PREFS);
+  // Sanity: the fixture really exercises a pass, a rule drop and a context-driven drop.
   assert.deepEqual(
     batch.inserts.map((i) => i.drop_reason),
-    [null, "title_blocklist", "per_company_weekly_cap"],
+    [null, "title_blocklist", "company_blocklist"],
   );
   // Each entry alone, against the same context and rules.
   for (const [index, entry] of entries.entries()) {
     // The targeted mode's call shape.
-    const single = planScreenedApplications([entry], rules, capContext, OPEN_PREFS);
+    const single = planScreenedApplications([entry], rules, blockContext, OPEN_PREFS);
     // The persisted verdict (status + drop_reason) is identical.
     assert.deepEqual(single.inserts[0], batch.inserts[index]);
     // The run-summary prose is identical too, matched by job id.

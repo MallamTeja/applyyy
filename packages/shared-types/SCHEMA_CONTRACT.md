@@ -149,9 +149,10 @@ strict — and it fails at the place you add it, not where you learned it.**
 | `auto_apply_on_approve` | Default FALSE. When TRUE, approving a job starts the applier through `dispatch-apply` (`20261105140000_auto_apply_on_approve.sql`). |
 | `gemini_daily_call_budget` | Nullable. **NULL = uncapped.** The only number in the schema permitted to stop work. |
 | `gemini_calls_today` / `gemini_budget_date` | Self-resetting counter, **dated in US/Pacific** (§8.4). |
-| `max_applications_per_company_per_week` | Default 2. The knob only — the count is derived by query. |
+| ~~`max_applications_per_company_per_week`~~ | **Dropped 2026-11-10** (`20261110120000_retire_job_age_and_company_cap.sql`). Teja ruled "remove it": no per-company weekly cap. It had no reader. |
 | `max_applications_per_day` | **Nullable since `20261105140000`. NULL = no daily cap.** |
-| `freshness_window_days`, `claim_lease_seconds` | Operating limits. |
+| `claim_lease_seconds` | Operating limit. |
+| ~~`freshness_window_days`~~ | **Dropped 2026-11-10** (`20261110120000_retire_job_age_and_company_cap.sql`). Teja ruled job age never skips a job ("dont ever skip even though they are 1 mon 2 mont old"). It had no reader. |
 
 You do not need to check `system_enabled` yourself before claiming work —
 `claim_applications()` and `claim_gemini_key()` check it internally and return nothing
@@ -853,9 +854,14 @@ to `derived` via `first_seen_at`.
 No column type can express that, and a reader who assumes `unknown` signals a bad parse
 will write the wrong filter.
 
-`unknown` **fails** the staleness check rather than bypassing it. That policy is a
-setting, not a buried constant: `filter_rules.config.treat_unknown_posted_at_as_fresh`,
-default `false`.
+Until 2026-11-10, `unknown` **failed** the staleness check rather than bypassing it, through the
+setting `filter_rules.config.treat_unknown_posted_at_as_fresh` (default `false`). **Retired 2026-11-10**
+(Teja: job age never skips a job): the staleness rule is inert, its rows are deleted
+(migration `20261110120000`), and `unknown` now only labels the date's confidence.
+
+**Retired 2026-11-10.** Teja ruled that job age never skips a job, so the `staleness`
+rule is inert and this config key decides nothing. The `staleness` enum value stays:
+Postgres cannot drop an enum value.
 
 #### The degradation axis is WHERE THE DATE CAME FROM, not how confident we are
 

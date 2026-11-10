@@ -28,6 +28,8 @@ import {
   EARLY_CAREER_MAX_YEARS,
   getFilterRulesReadError,
   getTechOnlyPreference,
+  // Keeps the retired rules (staleness, weekly cap; 2026-11-10) off the page.
+  isRetiredFilterRuleType,
   loadFilterRules,
   saveFilterRules,
   setTechOnlyPreference,
@@ -96,11 +98,6 @@ export const RULE_COPY: Readonly<Partial<Record<FilterRuleType, RuleCopy>>> = {
     drops: 'Immediately drops postings from blocked companies and agencies.',
     threshold: { kind: 'none' },
   },
-  staleness: {
-    name: 'Staleness',
-    drops: 'Discards job postings older than the maximum freshness window.',
-    threshold: { kind: 'number', label: 'Oldest posting age', suffix: 'days', key: 'window_days' },
-  },
   degree_mismatch: {
     name: 'Degree mismatch',
     drops: "Excludes roles strictly requiring a Master's or PhD.",
@@ -112,12 +109,15 @@ export const RULE_COPY: Readonly<Partial<Record<FilterRuleType, RuleCopy>>> = {
     notEnforced:
       "Not enforced: job data doesn't include this. The Discovered Jobs view checks the description text, but the screener does not.",
   },
-  per_company_weekly_cap: {
-    name: 'Per-company weekly cap',
-    drops: 'Limits total submissions sent to the same company per 7-day window.',
-    threshold: { kind: 'number', label: 'Max applications per company', suffix: 'per week', key: 'max_per_week' },
-  },
 };
+
+/* The rule types the cascade renders a row for: every enum key except the retired ones (Teja,
+   2026-11-10: staleness and the per-company weekly cap). Filtered here, not by deleting copy, because
+   a type without copy still renders a fallback row. Exported so the test reads the exact list. */
+export const CASCADE_RULE_TYPES: readonly FilterRuleType[] = FILTER_RULE_TYPES.filter(
+  // The store's one predicate, so the page and load/save agree on what is retired.
+  (ruleType) => !isRetiredFilterRuleType(ruleType),
+);
 
 /* One rule's name, what it drops, and (B1) whether it can actually be enforced. Exported for the
    render test; the page renders every row through it, so the test reads the shipped markup. */
@@ -366,7 +366,8 @@ export function FiltersPage(): ReactElement {
           </p>
         ) : (
           <ol className="cascade">
-            {FILTER_RULE_TYPES.map((ruleType) => {
+            {/* CASCADE_RULE_TYPES, not FILTER_RULE_TYPES: the retired rules get no row (2026-11-10). */}
+            {CASCADE_RULE_TYPES.map((ruleType) => {
               const copy = RULE_COPY[ruleType];
               const rule = rules.find((r) => r.ruleType === ruleType) || {
                 ruleType,
