@@ -13,6 +13,8 @@
 import './support/registerTsxHooks.ts';
 import assert from 'node:assert/strict';
 import { describe, it, before } from 'node:test';
+// Type only (erased at run time): the fixture's shape is the model's own interface.
+import type { KeywordCoverage } from '../src/features/approval/diffModel.ts';
 
 // The pure function under test.
 let model: typeof import('../src/features/approval/diffModel.ts');
@@ -32,10 +34,12 @@ before(async () => {
 });
 
 // KeywordCoverage with n JD keywords, `honest` of them traced and `fab` matched only by flagged claims.
-const coverage = (n: number, honest: number, fab = 0) => {
+// Typed as the real KeywordCoverage, so a field the model gains fails tsc here instead of drifting silently.
+const coverage = (n: number, honest: number, fab = 0): KeywordCoverage => {
   // Synthetic keywords; names are irrelevant, only the counts are measured.
   const jd = Array.from({ length: n }, (_, i) => `kw${i}`);
-  return { jdKeywords: jd, honestlyMatched: jd.slice(0, honest), matchedByFabrication: jd.slice(honest, honest + fab) };
+  // matchedByEdit is required since the edit figure landed; empty, because these cases have no operator edits.
+  return { jdKeywords: jd, honestlyMatched: jd.slice(0, honest), matchedByFabrication: jd.slice(honest, honest + fab), matchedByEdit: [] };
 };
 // CoverageBar reads only diff.coverage, so a minimal diff is enough.
 const bar = (c: ReturnType<typeof coverage>) => render(h(view.CoverageBar, { diff: { coverage: c } as never }));

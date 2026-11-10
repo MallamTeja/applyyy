@@ -418,12 +418,12 @@ describe('AI resume chat, end to end (2026-11-05)', () => {
   it('1. four prompts: every answer\'s ops are applied and saved, with the source on each event', async () => {
     // The queue page.
     await page.goto(`${baseUrl}/approvals`, { waitUntil: 'domcontentloaded' });
-    // The row, open.
-    let card = await openCard();
+    // The row, open. Called for its effect only: the chat below is found on the page, so the locator is not kept.
+    await openCard();
     // One prompt per turn, in order.
     for (const [index, turn] of TURNS.entries()) {
       // The panel inside the card (re-found each turn: the card can move buckets after an edit).
-      card = await openCard();
+      await openCard();
       // The AI chat region.
       const chat = page.getByRole('region', { name: 'AI resume chat' });
       // The prompt box.

@@ -321,6 +321,16 @@ jobs:
         working-directory: apps/web
         # The package-local binary, as CLAUDE.md §4 documents.
         run: ./node_modules/.bin/tsc --noEmit
+      # W36 (2026-11-10): the app tsconfig roots only src/, and `node --test` strips types without
+      # checking them, so the web TESTS were never type-checked and their fakes drifted from the real
+      # types (134 errors on the first run). tsconfig.test.json extends the app config and adds test/.
+      - name: web tests tsc --noEmit (tsconfig.test.json)
+        # Same gate as every check.
+        if: ${{ !cancelled() && steps.setup-done.outcome == 'success' }}
+        # The web package; tsconfig.test.json lives beside its tsconfig.json.
+        working-directory: apps/web
+        # The package-local binary, the same form as the step above.
+        run: ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json
       # The exact artifact Vercel would deploy; a failure here is a failed deploy.
       - name: web vite build
         # Same gate as every check.

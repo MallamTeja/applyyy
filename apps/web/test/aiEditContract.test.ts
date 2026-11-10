@@ -21,6 +21,8 @@ import './support/registerTsxHooks.ts';
 import assert from 'node:assert/strict';
 // The node:test runner.
 import { before, describe, it } from 'node:test';
+// The shared edge-client double, typed against the real EdgeClient so its shape cannot drift (W36).
+import { fakeEdgeClient } from './support/fakeEdgeClient.ts';
 
 // The web module under test, loaded after the hooks.
 let ai: typeof import('../src/features/approval/aiEdit.ts');
@@ -89,7 +91,7 @@ describe('resume-assist op contract: server kinds vs web reader', () => {
       const op = SAMPLES[kind]!;
       // The real reader over a fake invoke returning the server's ok shape.
       const result = await ai.requestAssist(
-        { functions: { invoke: async () => ({ data: { status: 'ok', ops: [op], note: '', usage: {} }, error: null }) } },
+        fakeEdgeClient(async () => ({ data: { status: 'ok', ops: [op], note: '', usage: {} }, error: null })),
         MINIMAL_REQUEST,
       );
       // Read, not refused.

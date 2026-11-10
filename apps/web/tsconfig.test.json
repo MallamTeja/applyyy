@@ -1,0 +1,21 @@
+{
+  // WHY THIS EXISTS (W36, 2026-11-10): tsconfig.json roots only `src`, so the ~140 files in
+  // `test/` were never type-checked. `node --test` strips types without checking them, so a
+  // test could call a renamed export or pass the wrong shape and still run green until the
+  // runtime path happened to hit it. CI runs `tsc -p tsconfig.test.json` as its own step.
+  // Extending the app config keeps ONE dialect: a test is checked exactly like the code it imports.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Some web tests import edge-function code (e.g. aiEditContract.test.ts imports
+    // supabase/functions/resume-assist/assist.ts, which reaches _shared/gemini/client.ts). Those
+    // Deno files import the BARE `@supabase/supabase-js`, which only Deno's import map
+    // (supabase/functions/deno.json) resolves. They import it `type`-only, so mapping the name to
+    // the web app's own install gives tsc the real types without changing anything that runs.
+    // Version note: web installs 2.50.x, Deno pins 2.58.0; only the SupabaseClient type is read.
+    "paths": { "@supabase/supabase-js": ["./node_modules/@supabase/supabase-js"] }
+  },
+  // `src` stays a root so a test's import of app code is checked under the same rules, and
+  // `test` is added: that is the whole point of this file. test/support/deno-env.d.ts (inside
+  // `test`) declares the one Deno global those edge files touch.
+  "include": ["src", "test"]
+}

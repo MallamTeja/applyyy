@@ -16,6 +16,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 // The runner.
 import { before, describe, it } from 'node:test';
+// The shared edge-client double, typed against the real EdgeClient so its shape cannot drift (W36).
+import { fakeEdgeClient } from './support/fakeEdgeClient.ts';
 
 // The module under test, loaded after the hooks.
 let dispatch: typeof import('../src/features/approval/dispatchApply.ts');
@@ -30,7 +32,7 @@ function client(answer: () => Promise<{ data: unknown; error: unknown }>) {
   // Names called, in order.
   const names: string[] = [];
   // The functions.invoke slice requestDispatch uses.
-  return { names, client: { functions: { invoke: async (name: string) => { names.push(name); return answer(); } } } };
+  return { names, client: fakeEdgeClient(async (name: string) => { names.push(name); return answer(); }) };
 }
 
 describe('requestDispatch', () => {

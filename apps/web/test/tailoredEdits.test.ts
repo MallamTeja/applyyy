@@ -337,7 +337,11 @@ describe('tracesToMaster', () => {
     // master_text rewritten to match an edit: the violation that makes edits read as traced.
     const masterText = clone(orig);
     // Both fields moved together, as a careless edit would.
-    masterText.experience[0]!.bullets[1] = { ...masterText.experience[0]!.bullets[1]!, text: 'X', master_text: 'X' };
+    const first = masterText.experience[0];
+    // A missing entry is a fixture bug: fail on it by name, not via a TypeError.
+    assert.ok(first, 'fixture must have a first experience entry');
+    // The bullets swapped for a NEW list (DocumentOrdered is readonly): index 1 rewritten, the rest the same objects.
+    first.bullets = first.bullets.map((b, i) => (i === 1 ? { ...b, text: 'X', master_text: 'X' } : b));
     // Refused.
     assert.equal(edits.tracesToMaster(orig, masterText, orig, MASTER), false);
     // Identity is the master's, never editable here.
@@ -347,13 +351,18 @@ describe('tracesToMaster', () => {
     // An entry's display field: an employer cannot be renamed from this page.
     const company = clone(orig);
     // Only the company changes; bullets untouched.
-    company.experience[0] = { ...company.experience[0]!, company: 'Bigger Corp' };
+    // A NEW experience list (DocumentOrdered is readonly): entry 0 renamed, the others the same objects.
+    company.experience = company.experience.map((e, i) => (i === 0 ? { ...e, company: 'Bigger Corp' } : e));
     // Refused.
     assert.equal(edits.tracesToMaster(orig, company, orig, MASTER), false);
     // A bullet whose ref the master never had is an invented bullet.
     const invented = clone(orig);
     // Appended with a ref absent from the master.
-    invented.experience[0]!.bullets.push({ ref: 'b-new', text: 'New', master_text: 'New' });
+    const target = invented.experience[0];
+    // A missing entry is a fixture bug: fail on it by name, not via a TypeError.
+    assert.ok(target, 'fixture must have a first experience entry');
+    // Appended as a NEW list (DocumentOrdered is readonly).
+    target.bullets = [...target.bullets, { ref: 'b-new', text: 'New', master_text: 'New' }];
     // Refused.
     assert.equal(edits.tracesToMaster(orig, invented, orig, MASTER), false);
     // Positive control: an unchanged resume traces by definition.

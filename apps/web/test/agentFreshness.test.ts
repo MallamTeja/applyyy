@@ -563,8 +563,13 @@ function runWith(status: AgentRunStatus, error_count?: unknown): AgentRunFacts {
     started_at: '2026-01-01T00:00:00Z',
     // Closed run, so nothing here can be mistaken for a stuck one.
     finished_at: '2026-01-01T00:01:00Z',
-    // Cast so the malformed shapes (NaN, 1.5) can be fed in like a bad DB row.
-    error_count: error_count as number | null | undefined,
+    // undefined means "column absent" (an old row): omit the key instead of writing
+    // `error_count: undefined`, which exactOptionalPropertyTypes rightly rejects as a
+    // different shape from a missing property.
+    ...(error_count === undefined
+      ? {}
+      : // Cast so the malformed shapes (NaN, 1.5) can be fed in like a bad DB row.
+        { error_count: error_count as number | null }),
   };
 }
 

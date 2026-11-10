@@ -220,7 +220,8 @@ describe('trimNotice', () => {
     // Nothing cut.
     assert.equal(fit.trimNotice([]), null);
     // A long bullet is shortened with an ellipsis; a short one is quoted whole.
-    const notice = fit.trimNotice([{ step: 'weakest_bullet', ref: 'a', text: 'x'.repeat(100) }, { step: 'certification', ref: 'c', text: 'SQL' }]);
+    const notice = fit.trimNotice([{ step: 'weakest_bullet', ref: 'a', text: 'x'.repeat(100) }, { step: 'project_bullet_over_cap', ref: 'c', text: 'SQL' }]);
+    // The second item was a 'certification' step until 2026-11-09, when Teja made certs untrimmable and TrimStep lost it.
     // Shape.
     assert.equal(notice, `Trimmed to fit one page: "${'x'.repeat(69)}…", "SQL".`);
   });

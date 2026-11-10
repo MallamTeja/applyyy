@@ -9,6 +9,10 @@
 import './support/registerTsxHooks.ts';
 import assert from 'node:assert/strict';
 import { describe, it, before } from 'node:test';
+// Types only (erased at run time): the row and kit fixtures are built as the real types, so a field the page gains fails tsc here.
+import type { ManualApplyRow } from '../src/features/manual-apply/manualApplyData.ts';
+// Same, the closed kit-state union KitCard takes.
+import type { KitState } from '../src/features/manual-apply/applyKit.ts';
 
 // The pure kit module.
 let kitMod: typeof import('../src/features/manual-apply/applyKit.ts');
@@ -55,7 +59,7 @@ const kitDetail = (over: Record<string, unknown> = {}) => ({
 });
 
 // The GitLab row as the page's read returns it.
-const row = (applyUrl: string | null = 'https://job-boards.greenhouse.io/gitlab/jobs/8775507002') => ({
+const row = (applyUrl: string | null = 'https://job-boards.greenhouse.io/gitlab/jobs/8775507002'): ManualApplyRow => ({
   id: 'ba1e5d1d-84a5-4cfb-b5a6-e5a2943bf154',
   status: 'needs_verification' as const,
   label: 'Intermediate Backend Engineer, India at GitLab',
@@ -67,10 +71,18 @@ const row = (applyUrl: string | null = 'https://job-boards.greenhouse.io/gitlab/
   jobTitle: 'Intermediate Backend Engineer, India',
   // Same, the company.
   company: 'GitLab',
+  // Not an approved row, so no approve time (the page reads status_changed_at only at `approved`).
+  approvedAt: null,
+  // Not parked by the bot, so no block reason for the "Bot can't apply" line.
+  blockReason: null,
+  // No provider: these cases are not about the Workday signal.
+  atsProvider: null,
 });
 
 // One card, rendered inside a router.
-function renderCard(kit: unknown, applyUrl?: string | null): string {
+function renderCard(kit: KitState | undefined, applyUrl?: string | null): string {
+  // stateOf reads a Map, so a missing entry is undefined: that is a failed join, and the assert narrows to KitState.
+  assert.ok(kit !== undefined, 'the kit join must yield a state for this application');
   // The card under test with the given kit state.
   return render(h(MemoryRouter, null, h(page.KitCard, { row: row(applyUrl), kit, resolve: { locked: false, frozen: false, onMove: () => undefined } })));
 }

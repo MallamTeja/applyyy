@@ -13,6 +13,10 @@
 import './support/registerTsxHooks.ts';
 import assert from 'node:assert/strict';
 import { describe, it, before } from 'node:test';
+// Types only (erased at run time): the row fixture is built as the real type, so a field the page gains fails tsc here.
+import type { ManualApplyRow } from '../src/features/manual-apply/manualApplyData.ts';
+// Same, the closed status union the row carries.
+import type { ApplicationStatus } from '../src/data/contract.ts';
 
 // The page module, for KitCard and the move filter.
 let page: typeof import('../src/features/manual-apply/ManualApplyPage.tsx');
@@ -35,7 +39,7 @@ before(async () => {
 });
 
 // One row at the given status, as the page's read returns it.
-const row = (status: string) => ({
+const row = (status: ApplicationStatus): ManualApplyRow => ({
   id: 'ba1e5d1d-84a5-4cfb-b5a6-e5a2943bf154',
   status,
   label: 'Intermediate Backend Engineer, India at GitLab',
@@ -47,10 +51,16 @@ const row = (status: string) => ({
   jobTitle: 'Intermediate Backend Engineer, India',
   // Same, the company.
   company: 'GitLab',
+  // The resolve buttons never read it; null is the "unknown approve time" the card already proves before showing.
+  approvedAt: null,
+  // Not parked by the bot, so no block reason.
+  blockReason: null,
+  // No provider: these cases are not about the Workday signal.
+  atsProvider: null,
 });
 
 // A card with no kit yet (the resolve buttons do not depend on the kit) and the given lock state.
-function renderCard(status: string, locked = false): string {
+function renderCard(status: ApplicationStatus, locked = false): string {
   // The card under test; onMove is never called by a static render.
   return render(h(MemoryRouter, null, h(page.KitCard, { row: row(status), kit: { kind: 'none' }, resolve: { locked, frozen: false, onMove: () => undefined } })));
 }

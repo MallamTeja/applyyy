@@ -99,7 +99,8 @@ const EVENT = { kind: 'resume_edit', ref: 'b-tests', before: 'Old text', after: 
 // One recorded call: which method, with which arguments, on which table.
 type Call = { table: string; method: string; args: unknown[] };
 // A canned answer, or 'throw' to make that chain reject like a dropped connection.
-type Answer = { data?: unknown; error?: unknown } | 'throw';
+// status/statusText are on every real supabase-js (postgrest-js) response, so the fake may carry them too.
+type Answer = { data?: unknown; error?: unknown; status?: number; statusText?: string } | 'throw';
 
 // A fake Supabase client. Three chains are distinguishable: the UPDATE (update() was called),
 // the re-select on applications (no update()), and the INSERT on application_events.

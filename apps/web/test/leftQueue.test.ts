@@ -44,6 +44,17 @@ const note = (application_id: string, created_at: string, detail: unknown) => ({
   application_id, event_type: 'note', agent: 'human', from_status: null, to_status: null, created_at, detail,
 });
 
+/* The first parsed row, or a FAILED test when the parse returned none. Indexing rows[0] directly would
+   hand undefined to the next assert; this fails closed with a message naming what was missing. */
+function first<T>(rows: readonly T[]): T {
+  // The row under test; undefined when the parse dropped it.
+  const row = rows[0];
+  // A missing row is a test failure, never a silent pass; also narrows T | undefined to T.
+  assert.ok(row !== undefined, 'parseLeftQueue returned no rows');
+  // Narrowed by the assert above.
+  return row;
+}
+
 before(async () => {
   // Dynamic import, after the tsx hook is registered.
   mod = await import('../src/features/manual-apply/leftQueue.ts');
@@ -74,22 +85,22 @@ describe('parseLeftQueue', () => {
     // Exactly one row.
     assert.equal(rows.length, 1);
     // Identity and label.
-    assert.equal(rows[0].id, A);
-    assert.equal(rows[0].label, 'Backend Engineer at Acme');
+    assert.equal(first(rows).id, A);
+    assert.equal(first(rows).label, 'Backend Engineer at Acme');
     // The stamp is returned untouched.
-    assert.equal(rows[0].stamp, '2026-11-06T09:00:00.123456+00:00');
+    assert.equal(first(rows).stamp, '2026-11-06T09:00:00.123456+00:00');
     // How it left.
-    assert.equal(rows[0].leftAt, '2026-11-05T12:00:00Z');
-    assert.equal(rows[0].leftFrom, 'needs_verification');
-    assert.equal(rows[0].actor, 'human');
+    assert.equal(first(rows).leftAt, '2026-11-05T12:00:00Z');
+    assert.equal(first(rows).leftFrom, 'needs_verification');
+    assert.equal(first(rows).actor, 'human');
     // The paired note's fields.
-    assert.equal(rows[0].source, 'retro_script');
-    assert.equal(rows[0].stage, 'retro_liveness');
-    assert.equal(rows[0].code, 'posting_stale');
-    assert.equal(rows[0].reason, 'The posting is gone.');
+    assert.equal(first(rows).source, 'retro_script');
+    assert.equal(first(rows).stage, 'retro_liveness');
+    assert.equal(first(rows).code, 'posting_stale');
+    assert.equal(first(rows).reason, 'The posting is gone.');
     // The apply url and approve time.
-    assert.equal(rows[0].applyUrl, 'https://acme.test/apply');
-    assert.equal(rows[0].approvedAt, '2026-11-01T10:00:00Z');
+    assert.equal(first(rows).applyUrl, 'https://acme.test/apply');
+    assert.equal(first(rows).approvedAt, '2026-11-01T10:00:00Z');
   });
 
   it('lists an approved -> applying -> failed row with leftFrom applying', () => {
@@ -105,8 +116,8 @@ describe('parseLeftQueue', () => {
     // Listed once.
     assert.equal(rows.length, 1);
     // It left from applying, by the applier.
-    assert.equal(rows[0].leftFrom, 'applying');
-    assert.equal(rows[0].actor, 'applier');
+    assert.equal(first(rows).leftFrom, 'applying');
+    assert.equal(first(rows).actor, 'applier');
   });
 
   it('does not pair a note with a different created_at', () => {
@@ -118,9 +129,9 @@ describe('parseLeftQueue', () => {
       note(A, '2026-11-05T12:00:01Z', { source: 'other', stage: 's', reason: 'r', detail: 'd' }),
     ]);
     // The change is still read.
-    assert.equal(rows[0].leftFrom, 'applying');
+    assert.equal(first(rows).leftFrom, 'applying');
     // But no note fields leak in.
-    assert.deepEqual([rows[0].source, rows[0].stage, rows[0].code, rows[0].reason], [null, null, null, null]);
+    assert.deepEqual([first(rows).source, first(rows).stage, first(rows).code, first(rows).reason], [null, null, null, null]);
   });
 
   it('gives nulls when the note detail fields are not non-empty strings', () => {
@@ -132,7 +143,7 @@ describe('parseLeftQueue', () => {
       note(A, '2026-11-05T12:00:00Z', { source: 7, stage: '', reason: null, detail: { x: 1 } }),
     ]);
     // Every note field null.
-    assert.deepEqual([rows[0].source, rows[0].stage, rows[0].code, rows[0].reason], [null, null, null, null]);
+    assert.deepEqual([first(rows).source, first(rows).stage, first(rows).code, first(rows).reason], [null, null, null, null]);
   });
 
   it('lists a row with no matching status_change, leaving the how-it-left fields null', () => {
@@ -141,14 +152,14 @@ describe('parseLeftQueue', () => {
     // Still listed.
     assert.equal(rows.length, 1);
     // Unknown how.
-    assert.deepEqual([rows[0].leftAt, rows[0].leftFrom, rows[0].actor], [null, null, null]);
+    assert.deepEqual([first(rows).leftAt, first(rows).leftFrom, first(rows).actor], [null, null, null]);
   });
 
   it('takes approvedAt as the newest approve time', () => {
     // Two approvals: re-approved later.
     const rows = mod.parseLeftQueue([app(A, 'failed', ['2026-11-01T10:00:00Z', '2026-11-03T10:00:00Z', '2026-11-02T10:00:00Z'])], []);
     // The newest, raw.
-    assert.equal(rows[0].approvedAt, '2026-11-03T10:00:00Z');
+    assert.equal(first(rows).approvedAt, '2026-11-03T10:00:00Z');
   });
 
   it('skips a non-uuid id, an unknown status and a non-object, never guessing', () => {

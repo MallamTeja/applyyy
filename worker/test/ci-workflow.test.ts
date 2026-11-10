@@ -139,12 +139,14 @@ describe('ci.yml single job', () => {
       'node --test "api/_render/*.test.ts"',
       // worker: vitest.
       'run: ./node_modules/.bin/vitest run',
+      // web: the TESTS' typecheck (W36, 2026-11-10). Named, not just counted, so dropping the step fails by name.
+      'run: ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json',
     ]) {
       // Named in the failure, so a dropped check is obvious.
       expect(checks, `missing check: ${command}`).toContain(command);
     }
-    // tsc runs twice: once in apps/web, once in worker.
-    expect(checks.match(/run: \.\/node_modules\/\.bin\/tsc --noEmit/g)?.length).toBe(2);
+    // tsc runs three times: apps/web (src), apps/web tests (tsconfig.test.json, W36), and worker.
+    expect(checks.match(/run: \.\/node_modules\/\.bin\/tsc --noEmit/g)?.length).toBe(3);
   });
 
   test('every step after setup runs even when an earlier check failed', () => {

@@ -11,6 +11,8 @@
 import './support/registerTsxHooks.ts';
 import assert from 'node:assert/strict';
 import { describe, it, before } from 'node:test';
+// The shared edge-client double, typed against the real EdgeClient so its shape cannot drift (W36).
+import { fakeEdgeClient } from './support/fakeEdgeClient.ts';
 
 // The panel module, loaded after the hooks are in place.
 let panel: typeof import('../src/features/discovery/AddJobLinkPanel.tsx');
@@ -44,16 +46,12 @@ const okBody = (over: Record<string, unknown> = {}) => ({
 
 // A client whose invoke answers like supabase-js: non-2xx puts the body behind error.context.
 function clientAnswering(status: number, body: unknown, sent: unknown[] = []) {
-  return {
-    functions: {
-      invoke: (name: string, options: { body: Record<string, unknown> }) => {
-        // Records what was sent, so the body contract is assertable.
-        sent.push({ name, body: options.body });
-        // 2xx: data; otherwise an error carrying a Response-like context.
-        return Promise.resolve(status < 300 ? { data: body, error: null } : { data: null, error: { context: { json: () => Promise.resolve(body) } } });
-      },
-    },
-  };
+  return fakeEdgeClient((name: string, options?: { body: Record<string, unknown> }) => {
+    // Records what was sent, so the body contract is assertable.
+    sent.push({ name, body: options?.body });
+    // 2xx: data; otherwise an error carrying a Response-like context.
+    return Promise.resolve(status < 300 ? { data: body, error: null } : { data: null, error: { context: { json: () => Promise.resolve(body) } } });
+  });
 }
 
 // The view with every handler stubbed.

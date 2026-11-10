@@ -55,7 +55,8 @@ function makeRow(app: (typeof APPS)[number]): Record<string, unknown> {
 }
 
 // The rows, by id.
-const ROWS = new Map(APPS.map((a) => [a.id, makeRow(a)]));
+// Keyed by string, not the two literal ids: lookups come from request URLs, and an unknown id must read as undefined (a 200 [] or a fall-through), not fail to compile.
+const ROWS = new Map<string, Record<string, unknown>>(APPS.map((a) => [a.id, makeRow(a)]));
 
 /* A PostgREST answer: a single object when the client asked for one, else an array. */
 function pgrst(accept: string | undefined, row: unknown): string {

@@ -10,6 +10,8 @@
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+// The shared edge-client double, typed against the real EdgeClient so its shape cannot drift (W36).
+import { fakeEdgeClient } from './support/fakeEdgeClient.ts';
 
 import {
   formatSyncTime,
@@ -27,9 +29,7 @@ import {
 
 /* A GmailSyncClient double returning one canned invoke result — the same seam shape
    pipelineRunner tests use; no network, no supabase. */
-const fakeClient = (result: { data: unknown; error: unknown }): GmailSyncClient => ({
-  functions: { invoke: async () => result },
-});
+const fakeClient = (result: { data: unknown; error: unknown }): GmailSyncClient => fakeEdgeClient(async () => result);
 
 describe('emailSync helpers', () => {
   describe('shouldAutoSync — the once-a-minute on-open debounce', () => {
@@ -116,7 +116,7 @@ describe('emailSync helpers', () => {
     });
 
     it('a throwing client double is contained as failed, not propagated', async () => {
-      const throwing: GmailSyncClient = { functions: { invoke: async () => { throw new Error('boom'); } } };
+      const throwing: GmailSyncClient = fakeEdgeClient(async () => { throw new Error('boom'); });
       const outcome = await syncGmailInbox(throwing);
       assert.equal(outcome.kind, 'failed');
     });
@@ -158,6 +158,16 @@ describe('emailSync helpers', () => {
       matched_application_id: null,
       processed_at: null,
       created_at: '2026-09-11T12:00:00Z',
+      // The four columns EmailEventRow gained after this fixture was written (thread/To/labels in
+      // migration 20260918213000, read_at in 20261105124600). null is a real row's value when the
+      // script sent none / the email is unread, and isInterviewEmail reads none of them.
+      thread_id: null,
+      // No To header captured.
+      recipient_to: null,
+      // No Gmail labels captured.
+      label_ids: null,
+      // Unread in the app.
+      read_at: null,
     };
 
     it('accepts explicit classification matches', () => {

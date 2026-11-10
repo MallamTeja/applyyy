@@ -5,7 +5,8 @@
  * Screener — told the operator to go check the Approval Queue. These cases pin the
  * honest reading of each response, and that a halt stops the steps after it.
  *
- * The client is a stub implementing only `functions.invoke`, so no env or network is needed.
+ * The client is the shared fakeEdgeClient double (support/fakeEdgeClient.ts): the test scripts
+ * `functions.invoke`, and the double supplies the real EdgeClient's `auth`, so no env or network is needed.
  */
 
 import assert from 'node:assert/strict';
@@ -13,21 +14,23 @@ import { describe, it } from 'node:test';
 
 import { classifyResponse, runPipeline } from '../src/data/pipelineRunner.ts';
 import type { FunctionsInvoker } from '../src/data/pipelineRunner.ts';
+// The shared edge-client double, typed against the real EdgeClient so its shape cannot drift (W36).
+import { fakeEdgeClient } from './support/fakeEdgeClient.ts';
 
 // Builds a stub client that answers per agent and records every name it was invoked with.
 function stubClient(answer: (agent: string) => { data: unknown; error: unknown }): { client: FunctionsInvoker; calls: string[] } {
   // Collected so tests can assert which agents ran, and with which query string.
   const calls: string[] = [];
-  // Only the slice the runner touches.
-  const client: FunctionsInvoker = {
-    functions: {
-      // Strip the query so `answer` keys on the bare agent name.
-      invoke: async (name: string) => {
-        calls.push(name);
-        return answer(name.split('?')[0] ?? name);
-      },
+  // A full EdgeClient (functions + auth); the runner's session-401 retry needs `auth` to exist.
+  const client: FunctionsInvoker = fakeEdgeClient(
+    // Strip the query so `answer` keys on the bare agent name.
+    async (name: string) => {
+      // Recorded before answering, so the order of agents is assertable.
+      calls.push(name);
+      // The scripted answer for this agent.
+      return answer(name.split('?')[0] ?? name);
     },
-  };
+  );
   return { client, calls };
 }
 

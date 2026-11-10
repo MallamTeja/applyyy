@@ -16,6 +16,8 @@ import './support/registerTsxHooks.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it, before, afterEach } from 'node:test';
+// The shared edge-client double, typed against the real EdgeClient so its shape cannot drift (W36).
+import { fakeEdgeClient } from './support/fakeEdgeClient.ts';
 import { fileURLToPath } from 'node:url';
 
 // The card module, loaded after the hooks are in place.
@@ -219,8 +221,8 @@ describe('real deps factory, with a fake client', () => {
     const names: string[] = [];
     // The client shape rowPipelineDeps expects.
     const client = {
-      // Records, then delegates to the script.
-      functions: { invoke: (name: string) => { names.push(name); return invoke(name); } },
+      // The full edge client (functions + auth); its invoke records, then delegates to the script.
+      ...fakeEdgeClient((name: string) => { names.push(name); return invoke(name); }),
       // The status read.
       readStatusRow,
     };
@@ -407,7 +409,7 @@ describe('real deps factory: readMatchScore', () => {
   // A deps object over a client whose one read answers as scripted.
   const depsOver = (read: () => PromiseLike<{ data: unknown; error: unknown }>) =>
     // Invoke is never called by these tests.
-    depsModule.makeRowPipelineDeps({ functions: { invoke: async () => ({ data: null, error: null }) }, readStatusRow: read });
+    depsModule.makeRowPipelineDeps({ ...fakeEdgeClient(async () => ({ data: null, error: null })), readStatusRow: read });
 
   it('a NULL match_score is read as a real null', async () => {
     // The pre-gate's row.

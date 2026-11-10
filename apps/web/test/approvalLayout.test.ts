@@ -133,9 +133,10 @@ describe('queue row wiring', () => {
       // The toolbar exists in this bucket's card.
       assert.ok(tools.length > 0, `${start} card has no queue__row-tools`);
       // Where each toggle's resting label sits inside it.
-      const at = [tools.indexOf("'Review'"), tools.indexOf("'Preview resume'"), tools.indexOf("'Chat with AI'")];
+      // Destructured as a fixed triple so each position is a number, not number | undefined.
+      const [review, preview, chat] = [tools.indexOf("'Review'"), tools.indexOf("'Preview resume'"), tools.indexOf("'Chat with AI'")] as const;
       // All three present, in that order.
-      assert.ok(at[0] >= 0 && at[0] < at[1] && at[1] < at[2], `${start} toolbar order is ${at.join(',')}`);
+      assert.ok(review >= 0 && review < preview && preview < chat, `${start} toolbar order is ${[review, preview, chat].join(',')}`);
     }
   });
 });

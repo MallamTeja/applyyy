@@ -12,6 +12,10 @@ import './support/registerTsxHooks.ts';
 import assert from 'node:assert/strict';
 // The runner.
 import { before, describe, it } from 'node:test';
+// Types only (erased at run time): the panel seams return the real result unions, so a stub cannot return a shape the panel would never get.
+import type { EditResult } from '../src/features/approval/DiffView.tsx';
+// Same, the assist seam's closed union.
+import type { AssistResult } from '../src/features/approval/aiEdit.ts';
 
 // The panel, loaded after the hooks.
 let panel: typeof import('../src/features/approval/AiEditPanel.tsx');
@@ -38,7 +42,7 @@ function diffWith(jobDescription: string | null | undefined): never {
 /* The panel's markup for one diff, with seams that are never called by a static render. */
 function markup(jobDescription: string | null | undefined): string {
   // A session-only chat (no store), not busy.
-  return render(h(panel.AiEditPanel, { diff: diffWith(jobDescription), onEdit: async () => ({ ok: true }), onAssist: async () => ({ kind: 'error', message: '' }), busy: false, categories: [] }));
+  return render(h(panel.AiEditPanel, { diff: diffWith(jobDescription), onEdit: async (): Promise<EditResult> => ({ ok: true }), onAssist: async (): Promise<AssistResult> => ({ kind: 'error', message: '' }), busy: false, categories: [] }));
 }
 
 describe('AiEditPanel waits for the job description (2026-11-09)', () => {

@@ -232,6 +232,8 @@ describe('buildResumeDiff: a keyword covered only by a printed certification', (
   it('"SQL" gets no "+ Add" chip, although the master has an unselected SQL skill', () => {
     // The printed resume.
     const d = diff(printed());
+    // The addable map must exist, or "has no SQL" would be vacuous; the assert also narrows it.
+    assert.ok(d.coverage.addable, 'diff produced no addable map');
     // No entry at all: present keywords are skipped, not mapped to null.
     assert.equal(d.coverage.addable.has('SQL'), false);
   });
@@ -241,6 +243,8 @@ describe('buildResumeDiff: a keyword covered only by a printed certification', (
     const d = diff(tweaked((x) => { x.section_order = x.section_order.filter((s: string) => s !== 'certifications'); }));
     // No longer honest coverage.
     assert.equal(d.coverage.honestlyMatched.includes('SQL'), false);
+    // The addable map must exist before it can offer a chip; the assert also narrows it.
+    assert.ok(d.coverage.addable, 'diff produced no addable map');
     // And the chip appears, so the previous test's "no chip" is caused by the printed cert.
     assert.deepEqual(d.coverage.addable.get('SQL'), { ref: 'skill-sql', name: 'SQL' });
   });

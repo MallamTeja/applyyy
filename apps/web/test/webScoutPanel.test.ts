@@ -12,6 +12,8 @@ import { registerHooks } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { describe, it, before } from 'node:test';
+// The shared edge-client double, typed against the real EdgeClient so its shape cannot drift (W36).
+import { fakeEdgeClient } from './support/fakeEdgeClient.ts';
 import { fileURLToPath } from 'node:url';
 
 // Hook installed before the dynamic import below, so the import sees it.
@@ -62,7 +64,7 @@ const okBody = () => ({
 });
 
 // Fake client returning a canned result; no network.
-const fake = (result: { data: unknown; error: unknown }) => ({ functions: { invoke: async () => result } });
+const fake = (result: { data: unknown; error: unknown }) => fakeEdgeClient(async () => result);
 
 // Renders a state through the pure view.
 const view = (state: unknown) => render(h(panel.WebScoutView, { state: state as never, query: '', onQueryChange: () => {}, onSearch: () => {} }));
@@ -138,7 +140,7 @@ describe('runWebScout', () => {
     // Collects what each call sent, since the body is the only thing this test observes.
     const bodies: unknown[] = [];
     // Fake that records the body and returns a valid result so the call itself succeeds.
-    const client = { functions: { invoke: async (_n: string, o: { body: unknown }) => { bodies.push(o.body); return { data: okBody(), error: null }; } } };
+    const client = fakeEdgeClient(async (_n: string, o?: { body: unknown }) => { bodies.push(o?.body); return { data: okBody(), error: null }; });
     // Padded query: the backend should get the trimmed text, not the user's stray spaces.
     await panel.runWebScout(client, '  rust  ');
     // Whitespace-only counts as blank, so the backend falls back to saved preferences.

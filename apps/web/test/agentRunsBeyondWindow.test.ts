@@ -17,6 +17,11 @@ import './support/registerTsxHooks.ts';
 import assert from 'node:assert/strict';
 // One describe, a before() for the imports, one it() per behaviour.
 import { describe, it, before } from 'node:test';
+// Type-only (erased at runtime, so the hooks-first load order above still holds): the fixture is typed as
+// the REAL row, so a status or agent name the schema does not allow is a compile error, not a passing test.
+import type { AgentRunRow } from '../src/data/useAgentRuns.ts';
+// The closed unions the row's agent and status columns use; narrower than string on purpose.
+import type { AgentName, AgentRunStatus } from '../src/data/contract.ts';
 
 // The helper under test, loaded after the hooks are registered.
 let runs: typeof import('../src/data/useAgentRuns.ts');
@@ -29,7 +34,8 @@ const NOW = Date.parse('2026-11-01T12:00:00.000Z');
 const HOUR = 3_600_000;
 
 // One agent_runs row as the read returns it; status and age are the facts under test.
-function row(agent: string, status: string, hoursAgo: number) {
+// Typed params + return: a plain string widened agent/status and made the rows unassignable to AgentRunRow.
+function row(agent: AgentName, status: AgentRunStatus, hoursAgo: number): AgentRunRow {
   // Started hoursAgo before NOW.
   const started = NOW - hoursAgo * HOUR;
   // Every selected column, at clean values except the two under test.

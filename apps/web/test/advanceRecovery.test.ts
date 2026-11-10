@@ -152,8 +152,12 @@ describe('advanceRecovery outcomes', () => {
     assert.deepEqual(await mod.advanceRecovery(client, MOVE), { kind: 'moved' });
     // No re-read on a real answer.
     assert.deepEqual(calls, ['rpc:advance_application_status']);
+    // Exactly one rpc call must have been recorded, or the stamp check below would read nothing.
+    const [sent] = rpcArgs;
+    // Fails the test when no args reached the wire; also narrows away undefined.
+    assert.ok(sent, 'no rpc args recorded');
     // The wire carried the same stamp the pure builder promised.
-    assert.equal(rpcArgs[0].p_expected_updated_at, STAMP);
+    assert.equal(sent.p_expected_updated_at, STAMP);
   });
 
   it('status 0 and a read-back at the target is moved', async () => {
@@ -250,7 +254,8 @@ describe('the read-back measures against the move\'s real source', () => {
     /* THE GUARD ON THE confirmSettle `from` WIDENING. Without the 4th argument, confirmSettle assumes
        the source is awaiting_approval, so a row sitting untouched at needs_verification reads as
        "moved elsewhere" - telling the operator someone else acted when nothing happened at all. */
-    const move = { applicationId: ID, from: 'needs_verification', to: 'applied', stamp: STAMP } as const;
+    // source is REQUIRED on RecoveryMove since 2026-11-05; the health page is the screen that makes this move.
+    const move = { source: 'health_recovery', applicationId: ID, from: 'needs_verification', to: 'applied', stamp: STAMP } as const;
     // No answer, row untouched at its real source.
     const { client } = makeClient(DROPPED, rowAt('needs_verification'));
     // Must be the honest "may still land" answer.
@@ -301,7 +306,8 @@ describe('advanceRecovery: a held edge never reaches the database', () => {
     // A double that would happily accept the move, so only the engine's own check can stop it.
     const { client, calls } = makeClient({ error: null, status: 204 });
     // The one edge HELD_HUMAN_EDGES keeps off: under automatic submission it re-arms a real send.
-    const outcome = await mod.advanceRecovery(client, { applicationId: ID, from: 'needs_verification', to: 'approved', stamp: STAMP });
+    // source is REQUIRED on RecoveryMove (2026-11-05); the health page is where this held edge would be tried.
+    const outcome = await mod.advanceRecovery(client, { source: 'health_recovery', applicationId: ID, from: 'needs_verification', to: 'approved', stamp: STAMP });
     // Refused locally, with the hold's own code, so the message cannot be mistaken for a database verdict.
     assert.equal(outcome.kind, 'refused');
     // Narrowed for the code check.

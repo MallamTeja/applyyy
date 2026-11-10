@@ -21,6 +21,9 @@ import { describe, it, before, beforeEach, after } from 'node:test';
 import { chromium, type Browser, type BrowserContext, type Dialog, type Page } from 'playwright';
 // The shared harness: dist guard, static server, fake session.
 import { assertDistIsTestable, seedSession, startDistServer } from './support/e2eDist.ts';
+// Type-only (erased at runtime): the fixtures are typed as the real email_events row, so a renamed or
+// dropped column breaks this file at compile time instead of drifting silently.
+import type { EmailEventRow } from '../src/data/contract.ts';
 
 // The operator.
 const USER_ID = '0f4b24da-e85b-40bb-8606-c81824493b45';
@@ -28,7 +31,10 @@ const USER_ID = '0f4b24da-e85b-40bb-8606-c81824493b45';
 const TRACKER_FINISHED_AT = '2026-11-05T07:24:02.000000+00:00';
 
 // One email row as the page's select('*') returns it; `over` replaces fields.
-const email = (over: Record<string, unknown>) => ({
+// `over` must carry the per-email columns with no sensible default (id, sender, subject, verdict, time);
+// the declared return type is what lets callers read RECEIPT.id (Record<string, unknown> hid it).
+type EmailOver = Partial<EmailEventRow> & Pick<EmailEventRow, 'id' | 'provider_message_id' | 'from_address' | 'subject' | 'classification' | 'received_at'>;
+const email = (over: EmailOver): EmailEventRow => ({
   user_id: USER_ID, thread_id: null, recipient_to: null, label_ids: null, classification_confidence: 0.9,
   processed_at: null, created_at: '2026-11-04T19:19:00+00:00', read_at: null, matched_application_id: null, snippet: '', ...over,
 });
@@ -50,7 +56,8 @@ describe('Emails page in a browser (fake session, every Supabase call answered l
   // Set when dist/ cannot prove anything; rethrown per test.
   let guardError: Error | undefined;
   // The rows the mocked table holds; writes change them as the database would.
-  let rows: Record<string, unknown>[] = [];
+  // Typed as the real row (was Record<string, unknown>[]), so the typed fixtures below fit and r.id is a string.
+  let rows: EmailEventRow[] = [];
   // Writes seen: read-mark PATCHes and track RPCs, with their bodies.
   const patches: unknown[] = [];
   const rpcs: unknown[] = [];

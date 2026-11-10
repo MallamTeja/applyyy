@@ -275,7 +275,9 @@ describe('attestSkill: one click puts the skill in the master, then on the resum
       const fake = fakeClient({});
       const out = await save.saveTailoredEdit(fake.client, {
         applicationId: 'app-1', resume: atV4, previous: atV3, original: atV4, master: clone(MASTER_V3) as never,
-        expectedUpdatedAt: LOADED_STAMP, event: { kind: 'resume_attest_skill', ref: NEW_ID, before: null, after: 'Java' }, repin,
+        expectedUpdatedAt: LOADED_STAMP,
+        // source is REQUIRED (EditSource, 2026-11-04): an attest from the review page is the operator's own act.
+        event: { kind: 'resume_attest_skill', ref: NEW_ID, before: null, after: 'Java', source: 'operator' }, repin,
       });
       assert.equal(out.ok, false);
       assert.equal(fake.calls.length, 0, 'a disagreeing re-pin never reaches the network');

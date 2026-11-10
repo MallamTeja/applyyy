@@ -213,8 +213,12 @@ describe('D5a: every structural change shows in the diff and counts', () => {
   it('a moved bullet (no word changed) counts once, is named, marks both swapped lines, and leaves Bucket A', () => {
     // Acme's two bullets swapped, text untouched.
     const moved = clone(original());
-    // In place: the reverse of a two-item list is the swap.
-    moved.experience[0]!.bullets.reverse();
+    // The Acme entry; read through a guard so a fixture without it fails here, not as a TypeError later.
+    const acme = moved.experience[0];
+    // assert.ok narrows `acme` to defined, so no non-null assertion is needed below.
+    assert.ok(acme, 'fixture must have an Acme entry');
+    // A NEW reversed list (DocumentOrdered is readonly, so no in-place reverse): the reverse of a two-item list is the swap.
+    acme.bullets = [...acme.bullets].reverse();
     // The diff of the reordered resume.
     const d = diffOf(moved);
     // One structural change, zero text edits: the count is exactly the move.
@@ -254,7 +258,11 @@ describe('D5a: every structural change shows in the diff and counts', () => {
     // The dropped AWS cert put back from FULL, as addMasterEntry would.
     const added = clone(original());
     // FULL's own entry, so the shape is exactly what an add produces.
-    added.certifications.push(full().certifications.find((c) => c.ref === 'cert-aws')!);
+    const aws = full().certifications.find((c) => c.ref === 'cert-aws');
+    // A missing cert is a fixture bug: fail on it by name instead of appending undefined.
+    assert.ok(aws, 'FULL must hold cert-aws');
+    // Appended as a NEW list (DocumentOrdered is readonly), the same end state addMasterEntry produces.
+    added.certifications = [...added.certifications, aws];
     // The diff.
     const d = diffOf(added);
     // One change, and it cannot have come from a line: the cert has none.
@@ -287,8 +295,16 @@ describe('D5a: every structural change shows in the diff and counts', () => {
   it('a bullet added back from the master is an unaudited line with no tailor version, and its offer is gone', () => {
     // b-ci put back under Acme, as addMasterBullet would.
     const added = clone(original());
-    // FULL's own bullet.
-    added.experience[0]!.bullets.push(full().experience[0]!.bullets.find((b) => b.ref === 'b-ci')!);
+    // FULL's own bullet, found by ref so the test does not depend on its position.
+    const ci = full().experience[0]?.bullets.find((b) => b.ref === 'b-ci');
+    // A missing bullet is a fixture bug: fail on it by name instead of appending undefined.
+    assert.ok(ci, 'FULL must hold b-ci under its first entry');
+    // The Acme entry the bullet goes under.
+    const acme = added.experience[0];
+    // Narrowed by the assert, so a fixture without Acme fails here.
+    assert.ok(acme, 'fixture must have an Acme entry');
+    // Appended as a NEW list (DocumentOrdered is readonly), the same end state addMasterBullet produces.
+    acme.bullets = [...acme.bullets, ci];
     // The diff.
     const d = diffOf(added);
     // The new line.
@@ -362,14 +378,23 @@ describe('grouping, offers and printed coverage', () => {
 const bulletName = (text: string) => 'bullet: ' + (text.length > 40 ? text.slice(0, 40) + '…' : text);
 // The whole review screen for a diff, editable unless a reason is given.
 const page = (d: Diff, editDisabledReason: string | null = null) =>
-  render(h(view.DiffView, { diff: d, onApprove: () => {}, onReject: () => {}, onEdit: async () => ({ ok: true }), editDisabledReason }));
+  render(h(view.DiffView, { diff: d, onApprove: () => {}, onReject: () => {}, onEdit: async () => ({ ok: true as const }), editDisabledReason }));
+// `as const` above keeps `ok` the literal `true` EditResult's success arm requires; a plain `true` widens to boolean and matches neither arm.
 
 describe('the controls on screen', () => {
   it('a moved bullet and an added one are listed in Changes by AI and say so; neither has a Reset', () => {
     // b-ci added, then the Acme list reordered so the tailor's two swap.
     const changed = clone(original());
-    // Added from FULL.
-    changed.experience[0]!.bullets.push(full().experience[0]!.bullets.find((b) => b.ref === 'b-ci')!);
+    // FULL's own b-ci, found by ref.
+    const ci = full().experience[0]?.bullets.find((b) => b.ref === 'b-ci');
+    // A missing bullet is a fixture bug: fail on it by name instead of appending undefined.
+    assert.ok(ci, 'FULL must hold b-ci under its first entry');
+    // The Acme entry it is added under.
+    const acme = changed.experience[0];
+    // Narrowed by the assert, so a fixture without Acme fails here.
+    assert.ok(acme, 'fixture must have an Acme entry');
+    // Added from FULL as a NEW list (DocumentOrdered is readonly).
+    acme.bullets = [...acme.bullets, ci];
     // b-tests, b-api, b-ci: the tailor's two swapped.
     changed.experience[0]!.bullets = [changed.experience[0]!.bullets[1]!, changed.experience[0]!.bullets[0]!, changed.experience[0]!.bullets[2]!];
     // The screen.

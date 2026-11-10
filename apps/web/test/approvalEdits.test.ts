@@ -112,21 +112,31 @@ const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 // The text defaults to EDITED_TEXT; the superseded tests pass their own to keep or drop a claim.
 const editedCurrent = (text: string = EDITED_TEXT) => {
   // Start from the tailor's version.
-  const current = clone(original()) as { experience: { bullets: { text: string }[] }[] };
-  // Only `text` changes; master_text stays, per R0.
-  current.experience[0]!.bullets[1]!.text = text;
-  // Retyped for the adapter.
-  return current as never;
+  // Kept as the real ResolvedResume type, so a contract change fails tsc here instead of hiding behind a cast.
+  const current = clone(original());
+  // The b-tests bullet (Acme, index 1), read through optional chaining.
+  const tests = current.experience[0]?.bullets[1];
+  // A missing bullet is a fixture bug: fail on it by name, not via a TypeError.
+  assert.ok(tests, 'fixture must have b-tests at experience[0].bullets[1]');
+  // Only `text` changes; master_text stays, per R0. A field write on the bullet object is allowed (only the list is readonly).
+  tests.text = text;
+  // Already the type the adapter reads; `diff` takes unknown, so no retyping is needed.
+  return current;
 };
 
 // The original with b-tests deleted, as a saved removal leaves tailored_profile.
 const removedCurrent = () => {
   // Start from the tailor's version.
-  const current = clone(original()) as { experience: { bullets: unknown[] }[] };
-  // Remove index 1.
-  current.experience[0]!.bullets.splice(1, 1);
-  // Retyped for the adapter.
-  return current as never;
+  // Kept as the real ResolvedResume type, so a contract change fails tsc here instead of hiding behind a cast.
+  const current = clone(original());
+  // The Acme entry that holds b-tests.
+  const acme = current.experience[0];
+  // A missing entry is a fixture bug: fail on it by name, not via a TypeError.
+  assert.ok(acme, 'fixture must have a first experience entry');
+  // Remove index 1 as a NEW list (DocumentOrdered is readonly, so no splice).
+  acme.bullets = acme.bullets.filter((_, i) => i !== 1);
+  // Already the type the adapter reads; `diff` takes unknown, so no retyping is needed.
+  return current;
 };
 
 // One Auditor finding on the tailor's version of b-tests.

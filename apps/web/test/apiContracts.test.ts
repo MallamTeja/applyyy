@@ -10,6 +10,8 @@
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+// The shared edge-client double, typed against the real EdgeClient so its shape cannot drift (W36).
+import { fakeEdgeClient } from './support/fakeEdgeClient.ts';
 
 import {
   formatSyncTime,
@@ -83,7 +85,7 @@ describe('Gmail Sync Edge-Function Contracts', () => {
   it('maps the gmail-sync response contract onto the closed outcome union', async () => {
     // One canned invoke per contract arm — the same seam double the unit tests use.
     const call = (result: { data: unknown; error: unknown }) => {
-      const client: GmailSyncClient = { functions: { invoke: async () => result } };
+      const client: GmailSyncClient = fakeEdgeClient(async () => result);
       return syncGmailInbox(client);
     };
     // ok: true is the only success spelling.
@@ -120,7 +122,8 @@ describe('Gmail Sync Edge-Function Contracts', () => {
     const interviewRow: EmailEventRow = {
       id: 'ev-1',
       user_id: 'usr-1',
-      provider: 'gmail',
+      // No provider column: email_events has none (only provider_message_id, migration 20260909234800),
+      // so the old provider key was fixture drift the shared EmailEventRow now rejects.
       provider_message_id: 'msg-1',
       received_at: '2026-09-12T10:00:00Z',
       from_address: 'recruiter@stripe.com',
@@ -128,6 +131,22 @@ describe('Gmail Sync Edge-Function Contracts', () => {
       snippet: 'We would love to schedule a 45-minute technical conversation.',
       matched_application_id: 'app-1',
       created_at: '2026-09-12T10:01:00Z',
+      // The columns EmailEventRow requires that this fixture used to omit, at a fresh row's values.
+      // unclassified, not interview_invite: the classifier short-circuit would skip the sender/subject
+      // heuristics this case is here to exercise.
+      classification: 'unclassified',
+      // No verdict yet, so no confidence.
+      classification_confidence: null,
+      // Still queued for the classifier.
+      processed_at: null,
+      // Older Apps Script versions send no thread id, To header or labels; null is the real shape for those.
+      thread_id: null,
+      // Same: no To header captured.
+      recipient_to: null,
+      // Same: no labels captured.
+      label_ids: null,
+      // Unread in the app; isInterviewEmail never reads it.
+      read_at: null,
     };
     assert.equal(isInterviewEmail(interviewRow), true);
 
@@ -135,7 +154,8 @@ describe('Gmail Sync Edge-Function Contracts', () => {
     const spamRow: EmailEventRow = {
       id: 'ev-2',
       user_id: 'usr-1',
-      provider: 'gmail',
+      // No provider column: email_events has none (only provider_message_id, migration 20260909234800),
+      // so the old provider key was fixture drift the shared EmailEventRow now rejects.
       provider_message_id: 'msg-2',
       received_at: '2026-09-12T10:00:00Z',
       from_address: 'updates@linkedin.com',
@@ -143,6 +163,22 @@ describe('Gmail Sync Edge-Function Contracts', () => {
       snippet: 'Here are new job listings matching your preferences.',
       matched_application_id: null,
       created_at: '2026-09-12T10:01:00Z',
+      // The columns EmailEventRow requires that this fixture used to omit, at a fresh row's values.
+      // unclassified, not interview_invite: the classifier short-circuit would skip the sender/subject
+      // heuristics this case is here to exercise.
+      classification: 'unclassified',
+      // No verdict yet, so no confidence.
+      classification_confidence: null,
+      // Still queued for the classifier.
+      processed_at: null,
+      // Older Apps Script versions send no thread id, To header or labels; null is the real shape for those.
+      thread_id: null,
+      // Same: no To header captured.
+      recipient_to: null,
+      // Same: no labels captured.
+      label_ids: null,
+      // Unread in the app; isInterviewEmail never reads it.
+      read_at: null,
     };
     assert.equal(isInterviewEmail(spamRow), false);
   });

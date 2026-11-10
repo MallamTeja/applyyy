@@ -8,6 +8,12 @@
 import './support/registerTsxHooks.ts';
 import assert from 'node:assert/strict';
 import { before, describe, it } from 'node:test';
+// The shared edge-client double, typed against the real EdgeClient so its shape cannot drift (W36).
+import { fakeEdgeClient } from './support/fakeEdgeClient.ts';
+// Types only (erased at run time): the panel seams return the real result unions, so a stub cannot return a shape the panel would never get.
+import type { EditResult } from '../src/features/approval/DiffView.tsx';
+// Same, the assist seam's closed union.
+import type { AssistResult } from '../src/features/approval/aiEdit.ts';
 
 // The pure module under test.
 let ai: typeof import('../src/features/approval/aiEdit.ts');
@@ -76,12 +82,16 @@ describe('resolveOps (one op) + toEditAction', () => {
     const edit = one({ op: 'edit', id: 'b0', text: 'New.', newNumbers: [] }, draft);
     // The ref, not the short id, so a reloaded chat still targets the right bullet.
     assert.deepEqual(edit && edit.op === 'edit' ? [edit.target, edit.before] : null, [{ kind: 'bullet', ref: 'exp_1_b1' }, 'Built a billing API.']);
+    // Only an applicable op has an action: a null or a "rejected" card here is a failure, and the assert narrows the type for toEditAction.
+    assert.ok(edit !== null && edit.op !== 'rejected', 'the bullet edit must resolve to an applicable op');
     // Applied as a plain edit on that ref.
-    assert.deepEqual(edit && ai.toEditAction(edit), { kind: 'edit', target: { kind: 'bullet', ref: 'exp_1_b1' }, text: 'New.' });
+    assert.deepEqual(ai.toEditAction(edit), { kind: 'edit', target: { kind: 'bullet', ref: 'exp_1_b1' }, text: 'New.' });
     // The summary has its own target.
     const summary = one({ op: 'edit', id: 'summary', text: 'S.', newNumbers: [] }, draft);
+    // Same narrowing: the summary edit must resolve, never be rejected.
+    assert.ok(summary !== null && summary.op !== 'rejected', 'the summary edit must resolve to an applicable op');
     // Applied on the summary.
-    assert.deepEqual(summary && ai.toEditAction(summary), { kind: 'edit', target: { kind: 'summary' }, text: 'S.' });
+    assert.deepEqual(ai.toEditAction(summary), { kind: 'edit', target: { kind: 'summary' }, text: 'S.' });
     // An id that was never sent becomes a "not done" card with its reason, never a silent drop (2026-11-04).
     assert.deepEqual(one({ op: 'remove', id: 'b7' }, draft), { op: 'rejected', what: 'Remove bullet b7', why: 'The AI named a bullet it was not shown.' });
     // A skill records whether the master had it, and applies through the attest path.
@@ -125,7 +135,7 @@ describe('readStoredOp (rows are untrusted)', () => {
 
 describe('requestAssist', () => {
   // A client whose invoke answers `answer`.
-  const client = (answer: () => Promise<{ data: unknown; error: unknown }>) => ({ functions: { invoke: answer } });
+  const client = (answer: () => Promise<{ data: unknown; error: unknown }>) => fakeEdgeClient(answer);
   // A minimal valid body.
   const body = { instruction: 'x', job: { title: '', company: '', missing: [] }, summary: null, bullets: [], skills: '', categories: [], history: [] };
 
@@ -188,7 +198,7 @@ describe('formatUsage', () => {
 describe('AiEditPanel (chat)', () => {
   it('renders a new chat: picker, empty-state hint, and Send disabled until something is typed', () => {
     // Static render with no store: a session-only chat; the seams are never called.
-    const html = render(h(panel.AiEditPanel, { diff, onEdit: async () => ({ ok: true }), onAssist: async () => ({ kind: 'error', message: '' }), busy: false, categories: [] }));
+    const html = render(h(panel.AiEditPanel, { diff, onEdit: async (): Promise<EditResult> => ({ ok: true }), onAssist: async (): Promise<AssistResult> => ({ kind: 'error', message: '' }), busy: false, categories: [] }));
     // The heading.
     assert.match(html, /<h3[^>]*class="ai-chat__title"[^>]*>AI resume chat<\/h3>/);
     // The past-chats picker, offering the unsaved new chat under a label distinct from the "New chat" button.
@@ -507,7 +517,7 @@ describe('requestAssist reads the structure ops', () => {
       { op: 'new_bullet', entry: 'e0', text: 't' },
     ];
     // A client answering them.
-    const answer = (list: unknown[]) => ({ functions: { invoke: async () => ({ data: { status: 'ok', ops: list, note: '' }, error: null }) } });
+    const answer = (list: unknown[]) => fakeEdgeClient(async () => ({ data: { status: 'ok', ops: list, note: '' }, error: null }));
     // A minimal body.
     const body = { instruction: 'x', job: { title: '', company: '', missing: [] }, summary: null, bullets: [], skills: '', categories: [], history: [] };
     // Read through as-is.
@@ -706,7 +716,7 @@ describe('rejected cards (every dropped op is shown with its reason, 2026-11-04)
 
   it('come from the server with their reasons, plus a count the server did not itemise', async () => {
     // The new server shape: two reasons listed, three dropped in all.
-    const client = { functions: { invoke: async () => ({ data: { status: 'ok', ops: [], dropped: 3, rejected: [{ what: 'Add skill "C"', why: 'No name.' }, { what: 'Add skill "Go"', why: 'Not a group.' }], note: 'n', usage: {} }, error: null }) } };
+    const client = fakeEdgeClient(async () => ({ data: { status: 'ok', ops: [], dropped: 3, rejected: [{ what: 'Add skill "C"', why: 'No name.' }, { what: 'Add skill "Go"', why: 'Not a group.' }], note: 'n', usage: {} }, error: null }));
     // Read.
     const result = await ai.requestAssist(client, { instruction: 'x', job: { title: '', company: '', missing: [] }, summary: null, bullets: [], skills: '', categories: [], history: [] });
     // Both listed, and the third said rather than lost.
@@ -719,7 +729,7 @@ describe('rejected cards (every dropped op is shown with its reason, 2026-11-04)
 
   it('refuse a malformed reason list instead of showing part of it', async () => {
     // A reason that is not a string.
-    const client = { functions: { invoke: async () => ({ data: { status: 'ok', ops: [], rejected: [{ what: 'x', why: 1 }], note: '', usage: {} }, error: null }) } };
+    const client = fakeEdgeClient(async () => ({ data: { status: 'ok', ops: [], rejected: [{ what: 'x', why: 1 }], note: '', usage: {} }, error: null }));
     // An error, like an unreadable op.
     assert.equal((await ai.requestAssist(client, { instruction: 'x', job: { title: '', company: '', missing: [] }, summary: null, bullets: [], skills: '', categories: [], history: [] })).kind, 'error');
   });
@@ -765,7 +775,7 @@ describe('AiEditPanel shows the truth on each card (2026-11-04)', () => {
 
   it('offers starter questions in an empty chat', () => {
     // Static render with no store.
-    const html = render(h(panel.AiEditPanel, { diff: jdiff, onEdit: async () => ({ ok: true }), onAssist: async () => ({ kind: 'error', message: '' }), busy: false, categories: [] }));
+    const html = render(h(panel.AiEditPanel, { diff: jdiff, onEdit: async (): Promise<EditResult> => ({ ok: true }), onAssist: async (): Promise<AssistResult> => ({ kind: 'error', message: '' }), busy: false, categories: [] }));
     // At least one suggestion button, typed into the composer on click.
     assert.match(html, /<button type="button" class="ai-chat__suggestion"/);
   });
