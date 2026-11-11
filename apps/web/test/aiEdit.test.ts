@@ -197,8 +197,8 @@ describe('formatUsage', () => {
 
 describe('AiEditPanel (chat)', () => {
   it('renders a new chat: picker, empty-state hint, and Send disabled until something is typed', () => {
-    // Static render with no store: a session-only chat; the seams are never called.
-    const html = render(h(panel.AiEditPanel, { diff, onEdit: async (): Promise<EditResult> => ({ ok: true }), onAssist: async (): Promise<AssistResult> => ({ kind: 'error', message: '' }), busy: false, categories: [] }));
+    // Static render with no store: a session-only chat; the seams are never called (onEditBatch is required since T16).
+    const html = render(h(panel.AiEditPanel, { diff, onEdit: async (): Promise<EditResult> => ({ ok: true }), onEditBatch: async (): Promise<EditResult> => ({ ok: true }), onAssist: async (): Promise<AssistResult> => ({ kind: 'error', message: '' }), busy: false, categories: [] }));
     // The heading.
     assert.match(html, /<h3[^>]*class="ai-chat__title"[^>]*>AI resume chat<\/h3>/);
     // The past-chats picker, offering the unsaved new chat under a label distinct from the "New chat" button.
@@ -774,8 +774,8 @@ describe('AiEditPanel shows the truth on each card (2026-11-04)', () => {
   });
 
   it('offers starter questions in an empty chat', () => {
-    // Static render with no store.
-    const html = render(h(panel.AiEditPanel, { diff: jdiff, onEdit: async (): Promise<EditResult> => ({ ok: true }), onAssist: async (): Promise<AssistResult> => ({ kind: 'error', message: '' }), busy: false, categories: [] }));
+    // Static render with no store; the batch-save stub is never called (required since T16).
+    const html = render(h(panel.AiEditPanel, { diff: jdiff, onEdit: async (): Promise<EditResult> => ({ ok: true }), onEditBatch: async (): Promise<EditResult> => ({ ok: true }), onAssist: async (): Promise<AssistResult> => ({ kind: 'error', message: '' }), busy: false, categories: [] }));
     // At least one suggestion button, typed into the composer on click.
     assert.match(html, /<button type="button" class="ai-chat__suggestion"/);
   });

@@ -144,8 +144,8 @@ Every edit (AI op, attest, Reset) ends in `saveTailoredEdit.ts`:
    `weakest_bullet`, never below the floors. If the floors overflow, or the resume cannot be measured,
    the edit is **refused** (fail closed). Every cut is shown as a toast ("Trimmed to fit one page: ...")
    and recorded as `page_fit_trimmed`.
-2. **Batch preflight.** Before the first op of an AI batch is saved, `preflightBatch` simulates the whole
-   batch (each op plus the fit). A batch never lands half-applied.
+2. **Atomic batch save.** An AI batch is saved in one write (`onEditBatch`, required since T16, 2026-11-10),
+   judged on its end state, so a batch never lands half-applied. The old per-op `preflightBatch` is gone.
 3. **Write the resume** (`applications.tailored_profile`), with shape, R0' (every node traces to the
    pinned master under its true parent), status and stamp guards.
 4. **Write a note** in `application_events` (append-only): who changed which words.

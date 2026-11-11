@@ -1,6 +1,7 @@
 // The one-page rule, live in the approval editor (Teja, 2026-11-07 23:18 IST): an edit that would
 // overflow is trimmed in the same save and the cut is announced; floors that overflow refuse the
-// edit; an AI batch that would hit the floors is held back before its first save.
+// edit; an AI batch whose END STATE would hit the floors saves nothing (planBatch; the per-op
+// preflightBatch it replaced was deleted in T16, 2026-11-10).
 // The page measurement is the template's real fitsOnePage (calibrated against Chromium in
 // worker/test/page-fit-calibration.test.ts); the fixture is the template's committed synthetic one.
 // The .tsx loader; must be the first import so it runs before any component loads.
@@ -122,15 +123,7 @@ describe('content rules in the editor (Teja, 2026-11-08)', () => {
     // Saved.
     assert.equal(out.ok, true, out.ok ? '' : out.reason);
   });
-
-  it('an AI batch that would add a 3rd project is held back before its first save', () => {
-    // Each op adds the named project.
-    const addProject = (resume: ResolvedResume, ref: string) => ({ ok: true as const, resume: { ...resume, projects: [...resume.projects, project(ref)] } as unknown as ResolvedResume });
-    // From one project: op 1 is fine, op 2 makes three.
-    const reason = fit.preflightBatch(withProjects(['prj_applyy']), ['prj_two', 'prj_three'], addProject, [], THREE_PROJECT_MASTER);
-    // Held back with the rule.
-    assert.match(reason ?? '', /projects: 3, at most 2/);
-  });
+  // T16: "a batch that would add a 3rd project" now lives in aiEditBatch.test.ts ("an over-limit batch applies nothing").
 });
 
 describe('fitEditToOnePage (live, per save)', () => {
@@ -189,29 +182,18 @@ describe('fitEditToOnePage (live, per save)', () => {
   });
 });
 
-describe('preflightBatch (AI batch, before the first save)', () => {
-  // A step that applies "add N skills" actions, the way pureEdit applies add_skill.
-  const step = (resume: ResolvedResume, n: number) => ({ ok: true as const, resume: withSkills(resume, n) });
-
-  it('a batch whose every op saves on one page passes (trims are fine, they happen in each save)', () => {
-    // Three single-skill adds on a near-full resume: each save trims, none hits the floors.
-    assert.equal(fit.preflightBatch(nearFull(), [1, 1, 1], step, [], EMPTY_MASTER), null);
-  });
-
-  it('a batch whose op 3 would hit the floors is held back with the reason, before any op saves', () => {
-    // A step whose third op makes the never-trimmed summary huge.
-    const summaryStep = (resume: ResolvedResume, op: string) => ({ ok: true as const, resume: op === 'huge' ? ({ ...resume, section_order: ['summary', ...resume.section_order], summary: 'Long summary. '.repeat(900) } as ResolvedResume) : withSkills(resume, 1) });
-    // Ops 1 and 2 fine, op 3 over the floors.
-    const reason = fit.preflightBatch(grown(0), ['a', 'b', 'huge'], summaryStep, [], EMPTY_MASTER);
-    // The batch is refused as a whole.
-    assert.match(reason ?? '', /longer than one page/);
-  });
-
-  it('an op the edit itself refuses does not block the batch (its own save reports it)', () => {
-    // A refusing step.
-    const refusing = (_resume: ResolvedResume, _op: number) => ({ ok: false as const });
-    // Nothing would change, so nothing overflows.
-    assert.equal(fit.preflightBatch(grown(0), [1, 2], refusing, [], EMPTY_MASTER), null);
+/* T16 (2026-11-10): the per-op preflightBatch tests went with it. Two described rules planBatch deliberately
+   does NOT have ("trims happen in each save": planBatch fits the end state once; "a refused op does not block":
+   planBatch refuses the whole batch, tested in aiEditBatch.test.ts). The one rule both share, an end state
+   over the floors, is ported here so it stays covered. */
+describe('planBatch (AI batch, end state over the floors)', () => {
+  it('a batch whose end state would hit the floors saves nothing, with the reason', () => {
+    // A step whose third op makes the never-trimmed summary huge; planBatch's step also reports before/after.
+    const summaryStep = (resume: ResolvedResume, op: string) => ({ ok: true as const, before: null, after: null, resume: op === 'huge' ? ({ ...resume, section_order: ['summary', ...resume.section_order], summary: 'Long summary. '.repeat(900) } as ResolvedResume) : withSkills(resume, 1) });
+    // Ops 1 and 2 fine, op 3 pushes the end state over the floors.
+    const plan = fit.planBatch(grown(0), ['a', 'b', 'huge'], summaryStep, [], EMPTY_MASTER);
+    // Refused as a whole, with the one-page reason: nothing to save.
+    assert.ok(!plan.ok && /longer than one page/.test(plan.reason), plan.ok ? 'saved' : plan.reason);
   });
 });
 

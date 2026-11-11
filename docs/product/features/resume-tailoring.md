@@ -257,7 +257,7 @@ and the row goes to `failed`. A trimmed profile is re-validated by the same vali
 | Where | What happens |
 |---|---|
 | Tailor | Fit after validation; trims recorded as `page_fit_trimmed`; refuse on overflow. |
-| Web editor | Every save runs `fitEditToOnePage` (`apps/web/src/features/approval/pageFitEdit.ts`). Teja sees a notice of what was cut; the event records it. A batch of edits is pre-checked (`preflightBatch`). |
+| Web editor | Every save runs `fitEditToOnePage` (`apps/web/src/features/approval/pageFitEdit.ts`). Teja sees a notice of what was cut; the event records it. A batch of edits is saved atomically and fitted on its end state (`onEditBatch`, T16). |
 | Worker | `worker/src/render-resume-pdf.ts` counts real PDF pages and throws `ResumeNotOnePageError` unless the count is exactly 1. All four render sites go through it, and it runs before `approved -> applying`, so nothing is sent. |
 
 Measure page counts of queued rows: `worker/src/cli/resume-pages.ts`.

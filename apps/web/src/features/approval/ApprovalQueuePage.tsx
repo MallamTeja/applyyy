@@ -48,7 +48,7 @@ import { DiffView } from './DiffView';
 import type { ClaimDecision, EditAction, EditResult } from './DiffView';
 import { buildResumeDiff } from './diffAdapter';
 // The one-page rule, live: every edit is fitted on one page before it is saved (2026-11-07).
-import { planBatch, preflightBatch } from './pageFitEdit';
+import { planBatch } from './pageFitEdit';
 // Type only (T10 review): what the Apply-all preview answers.
 import type { BatchPlan } from './pageFitEdit';
 // T10: the overflow preview an AI-chat card shows before Apply, run on the same fit the save runs.
@@ -1824,29 +1824,6 @@ export function ApprovalQueuePage(): ReactElement {
      never describe a resume that was not stored. */
   /* editSource (2026-11-04): who decided the edit, written to the history note; required, so no path
      is logged as the operator by omission. Named editSource because `source` below is the RowSource. */
-  /* THE AI-BATCH PREFLIGHT (2026-11-07): simulate a whole batch on this row's latest saved resume,
-     each op through the same pureEdit and one-page fit its save will run, BEFORE the first save. The
-     reason the batch would stop on the one-page floors, or null. Pure: reads refs, writes nothing.
-     A row the page cannot simulate answers null: each save then refuses on its own guards. */
-  function preflightRow(applicationId: string, actions: readonly EditAction[]): string | null {
-    // The same inputs editRow reads.
-    const source = latestSources.current.get(applicationId);
-    // The latest saved resume, the one the first op builds on.
-    const current = latestResumes.current.get(applicationId);
-    // Not simulable: editRow's own guards will refuse these saves with their own reasons.
-    if (source === undefined || current === undefined || source.original === null || source.full === null) return null;
-    // Narrowed copies for the closure.
-    const { original, master, full } = source;
-    // One step = one pure edit; the two master-writing kinds change nothing here (their saves report themselves).
-    return preflightBatch(current, actions, (resume, action) =>
-      // attest_* write the master on their own paths, so the simulation leaves the resume as it is.
-      action.kind === 'attest_skill' || action.kind === 'attest_bullet' ? { ok: false } : pureEdit(action, resume, original, master, full),
-      // The row's JD keywords, as every save uses.
-      source.application.selected_jd_keywords,
-      // The pinned master, so the batch is held back on the content rules its saves would refuse.
-      master);
-  }
-
   /* T10 (2026-11-10): THE OVERFLOW PREVIEW for one content-adding AI card, before its Apply. Built from the
      same refs and the same edit its save would use, then the same fit, so the drop it names is the trim the
      save makes. Pure: reads refs, writes nothing. null = no preview (not an add, or the row is not simulable;
@@ -2490,8 +2467,6 @@ export function ApprovalQueuePage(): ReactElement {
                     onReject={(reason) => rejectReviewed(diff.applicationId, reason)}
                     /* Saves for real; see editRow. */
                     onEdit={(action, editSource) => editRow(diff.applicationId, action, editSource)}
-                    /* The AI chat's one-page preflight over a whole batch (2026-11-07). */
-                    onPreflight={(actions) => preflightRow(diff.applicationId, actions)}
                     /* T10: the AI chat's atomic batch save (a swap is judged on its end state); see editRows. */
                     onEditBatch={(actions, editSource) => editRows(diff.applicationId, actions, editSource)}
                     /* D4: only when the tailor's original could not be rebuilt. */
@@ -2671,8 +2646,6 @@ export function ApprovalQueuePage(): ReactElement {
                         onReject={(reason) => rejectReviewed(diff.applicationId, reason)}
                         /* Same save path as Bucket B; an edit moves the row there (R2). */
                         onEdit={(action, editSource) => editRow(diff.applicationId, action, editSource)}
-                    /* The AI chat's one-page preflight over a whole batch (2026-11-07). */
-                    onPreflight={(actions) => preflightRow(diff.applicationId, actions)}
                     /* T10: the AI chat's atomic batch save (a swap is judged on its end state); see editRows. */
                     onEditBatch={(actions, editSource) => editRows(diff.applicationId, actions, editSource)}
                         /* D4, as in Bucket B. */

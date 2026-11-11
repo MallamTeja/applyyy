@@ -115,15 +115,13 @@ function isAttestAction(action: EditAction): boolean {
   return action.kind === 'attest_skill' || action.kind === 'attest_bullet';
 }
 
-/* T10: the line on an open swap half, naming its partner. `canPair` is false only where the screen has no
-   atomic save (render-only callers): the button is then off, and the line says why instead of failing a click. */
-function swapLine(partner: ApplicableOp, canPair: boolean): string {
+/* T10: the line on an open swap half, naming its partner. T16: the atomic save is always there now, so the
+   "this screen cannot save both at once" variant (render-only callers) went with the op-by-op fallback. */
+function swapLine(partner: ApplicableOp): string {
   // The partner's label when it has one (both swap kinds do), else a generic name.
   const name = 'label' in partner ? `"${partner.label}"` : 'its partner';
-  // What the click does, or why it cannot.
-  return canPair
-    ? `Part of a swap with ${name}: Apply on either card saves both together, so the resume never sits a project short or over.`
-    : `Part of a swap with ${name}: it only applies together with it, and this screen cannot save both at once.`;
+  // What the click does.
+  return `Part of a swap with ${name}: Apply on either card saves both together, so the resume never sits a project short or over.`;
 }
 
 /* One reply's status line, read from the resume (never from the reply's text). */
@@ -378,9 +376,7 @@ export function AiEditPanel({
   structure,
   // A prompt the card's ATS panel asks to pre-fill; absent until a suggestion chip is clicked.
   seed,
-  // The one-page preflight for a whole batch; absent means no check (render-only callers).
-  onPreflight,
-  // T10: the page's atomic batch save; absent means op-by-op saves and no swap pairs (render-only callers).
+  // T10: the page's atomic batch save; required since T16, so no caller can fall back to op-by-op saves.
   onEditBatch,
 }: {
   // The rendered diff: the AI's context is built from it, so it sees what the operator sees.
@@ -400,14 +396,12 @@ export function AiEditPanel({
   readonly structure?: AssistStructure | undefined;
   // One pre-fill request; a fresh object per click so a repeated keyword still fills (see the effect).
   readonly seed?: { readonly text: string } | null | undefined;
-  /* The one-page preflight (2026-11-07): the page simulates the WHOLE batch, each op followed by the
-     one-page fit its save will run, and answers the reason it would stop on the floors (null = fine).
-     Asked BEFORE the first save, so a batch never lands half-applied because op 3 hit the floors. */
-  readonly onPreflight?: ((actions: readonly EditAction[]) => string | null) | undefined;
   /* T10 (2026-11-10): the page's ATOMIC batch save. Every action is folded, the END STATE is fitted and
      rule-checked once, and one write lands, or nothing does. A swap (remove one project, add another)
-     can only pass this way: checked after each op, its remove is always "projects: 1, needs 2". */
-  readonly onEditBatch?: ((actions: readonly EditAction[], editSource: ChatSource) => Promise<EditResult>) | undefined;
+     can only pass this way: checked after each op, its remove is always "projects: 1, needs 2".
+     T16 (2026-11-10): REQUIRED. It replaced the per-op onPreflight check (2026-11-07), which never ran once
+     every caller passed this; a missing batch save is now a compile error, not a silent op-by-op fallback. */
+  readonly onEditBatch: (actions: readonly EditAction[], editSource: ChatSource) => Promise<EditResult>;
 }): ReactElement {
   // Ties labels to controls and the heading to the region.
   const baseId = useId();
@@ -553,12 +547,8 @@ export function AiEditPanel({
       /* T10: and half of a swap never applies by itself: its partner (a whole-entry removal) always waits for a
          click, and the add alone would be refused on the project cap. Both wait, and one click takes both. */
       reply === undefined || op.op === 'rejected' || !shouldAutoApply(op, text) || isPairedHalf(reply.ops ?? [], index) ? [] : [{ op, key: opKey(reply, index) }]);
-    // The one-page preflight over the whole batch, before any save; only without the atomic save, which judges the end state itself.
-    const held = onEditBatch === undefined ? (onPreflight?.(auto.map(({ op, key }) => actionFor(op, key))) ?? null) : null;
-    // Held: nothing is applied, the cards stay for a click, and the reason is said.
-    if (held !== null) setError(`Not applied: ${held}`);
-    // Otherwise the batch; a refusal shows on its cards with Retry.
-    else if (auto.length > 0) await applyMany(auto, 'ai_chat_auto');
+    // The batch, judged on its end state by the atomic save; a refusal shows on its cards with Retry.
+    if (auto.length > 0) await applyMany(auto, 'ai_chat_auto');
     // Unlocks.
     setAsking(false);
   }
@@ -607,16 +597,9 @@ export function AiEditPanel({
      leave the batch saved: a master insert and a row update cannot be one transaction from the browser, so
      that partial save is REPORTED in one line naming what landed and what did not (aiEdit.runApplyBatch,
      review fix 2026-11-10), never silent and never undone behind Teja's back.
-     (A new bullet is attest too, but it never reaches here: it always takes its own click.) Without the
-     batch save (render-only callers) the ops go one by one, as before T10. Answers whether all landed. */
+     (A new bullet is attest too, but it never reaches here: it always takes its own click.) The batch save
+     is required (T16), so there is no op-by-op fallback left. Answers whether all landed. */
   async function applyMany(items: readonly { readonly op: ApplicableOp; readonly key: string }[], editSource: ChatSource): Promise<boolean> {
-    // No atomic save offered: the pre-T10 loop, first failure stops it.
-    if (onEditBatch === undefined) {
-      // One at a time: each save writes the whole resume, so two in flight would race.
-      for (const { op, key } of items) if (!(await apply(op, key, editSource))) return false;
-      // Every op landed.
-      return true;
-    }
     // The pure run: batch first, attests after, the outcome closed (all / none / partial).
     const run = await runApplyBatch(
       items,
@@ -689,10 +672,6 @@ export function AiEditPanel({
   async function applyAll(message: ChatMessage): Promise<void> {
     // The ops Apply all will save, with their card keys, in order (one list, shared with the Apply-all preview).
     const batch = allBatch(message);
-    // The one-page preflight over the whole batch, before any save; only without the atomic save (T10), which checks the end state itself.
-    const held = onEditBatch === undefined ? (onPreflight?.(batch.map(({ op, key }) => actionFor(op, key))) ?? null) : null;
-    // Held: nothing is applied; the reason is said where the chat shows errors.
-    if (held !== null) { setError(`Not applied: ${held}`); return; }
     // Locks the buttons.
     setApplyingAll(true);
     // A new run clears the last failure, so a stale "Not applied" never sits over a run that worked.
@@ -913,7 +892,7 @@ export function AiEditPanel({
                             onClick={() => void applyCard(message, index)}
                             /* Waits for any save, ask or batch; T10: and stays off when the floors would refuse the save anyway,
                                or when this is half of a swap and the screen has no way to save both at once. */
-                            disabled={locked || state?.status === 'applying' || overflow?.kind === 'blocked' || (openPair && onEditBatch === undefined)}
+                            disabled={locked || state?.status === 'applying' || overflow?.kind === 'blocked'}
                           >
                             {/* A failed one is retried by the same button. */}
                             {state?.status === 'applying' ? 'Applying…' : state?.status === 'failed' ? 'Retry' : 'Apply'}
@@ -925,7 +904,7 @@ export function AiEditPanel({
                         {/* T10: before Apply, what one page costs: the bullet Apply also drops, or why it cannot fit. Quiet when it fits. */}
                         {overflowNotice(overflow) !== null ? <p className="ai-chat__meta ai-chat__hold">{overflowNotice(overflow)}</p> : null}
                         {/* T10: an open swap half says it goes with its partner, so Teja sees the two cards are one change. */}
-                        {openPair && partner !== undefined && partner.op !== 'rejected' ? <p className="ai-chat__meta ai-chat__hold">{swapLine(partner, onEditBatch !== undefined)}</p> : null}
+                        {openPair && partner !== undefined && partner.op !== 'rejected' ? <p className="ai-chat__meta ai-chat__hold">{swapLine(partner)}</p> : null}
                         {/* Why a card that is not applied waits for a click (2026-11-04, audit-gated), so "not applied yet" is never unexplained. */}
                         {!applied && state === undefined && holdReason(op) !== null ? <p className="ai-chat__meta ai-chat__hold">{holdReason(op)}</p> : null}
                       </li>

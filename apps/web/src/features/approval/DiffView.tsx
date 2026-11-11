@@ -144,9 +144,6 @@ export interface DiffViewProps {
   /* The page's save; editSource (2026-11-04) says who decided the edit, for the history note. A
      line's Reset passes 'operator'; the AI chat passes its own. */
   readonly onEdit?: ((action: EditAction, editSource: EditSource) => Promise<EditResult>) | undefined;
-  /* The one-page preflight for an AI batch (2026-11-07), handed through to the chat: the page simulates
-     the batch with its own pure edits and the one-page fit; null means every op would save on one page. */
-  readonly onPreflight?: ((actions: readonly EditAction[]) => string | null) | undefined;
   /* T10 (2026-11-10): the page's ATOMIC batch save, handed through to the chat: every action folded, the end
      state fitted and rule-checked once, then one write (a swap can never pass a check after each op). */
   readonly onEditBatch?: ((actions: readonly EditAction[], editSource: EditSource) => Promise<EditResult>) | undefined;
@@ -840,8 +837,6 @@ export function DiffView({
   onApprove,
   onReject,
   onEdit,
-  // The one-page preflight, passed straight to the AI chat.
-  onPreflight,
   // T10: the atomic batch save, wrapped below like onEdit.
   onEditBatch,
   editDisabledReason,
@@ -906,7 +901,8 @@ export function DiffView({
         };
 
   /* T10: the batch save under the same lock and the same "unknown, never not-saved" catch as runEdit. Absent
-     when the page gives none or there is no single save path either (the chat then applies op by op). */
+     when the page gives none or there is no single save path either; T16: the chat then does not mount at all
+     (it requires the batch save), instead of falling back to op-by-op saves. */
   const runEditBatch =
     onEditBatch === undefined || onEdit === undefined
       ? undefined
@@ -1093,8 +1089,9 @@ export function DiffView({
       {(() => {
         // The panel itself: bound to THIS row's onEdit and id, so whatever it applies lands on this row only.
         const panel =
-          runEdit !== null && onAssist !== undefined && !editDisabledReason ? (
-            <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onEditBatch={runEditBatch} onPreflight={onPreflight} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} chat={chat} structure={assistStructure ?? undefined} seed={chatSeed} />
+          /* T16: the batch save is required by the panel, so it mounts only where the page gave one (both pages do). */
+          runEdit !== null && runEditBatch !== undefined && onAssist !== undefined && !editDisabledReason ? (
+            <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onEditBatch={runEditBatch} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} chat={chat} structure={assistStructure ?? undefined} seed={chatSeed} />
           ) : /* Docked and read-only: say why, instead of a dock that is silently empty. */ chatDock?.active === true && editDisabledReason ? (
             <p className="diff__edit-note">AI chat is off for this resume: {editDisabledReason}</p>
           ) : null;

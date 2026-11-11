@@ -112,36 +112,6 @@ export function fitEditToOnePage(next: ResolvedResume, jdKeywords: readonly stri
   return { ok: true, resume: fit.resume, trimmed: fit.trimmed, notice: trimNotice(fit.trimmed) };
 }
 
-/* One edit step, as the page computes it (pureEdit): a new resume, or a refusal. */
-export type EditStep<A> = (resume: ResolvedResume, action: A) => { readonly ok: true; readonly resume: ResolvedResume } | { readonly ok: false };
-
-/* THE AI-BATCH PREFLIGHT: simulate every op of a batch on the current resume, each followed by the
-   same fit its real save will run, BEFORE the first save. Answers the reason the batch would stop
-   on the floors, or null when every op would save on one page. So a batch never lands half-applied
-   because op 3 hit the floors. An op the edit itself refuses is not this check's business (its own
-   save reports it), so the simulation skips it exactly as a refused save changes nothing. */
-// `master` is required for the same reason fitEditToOnePage's `rules` is: the batch must hit the content rules its saves will.
-export function preflightBatch<A>(current: ResolvedResume, actions: readonly A[], step: EditStep<A>, jdKeywords: readonly string[], master: MasterProfile): string | null {
-  // The resume as it would stand after each save.
-  let resume = current;
-  // Each op in order, as the real loop applies them.
-  for (const action of actions) {
-    // The edit itself.
-    const edited = step(resume, action);
-    // A refused edit saves nothing, so the resume is unchanged for the next op.
-    if (!edited.ok) continue;
-    // The fit its save would run.
-    // Judged against the resume this op starts from, exactly as its real save compares with the stored row.
-    const fitted = fitEditToOnePage(edited.resume, jdKeywords, { previous: resume, master });
-    // This op would be refused (floors or content rules): the whole batch is held back, with the reason.
-    if (!fitted.ok) return fitted.reason;
-    // What would be stored before the next op.
-    resume = fitted.resume;
-  }
-  // Every op would save on one page.
-  return null;
-}
-
 /* T10 (2026-11-10): THE ATOMIC BATCH. Live bug (Teja, 12:20 IST): an AI swap ("instead of One-on-One
    use F1 Race Pace") is remove_entry + add_master_entry, and checked after EACH op it can never pass:
    the remove alone is "projects: 1, needs 2", the add alone "projects: 3, at most 2". So a batch is

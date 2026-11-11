@@ -112,8 +112,8 @@ describe('T10 swap: Apply all judges the end state, not each step', () => {
     const plan = fit.planBatch(CURRENT(), actions, step, [], THREE_PROJECT_MASTER);
     // Passes.
     assert.equal(plan.ok, true, plan.ok ? '' : plan.reason);
-    // The step-by-step preflight, by contrast, refuses on the intermediate 1-project state (the bug).
-    assert.match(fit.preflightBatch(CURRENT(), actions, step, [], THREE_PROJECT_MASTER) ?? '', /projects: 1, needs 2/);
+    // (T16: the contrast with the deleted per-op preflightBatch, which refused this on "projects: 1, needs 2", is
+    // kept by "the remove alone is still refused" below: that intermediate state is what the old check judged.)
   });
 
   it('T10 swap: the remove alone is still refused', () => {

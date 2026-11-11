@@ -41,8 +41,8 @@ function diffWith(jobDescription: string | null | undefined): never {
 
 /* The panel's markup for one diff, with seams that are never called by a static render. */
 function markup(jobDescription: string | null | undefined): string {
-  // A session-only chat (no store), not busy.
-  return render(h(panel.AiEditPanel, { diff: diffWith(jobDescription), onEdit: async (): Promise<EditResult> => ({ ok: true }), onAssist: async (): Promise<AssistResult> => ({ kind: 'error', message: '' }), busy: false, categories: [] }));
+  // A session-only chat (no store), not busy; the batch-save stub is required since T16 and never called.
+  return render(h(panel.AiEditPanel, { diff: diffWith(jobDescription), onEdit: async (): Promise<EditResult> => ({ ok: true }), onEditBatch: async (): Promise<EditResult> => ({ ok: true }), onAssist: async (): Promise<AssistResult> => ({ kind: 'error', message: '' }), busy: false, categories: [] }));
 }
 
 describe('AiEditPanel waits for the job description (2026-11-09)', () => {
