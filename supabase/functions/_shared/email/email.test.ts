@@ -242,3 +242,19 @@ test("isJobBoardSender: a board or its subdomain passes; a look-alike does not",
   // An employer is not a board.
   assert.equal(isJobBoardSender("Acme <jobs@acme.com>"), false);
 });
+
+// Canonical's Greenhouse receipt (2026-11-11, live, twice in one evening): "Thank you for applying ..." stored as an
+// interview invite, because the process description names a "panel interview" and "an interview with our Talent
+// team". A receipt only describes the process; only a direct invitation inside one is an invite.
+test("classifyRawEmail reads Canonical's receipt (panel interview described, not offered) as unknown, and a real invite still wins", () => {
+  // The live wording, trimmed to the sentences that matter.
+  const body = "Dear Teja Thank you for applying to the Python Engineer position at Canonical. Our interview process starts with a written interview. At some stage you will have an interview with our Talent team to discuss things like employment terms. Once your course is set, you will meet the hiring manager for that particular role. We may finish the process with a panel interview for shortlisted candidates.";
+  // The receipt: never interviewing.
+  const receipt = classifyRawEmail({ subject: "Thank you for applying to Canonical", body, sender: "no-reply@us.greenhouse-mail.io" });
+  // Unknown keeps the application at applied.
+  assert.equal(receipt.outcome, "unknown");
+  // A receipt that DOES invite (direct wording) still reads as interviewing.
+  const invite = classifyRawEmail({ subject: "Thank you for applying", body: "Thank you for applying. We would like to invite you to an interview next week.", sender: "no-reply@us.greenhouse-mail.io" });
+  // The invitation wins over the receipt.
+  assert.equal(invite.outcome, "interviewing");
+});

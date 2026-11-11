@@ -436,8 +436,16 @@ export function classifyEmail(parsed: ParsedEmail): OutcomeClassification {
   // WHY STRUCTURAL BOOSTERS ARE TRACKED: URLs and platform names detected by parser provide non-textual evidence.
   const structuralMatches: string[] = [];
 
-  // Initialize boosted interviewing score with raw keyword match score.
-  let boostedInterviewingScore = interviewing.score;
+  // THE SAME RULE FOR INTERVIEWS (2026-11-11). Canonical's receipt ("Thank you for applying ... we may finish the
+  // process with a panel interview", "an interview with our Talent team") matched hiring_manager_interview 0.9 and was
+  // stored as an interview invite, twice in one evening. A receipt names interview FORMATS while describing the
+  // process; only a DIRECT invitation counts inside one. Format mentions alone score zero there.
+  const INTERVIEW_INVITE_TAGS = ["invite_to_interview", "interview_subject", "next_round_interview", "schedule_time_to_chat"];
+  // A receipt with none of the invitation tags: its interview words describe the future, not an invite.
+  const receiptWithoutInterviewInvite = parsed.isAutoReplyOrConfirmation && !interviewing.matches.some((tag) => INTERVIEW_INVITE_TAGS.includes(tag));
+
+  // Initialize boosted interviewing score with raw keyword match score; zero for a receipt that only describes the process.
+  let boostedInterviewingScore = receiptWithoutInterviewInvite ? 0 : interviewing.score;
 
   // Check if an interview scheduling link (e.g. Calendly, ChiliPiper) was extracted by parser.
   if (parsed.detectedSchedulingUrl !== null) {
