@@ -44,6 +44,9 @@ import { parseApplicationIdParam } from "../_shared/http/application-id.ts";
 // The matcher's pre-gate, re-run as the last check before a human sees the row (leak 1, 2026-11-05)
 import { auditorContentRulesDrop, auditorPreGateDrop, type AuditorJobEmbed } from "./pregate.ts";
 
+// The approval-queue re-gate (2026-11-11): today's work-auth gate over rows already waiting for Teja
+import { regateQueue, type QueueRow } from "./regate-queue.ts";
+
 // The one config loader the matcher calls too, so both stages read the gate config identically
 import { loadPreGatePreferences, type ConfigReader } from "../_shared/pregate-config-loader.ts";
 
@@ -197,6 +200,76 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
 
     // 200: the system did what it was told
     return jsonResponse(200, { success: true, status: "skipped_disabled", detail: killSwitch.detail });
+  }
+
+  // THE APPROVAL-QUEUE RE-GATE (2026-11-11, regate-queue.ts): `?mode=regate_queue` runs today's work-auth gate
+  // over rows already waiting for Teja, and does nothing else. postscreen-drain.yml calls it once per drain.
+  if (new URL(req.url).searchParams.get("mode") === "regate_queue") {
+    // Today's gate config; a failed read stops the run before any row moves (never "no config, pass all").
+    const config = await loadPreGatePreferences(db as unknown as ConfigReader);
+    // Refused, named.
+    if (config.kind === "error") return await failRun(503, config.code, config.message);
+    // Both queue statuses, with the job's gate inputs. A plain (left) embed: a missing job is a per-row failure.
+    const { data: queue, error: queueError } = await db
+      // The queue lives on applications, read under the app user's RLS.
+      .from("applications")
+      // updated_at is the stamp the drop write is guarded by; the embed carries the gate's inputs.
+      .select("id, status, updated_at, jobs(title, description_raw, location_raw, min_experience_years, discovered_via)")
+      // Approved rows are read only to be reported; regate-queue.ts never moves them.
+      .in("status", ["awaiting_approval", "approved"]);
+    // An unread queue is a failed run, never "nothing to drop".
+    if (queueError) return await failRun(503, "queue_unreadable", queueError.message);
+    // The sweep, with the two writes it may make.
+    const report = await regateQueue((queue ?? []) as unknown as QueueRow[], config.preferences, {
+      // drop_reason first, only while the row is still awaiting approval at the stamp we read.
+      async stampDropReason(id, expectedUpdatedAt) {
+        // Zero rows back means someone moved or edited it since the read.
+        // The reason the DB trigger requires before the auditor may take this edge (20261111220000).
+        const { data, error } = await db.from("applications").update({ drop_reason: "work_auth" })
+          // Still waiting, and untouched since our read: Teja's own action always wins over the sweep.
+          .eq("id", id).eq("status", "awaiting_approval").eq("updated_at", expectedUpdatedAt).select("updated_at");
+        // The new stamp, or null when nothing matched.
+        return { updatedAt: (data?.[0]?.updated_at as string | undefined) ?? null, error: error?.message ?? null };
+      },
+      // The move; the DB lets the auditor take this edge only with a work_auth drop_reason (20261111220000).
+      async dropRow(id, updatedAt, reason) {
+        // The stamp guard refuses (PT409) if anything wrote the row after our reason write.
+        const { error } = await db.rpc("advance_application_status", {
+          // The row.
+          p_application_id: id,
+          // Off the queue, as a human reject would do.
+          p_to_status: "dropped_filter",
+          // The agent the edge and the trigger name.
+          p_agent: "auditor",
+          // The gate's words, so the event log says which place failed.
+          p_detail: { reason: "work_auth", stage: "auditor_queue_regate", detail: reason },
+          // OUR write's stamp: anything after it makes this refuse (PT409).
+          p_expected_updated_at: updatedAt,
+        });
+        // Null on success.
+        return { error: error?.message ?? null };
+      },
+    });
+    // Close the run row honestly: failed only when there were failures and nothing moved.
+    if (runId) {
+      // The same telemetry row every auditor run closes.
+      await db.from("agent_runs").update({
+        // Mixed results stay succeeded with error_count set, as in the main run below.
+        status: report.failures.length > 0 && report.dropped.length === 0 ? "failed" : "succeeded",
+        // Closed now.
+        finished_at: new Date().toISOString(),
+        // Rows judged.
+        rows_in: report.checked,
+        // Rows dropped.
+        rows_out: report.dropped.length,
+        // Per-row errors, so a run that moved nothing reads as a problem.
+        error_count: report.failures.length,
+        // The first three distinct reasons, bounded, for the health page.
+        error_detail: report.failures.length > 0 ? [...new Set(report.failures.map((f) => f.error))].slice(0, 3).join(" | ").slice(0, 500) : null,
+      }).eq("id", runId);
+    }
+    // The tally, for the drain log.
+    return jsonResponse(200, { success: true, mode: "regate_queue", ...report });
   }
 
   // NO "latest master" read here any more. This used to load `version desc limit 1` and audit
