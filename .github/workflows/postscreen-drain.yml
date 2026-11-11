@@ -289,6 +289,35 @@ jobs:
             console.log('auth: signed in again before the access token expired');
           }
 
+          // THE APPROVAL-QUEUE RE-GATE (2026-11-11, auditor/regate-queue.ts): today's work-auth gate over rows already
+          // waiting for Teja, so a gate fix also clears the foreign jobs queued before it. BEFORE the count gate, so it
+          // runs on every drain, even one with nothing to drain. One request, no Gemini. The auditor only drops
+          // awaiting_approval rows for work_auth (the DB refuses anything else); approved rows are only listed.
+          const regateRes = await fetch(`${base}/functions/v1/auditor?mode=regate_queue`, {
+            // Same method and headers as every page request below.
+            method: 'POST',
+            // The token is masked; these headers are never logged.
+            headers: { authorization: `Bearer ${token}`, apikey: anonKey },
+            // A hung request rejects instead of holding the job.
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          });
+          // Text first, so a non-JSON body can be quoted.
+          const regateText = await regateRes.text();
+          // Any non-2xx stops the run red: an unread verdict is never "nothing to drop".
+          if (regateRes.status !== 200) abort(`regate_queue: HTTP ${regateRes.status} ${regateText.slice(0, 300)}`);
+          // The exact shape, or abort (CLAUDE.md §6).
+          let regate;
+          // JSON.parse throws on a soft-200 HTML page.
+          try { regate = JSON.parse(regateText); } catch { abort(`regate_queue: non-JSON body ${regateText.slice(0, 300)}`); }
+          // Every bucket must be there, typed, or the summary below would lie.
+          if (regate?.mode !== 'regate_queue' || !Array.isArray(regate.dropped) || !Array.isArray(regate.approved_flagged) || !Array.isArray(regate.failures)) abort(`regate_queue: unexpected shape ${regateText.slice(0, 300)}`);
+          // One summary line, ids included, so a drop is traceable from the log alone.
+          console.log(`regate_queue: checked=${requireCount(regate, 'checked', 'regate_queue')} dropped=${regate.dropped.map((d) => d.id).join(',') || 'none'} stale=${requireCount(regate, 'skipped_stale', 'regate_queue')} failures=${regate.failures.length}`);
+          // An approved row that fails today's gate needs Teja's hand: a warning annotation on the run summary.
+          for (const f of regate.approved_flagged) console.log(`::warning::approved row ${f.id} fails work-auth today (${f.reason}); withdraw it on the Approval page`);
+          // Per-row failures are reported, never hidden; they do not stop the drain.
+          for (const f of regate.failures) console.log(`::warning::regate_queue row ${f.id}: ${f.error}`);
+
           // The count gate: one PostgREST HEAD with count=exact, under the app user's RLS, before
           // any agent runs. Kept after the 2026-11-05 manual-only ruling: a dispatch on an empty
           // queue should still call no agent, since that would only add agent_runs noise.
