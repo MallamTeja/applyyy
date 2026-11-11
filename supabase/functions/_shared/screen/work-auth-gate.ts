@@ -148,6 +148,9 @@ const COUNTRIES: readonly { readonly name: string; readonly patterns: readonly R
         // is safe) and Alpharetta, which resolves "Alpharetta, Georgia" without naming the
         // ambiguous state.
         "sf", "alpharetta",
+        // 2026-11-11: "Any State" is the US "any of the 50 states" phrasing (RainFocus a4a74262). A part that also names
+        // India still resolves to India too, so "any state in India" stays authorised.
+        "any state",
       ]),
       // Codes only safe case-sensitively: "US" (not "us"), "SF", "NY", and ", XX" state codes.
       // AR, GA, IN, MN, OR, TN and UT are left out: they are also Indian codes (Arunachal, Goa,
@@ -158,39 +161,44 @@ const COUNTRIES: readonly { readonly name: string; readonly patterns: readonly R
     ],
   },
   // Canada; "CAN" and ", BC" only in capitals.
-  { name: "Canada", patterns: [words(["canada", "toronto", "vancouver", "montreal", "montréal", "ottawa", "ontario", "quebec", "alberta", "british columbia", "manitoba", "nova scotia", "b\\.c\\."]), /\bCAN\b|,\s*BC\b/] },
+  { name: "Canada", patterns: [words(["canada", "toronto", "vancouver", "montreal", "montréal", "ottawa", "ontario", "quebec", "alberta", "british columbia", "manitoba", "nova scotia", "b\\.c\\.",
+    // 2026-11-11: Acceldata 8feb1dd5 "Kitchener" passed as unknown; the Waterloo-region and other tech cities.
+    "kitchener", "waterloo", "calgary", "edmonton", "winnipeg", "halifax", "mississauga", "markham", "burnaby", "saskatoon", "regina", "québec"]), /\bCAN\b|,\s*BC\b/] },
   // The UK, its nations and cities.
-  { name: "United Kingdom", patterns: [words(["uk", "united kingdom", "england", "scotland", "wales", "northern ireland", "london", "bristol", "belfast", "manchester", "edinburgh"]), /\bGB\b/] },
+  { name: "United Kingdom", patterns: [words(["uk", "united kingdom", "england", "scotland", "wales", "northern ireland", "london", "bristol", "belfast", "manchester", "edinburgh", "glasgow", "leeds", "cardiff", "sheffield", "nottingham", "liverpool", "newcastle"]), /\bGB\b/] },
   // Ireland ("Northern Ireland" is the UK).
-  { name: "Ireland", patterns: [/(?<!northern )\bireland\b|\bdublin\b/i] },
+  { name: "Ireland", patterns: [/(?<!northern )\bireland\b|\bdublin\b|\bgalway\b|\blimerick\b/i] },
   // Continental Europe, one row each, from the live strings.
-  { name: "France", patterns: [words(["france", "paris"])] },
-  { name: "Germany", patterns: [words(["germany", "ger", "berlin", "munich"])] },
-  { name: "Netherlands", patterns: [words(["netherlands", "amsterdam"])] },
-  { name: "Spain", patterns: [words(["spain", "madrid", "barcelona"])] },
-  { name: "Portugal", patterns: [words(["portugal", "lisbon"])] },
-  { name: "Poland", patterns: [words(["poland", "warsaw", "gdańsk", "gdansk", "krakow"])] },
-  { name: "Italy", patterns: [words(["italy", "milan"])] },
-  { name: "Switzerland", patterns: [words(["switzerland", "zurich", "zug"])] },
-  { name: "Austria", patterns: [words(["austria", "vienna"])] },
-  { name: "Belgium", patterns: [words(["belgium", "brussels"])] },
+  { name: "France", patterns: [words(["france", "paris", "lyon", "toulouse", "marseille", "bordeaux", "lille", "nantes", "grenoble", "sophia antipolis", "île-de-france", "ile-de-france"])] },
+  { name: "Germany", patterns: [words(["germany", "ger", "berlin", "munich",
+    // 2026-11-11: Invesco 2de04f18 "Frankfurt, Hesse" passed as unknown; the other big cities and the states boards write.
+    "münchen", "frankfurt", "hamburg", "cologne", "köln", "stuttgart", "düsseldorf", "dusseldorf", "leipzig", "dresden", "karlsruhe", "nuremberg", "nürnberg", "heidelberg", "hanover", "hannover", "bonn", "mannheim", "darmstadt",
+    "hesse", "hessen", "bavaria", "bayern", "baden-württemberg", "baden-wurttemberg", "north rhine-westphalia", "nordrhein-westfalen", "saxony", "sachsen", "deutschland"])] },
+  { name: "Netherlands", patterns: [words(["netherlands", "amsterdam", "rotterdam", "utrecht", "eindhoven", "the hague", "den haag", "delft", "groningen", "holland"])] },
+  { name: "Spain", patterns: [words(["spain", "valencia", "seville", "sevilla", "malaga", "málaga", "bilbao", "zaragoza", "madrid", "barcelona"])] },
+  { name: "Portugal", patterns: [words(["portugal", "porto", "braga", "coimbra", "lisbon"])] },
+  { name: "Poland", patterns: [words(["poland", "wroclaw", "wrocław", "poznan", "poznań", "lodz", "łódź", "katowice", "kraków", "warsaw", "gdańsk", "gdansk", "krakow"])] },
+  { name: "Italy", patterns: [words(["italy", "rome", "roma", "turin", "torino", "florence", "firenze", "bologna", "naples", "napoli", "milano", "milan"])] },
+  { name: "Switzerland", patterns: [words(["switzerland", "zürich", "geneva", "genève", "geneve", "basel", "lausanne", "bern", "lugano", "schweiz", "suisse", "zurich", "zug"])] },
+  { name: "Austria", patterns: [words(["austria", "wien", "graz", "linz", "salzburg", "innsbruck", "österreich", "vienna"])] },
+  { name: "Belgium", patterns: [words(["belgium", "antwerp", "ghent", "gent", "leuven", "liège", "bruxelles", "brussels"])] },
   { name: "Luxembourg", patterns: [words(["luxembourg"])] },
-  { name: "Denmark", patterns: [words(["denmark", "copenhagen", "aarhus"])] },
+  { name: "Denmark", patterns: [words(["denmark", "odense", "copenhagen", "aarhus"])] },
   // Malmö and Gothenburg added 2026-11-04 (13 live "Malmö" rows passed).
-  { name: "Sweden", patterns: [words(["sweden", "stockholm", "malmö", "malmo", "gothenburg", "göteborg"])] },
-  { name: "Norway", patterns: [words(["norway", "oslo"])] },
+  { name: "Sweden", patterns: [words(["sweden", "uppsala", "lund", "linköping", "linkoping", "stockholm", "malmö", "malmo", "gothenburg", "göteborg"])] },
+  { name: "Norway", patterns: [words(["norway", "bergen", "trondheim", "stavanger", "oslo"])] },
   { name: "Finland", patterns: [words(["finland", "helsinki", "tampere"])] },
   { name: "Iceland", patterns: [words(["iceland", "reykjavík", "reykjavik"])] },
-  { name: "Czech Republic", patterns: [words(["czech", "prague"])] },
-  { name: "Romania", patterns: [words(["romania", "bucharest"])] },
+  { name: "Czech Republic", patterns: [words(["czech", "brno", "ostrava", "czechia", "praha", "prague"])] },
+  { name: "Romania", patterns: [words(["romania", "cluj", "cluj-napoca", "iasi", "iași", "timisoara", "timișoara", "brasov", "bucharest"])] },
   { name: "Serbia", patterns: [words(["serbia", "belgrade"])] },
   { name: "Slovenia", patterns: [words(["slovenia", "ljubljana"])] },
   { name: "Lithuania", patterns: [words(["lithuania", "vilnius"])] },
-  { name: "Greece", patterns: [words(["greece", "athens"])] },
+  { name: "Greece", patterns: [words(["greece", "thessaloniki", "athens"])] },
   { name: "North Macedonia", patterns: [words(["north macedonia", "skopje", "ohrid", "debar"])] },
   { name: "Kosovo", patterns: [words(["kosovo", "pristina"])] },
   // The Middle East.
-  { name: "Israel", patterns: [words(["israel", "tel aviv", "kfar saba"])] },
+  { name: "Israel", patterns: [words(["israel", "haifa", "herzliya", "jerusalem", "petah tikva", "ra'anana", "raanana", "netanya", "beersheba", "tel aviv", "kfar saba"])] },
   // Arabic: Dubai, Abu Dhabi (two spellings), the Emirates (two spellings), Sharjah.
   { name: "United Arab Emirates", patterns: [words(["uae", "united arab emirates", "dubai", "abu dhabi", "sharjah"]), arabic(["دبي", "أبوظبي", "ابوظبي", "الإمارات", "الامارات", "الشارقة"])] },
   // Arabic: Qatar, Doha.
@@ -213,12 +221,12 @@ const COUNTRIES: readonly { readonly name: string; readonly patterns: readonly R
   // Egypt (MENA; EMEA boards list it).
   { name: "Egypt", patterns: [words(["egypt", "cairo"]), arabic(["مصر", "القاهرة"])] },
   // Turkey, in both spellings boards use ("türkiye" listed with and without the diacritic).
-  { name: "Turkey", patterns: [words(["turkey", "türkiye", "turkiye", "istanbul", "ankara"]), arabic(["تركيا"])] },
+  { name: "Turkey", patterns: [words(["turkey", "izmir", "i̇zmir", "türkiye", "turkiye", "istanbul", "ankara"]), arabic(["تركيا"])] },
   // Asia-Pacific.
   { name: "Singapore", patterns: [words(["singapore"])] },
   { name: "Hong Kong", patterns: [words(["hong kong"])] },
-  { name: "China", patterns: [words(["china", "beijing", "shanghai"])] },
-  { name: "Japan", patterns: [words(["japan", "tokyo"])] },
+  { name: "China", patterns: [words(["china", "shenzhen", "hangzhou", "guangzhou", "chengdu", "nanjing", "suzhou", "wuhan", "xian", "xi'an", "beijing", "shanghai"])] },
+  { name: "Japan", patterns: [words(["japan", "osaka", "kyoto", "yokohama", "fukuoka", "nagoya", "sapporo", "tokyo"])] },
   { name: "South Korea", patterns: [words(["korea", "seoul"])] },
   { name: "Taiwan", patterns: [words(["taiwan", "taipei"])] },
   { name: "Malaysia", patterns: [words(["malaysia", "kuala lumpur"])] },
@@ -226,16 +234,40 @@ const COUNTRIES: readonly { readonly name: string; readonly patterns: readonly R
   { name: "Vietnam", patterns: [words(["vietnam", "ho chi minh"])] },
   // Added 2026-11-04 (7 live "Bangkok" rows passed). Visa-free for Indian tourists, not for work.
   { name: "Thailand", patterns: [words(["thailand", "bangkok"])] },
-  { name: "Australia", patterns: [words(["australia", "sydney", "melbourne"])] },
-  { name: "New Zealand", patterns: [words(["new zealand", "auckland"])] },
+  { name: "Australia", patterns: [words(["australia", "brisbane", "perth", "adelaide", "canberra", "new south wales", "queensland", "nsw", "sydney", "melbourne"])] },
+  { name: "New Zealand", patterns: [words(["new zealand", "wellington", "christchurch", "auckland"])] },
   // The Americas outside the US and Canada. "(?<!new )" keeps New Mexico in the US.
-  { name: "Brazil", patterns: [words(["brazil", "são paulo", "sao paulo"])] },
+  { name: "Brazil", patterns: [words(["brazil", "rio de janeiro", "belo horizonte", "curitiba", "porto alegre", "florianópolis", "florianopolis", "recife", "brasília", "brasilia", "campinas", "brasil", "são paulo", "sao paulo"])] },
   { name: "Mexico", patterns: [/(?<!new )\bmexico\b/i, /,\s*MX\b/] },
   // Added 2026-11-04: Thoughtworks graduate roles in Santiago and Quito reached the queue.
   { name: "Chile", patterns: [words(["chile"])] },
   // Same source.
   { name: "Ecuador", patterns: [words(["ecuador", "quito"])] },
   // Africa.
+  // 2026-11-11 (Teja: "you have not built the system enough to filter this out"): Silicon Labs' three "Budapest" rows
+  // passed as unknown because Hungary had no row at all. Every country below had none; each lists its capital and
+  // tech cities. Names shared with an Indian place are left out (the India row decides those).
+  { name: "Hungary", patterns: [words(["hungary", "budapest", "debrecen", "szeged", "magyarország"])] },
+  { name: "Bulgaria", patterns: [words(["bulgaria", "sofia", "plovdiv", "varna"])] },
+  { name: "Croatia", patterns: [words(["croatia", "zagreb"])] },
+  { name: "Estonia", patterns: [words(["estonia", "tallinn", "tartu"])] },
+  { name: "Latvia", patterns: [words(["latvia", "riga"])] },
+  { name: "Slovakia", patterns: [words(["slovakia", "bratislava", "košice", "kosice"])] },
+  { name: "Ukraine", patterns: [words(["ukraine", "kyiv", "kiev", "lviv", "kharkiv", "odesa", "odessa", "dnipro"])] },
+  { name: "Cyprus", patterns: [words(["cyprus", "limassol", "nicosia", "larnaca"])] },
+  { name: "Malta", patterns: [words(["malta", "valletta"])] },
+  { name: "Argentina", patterns: [words(["argentina", "buenos aires", "córdoba, argentina", "rosario"])] },
+  { name: "Colombia", patterns: [words(["colombia", "bogotá", "bogota", "medellín", "medellin", "cali, colombia"])] },
+  { name: "Peru", patterns: [words(["peru", "perú", "lima, peru"])] },
+  { name: "Costa Rica", patterns: [words(["costa rica", "san josé, costa rica", "heredia"])] },
+  { name: "Uruguay", patterns: [words(["uruguay", "montevideo"])] },
+  { name: "South Africa", patterns: [words(["south africa", "cape town", "johannesburg", "durban", "pretoria"])] },
+  { name: "Nigeria", patterns: [words(["nigeria", "lagos", "abuja"])] },
+  { name: "Kenya", patterns: [words(["kenya", "nairobi"])] },
+  { name: "Indonesia", patterns: [words(["indonesia", "jakarta", "bandung", "bali"])] },
+  { name: "Pakistan", patterns: [words(["pakistan", "karachi", "lahore", "islamabad"])] },
+  { name: "Bangladesh", patterns: [words(["bangladesh", "dhaka"])] },
+  { name: "Sri Lanka", patterns: [words(["sri lanka", "colombo"])] },
   { name: "Mauritius", patterns: [words(["mauritius", "ebene"])] },
 ];
 
@@ -274,6 +306,8 @@ const EUROPE = [
   "France", "Germany", "Netherlands", "Spain", "Portugal", "Poland", "Italy", "Switzerland", "Austria", "Belgium",
   "Luxembourg", "Denmark", "Sweden", "Norway", "Finland", "Iceland", "Czech Republic", "Romania", "Serbia", "Slovenia",
   "Lithuania", "Greece", "North Macedonia", "Kosovo",
+  // 2026-11-11 rows.
+  "Hungary", "Bulgaria", "Croatia", "Estonia", "Latvia", "Slovakia", "Ukraine", "Cyprus", "Malta",
 ];
 // The Middle East rows.
 // 2026-11-06: every row added above joins, or "Remote, Middle East" would resolve to fewer countries than exist.
@@ -281,7 +315,7 @@ const MIDDLE_EAST = ["Israel", "United Arab Emirates", "Qatar", "Saudi Arabia", 
 // North America.
 const NORTH_AMERICA = ["United States", "Canada", "Mexico"];
 // Latin America rows.
-const LATIN_AMERICA = ["Mexico", "Brazil", "Chile", "Ecuador"];
+const LATIN_AMERICA = ["Mexico", "Brazil", "Chile", "Ecuador", "Argentina", "Colombia", "Peru", "Costa Rica", "Uruguay"];
 
 // Regions boards write instead of a country (2026-11-04: "EMEA", "Europe", "Middle East",
 // "North America", "Remote, EU" all passed as unknown). APAC and "Asia" are deliberately ABSENT:
@@ -294,8 +328,14 @@ const REGIONS: readonly { readonly patterns: readonly RegExp[]; readonly members
   { patterns: [words(["emea"])], members: [...EUROPE, ...MIDDLE_EAST, "Mauritius"] },
   // The Middle East.
   { patterns: [words(["middle east", "mena"])], members: MIDDLE_EAST },
-  // North America.
-  { patterns: [words(["north america"])], members: NORTH_AMERICA },
+  // North America; "NAMER" is ClickHouse's spelling (1a22e0e0 "NAMER and LatAm", 2026-11-11).
+  { patterns: [words(["north america", "namer"])], members: NORTH_AMERICA },
+  // 2026-11-11: the other region shorthands boards write. None contains India.
+  { patterns: [words(["dach"])], members: ["Germany", "Austria", "Switzerland"] },
+  { patterns: [words(["nordics", "nordic", "scandinavia"])], members: ["Denmark", "Sweden", "Norway", "Finland", "Iceland"] },
+  { patterns: [words(["benelux"])], members: ["Belgium", "Netherlands", "Luxembourg"] },
+  { patterns: [words(["anz"])], members: ["Australia", "New Zealand"] },
+  { patterns: [words(["africa"])], members: ["South Africa", "Nigeria", "Kenya", "Egypt", "Mauritius"] },
   // The whole Americas ("AMER" is MongoDB's spelling).
   { patterns: [words(["americas", "amer"])], members: [...NORTH_AMERICA, ...LATIN_AMERICA] },
   // Latin America.
@@ -414,6 +454,23 @@ export function screenWorkAuth(
     return { drop: true, code: "work_auth", reason: `location "${job.locationRaw}" is ${kind} outside the work-authorised countries` };
   }
 
+  /* REMOTE BESIDE FOREIGN OFFICES (2026-11-11, Anthropic ec3a6b39: "Remote-Friendly (Travel-Required) | San Francisco,
+     CA | Seattle, WA | New York City, NY" passed as open remote). A remote part that names no place, listed only beside
+     parts that ALL name places outside the list, is remote FROM those places, not open to anywhere. Only under
+     'unlocked_or_authorized' (Teja's 11-04 "no country-locked remote"); a lone "Remote", or one beside an unknown or
+     authorised part, is still kept. */
+  const placed = parts.filter((part) => places(part).size > 0);
+  // The parts that name no place: for this rule each must say remote, so "2 Locations" never counts.
+  const unplaced = parts.filter((part) => places(part).size === 0);
+  // A remote part that says it is open (worldwide, anywhere, global) or names a region holding India (APAC, Asia) is
+  // open, never "remote from those offices": the 11-04 test "Home Based - Americas; Home Based - APAC" stays kept.
+  const OPEN_OR_INDIA_REGION = words(["apac", "asia", "asia-pacific", "asia pacific", "global", "globally", "worldwide", "anywhere", "international"]);
+  // Drop when every placed part is elsewhere and every other part is a bare remote with no open or India-holding region.
+  if (remotePolicy === "unlocked_or_authorized" && placed.length > 0 && unplaced.length > 0 && placed.every(isElsewhere) && unplaced.every((part) => REMOTE.test(part) && !OPEN_OR_INDIA_REGION.test(part))) {
+    // Quoted, so a wrong drop is diagnosable from the run summary.
+    return { drop: true, code: "work_auth", reason: `location "${job.locationRaw}" is remote alongside offices outside the work-authorised countries only` };
+  }
+
   // JD LOCATION LINE: only when the board location names no place at all and does not say
   // remote. A bare "Remote" is open by Teja's ruling, so its JD is not second-guessed, and a board
   // location that names any place has already decided above.
@@ -428,6 +485,21 @@ export function screenWorkAuth(
     if (lineParts.length > 0 && lineParts.every(isElsewhere)) {
       // Quote both, since the board string alone would not explain the drop.
       return { drop: true, code: "work_auth", reason: `JD location "${line}" is outside the work-authorised countries (board location "${job.locationRaw ?? ""}")` };
+    }
+  }
+
+  /* TITLE (2026-11-11, MongoDB 93f8e874 "SWE Intern, AMER" with NO board location). Read only when neither the board
+     location nor the JD's location line names any place: then the title's own places decide, by the same rule (drop
+     only when it names places and none is authorised). "Software Engineer (India)" keeps; a title naming no place keeps. */
+  const lineNamesNothing = line === null || splitParts(line).every((part) => places(part).size === 0);
+  // Only in that case.
+  if (boardNamesNothing && lineNamesNothing) {
+    // Every place the title names, regions expanded.
+    const titlePlaces = countriesIn(job.title);
+    // Named places, none authorised.
+    if (titlePlaces.size > 0 && ![...titlePlaces].some((name) => authorized.has(name))) {
+      // Quote the title, since the board location is empty.
+      return { drop: true, code: "work_auth", reason: `title "${job.title}" names only places outside the work-authorised countries (board location "${job.locationRaw ?? ""}")` };
     }
   }
 

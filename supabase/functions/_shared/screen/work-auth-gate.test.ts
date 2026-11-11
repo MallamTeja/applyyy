@@ -560,3 +560,62 @@ for (const location of [
     assert.equal(screenWorkAuth(job(location), TEJA, UNLOCKED).drop, false);
   });
 }
+
+// --- 2026-11-11: the eleven live rows Teja found in the approval queue ------------------------------
+
+// Each live row's board location and title, exactly as stored; every one must now drop.
+const ELEVEN_LIVE: readonly { readonly id: string; readonly title: string; readonly locationRaw: string | null }[] = [
+  // No board location; the region is only in the title.
+  { id: "93f8e874", title: "Software Engineering Intern, AMER", locationRaw: null },
+  // Hungary had no row at all.
+  { id: "40f975ed", title: "Embedded Software Engineer", locationRaw: "Budapest" },
+  // Frankfurt and Hesse were unknown.
+  { id: "2de04f18", title: "Quant Research Intern", locationRaw: "Frankfurt, Hesse" },
+  // Kitchener was unknown.
+  { id: "8feb1dd5", title: "Software Engineer Co-op", locationRaw: "Kitchener" },
+  // NAMER was unknown, so one unknown part kept the whole string.
+  { id: "1a22e0e0", title: "AI Ops Engineer", locationRaw: "NAMER and LatAm" },
+  // Already resolvable: a row never re-gated after the gate learned it.
+  { id: "0c9fdc58", title: "Software Engineer Intern 2027", locationRaw: "Palo Alto, CA" },
+  // The US "any of the 50 states" phrasing.
+  { id: "a4a74262", title: "UI Developer", locationRaw: "Any State" },
+  // A placeless remote beside US offices only.
+  { id: "ec3a6b39", title: "Research Engineer, Pre-training", locationRaw: "Remote-Friendly (Travel-Required) | San Francisco, CA | Seattle, WA | New York City, NY" },
+  // The umlaut spelling.
+  { id: "ce30db83", title: "Data & Platform Engineer", locationRaw: "Zürich" },
+];
+
+test("2026-11-11: every live leak Teja listed now drops (location, region, umlaut, title, remote beside US offices)", () => {
+  // Each row in turn, so a failure names the row.
+  for (const row of ELEVEN_LIVE) {
+    // The gate over that row with Teja's settings.
+    const verdict = screenWorkAuth({ title: row.title, locationRaw: row.locationRaw, description: "We build developer tools." }, TEJA, UNLOCKED);
+    // Dropped.
+    assert.equal(verdict.drop, true, `${row.id} "${row.locationRaw}" / "${row.title}" was kept`);
+  }
+});
+
+test("2026-11-11 controls: India, bare remote, APAC remote, worldwide remote beside US offices, and an India title all KEEP", () => {
+  // Each case keeps; the label says which.
+  const keeps: readonly [string, string, string | null][] = [
+    // An Indian city.
+    ["India city", "Software Engineer", "Hyderabad, Telangana"],
+    // A lone remote is open by Teja's ruling.
+    ["bare remote", "Software Engineer", "Remote"],
+    // APAC holds India.
+    ["APAC remote beside US", "Software Engineer", "Remote - APAC | San Francisco, CA"],
+    // Worldwide is open.
+    ["worldwide remote beside US", "Software Engineer", "Remote (Worldwide) | New York, NY"],
+    // A title naming India with no board location.
+    ["India title", "Software Engineer (India)", null],
+    // A title naming nowhere with no board location: missing data is never a drop.
+    ["placeless title", "Backend Engineer", null],
+    // An unknown non-remote part beside a US office still keeps (cannot tell).
+    ["unknown beside US", "Software Engineer", "2 Locations | Austin, TX"],
+  ];
+  // Each control.
+  for (const [label, title, locationRaw] of keeps) {
+    // Kept.
+    assert.equal(screenWorkAuth({ title, locationRaw, description: "We build developer tools." }, TEJA, UNLOCKED).drop, false, label);
+  }
+});
