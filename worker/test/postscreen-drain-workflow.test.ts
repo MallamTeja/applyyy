@@ -68,6 +68,11 @@ function okPage(body: Record<string, unknown>): FakePage {
   return { status: 200, body: JSON.stringify(body) };
 }
 
+// The auditor's `?mode=regate_queue` answer with nothing to drop, in auditor/index.ts's exact shape
+// (`success` + `mode` + the RegateReport of regate-queue.ts). Every run makes this call first
+// (c1b82fc), so the fake must answer it by default or every case aborts on the shape check.
+const EMPTY_REGATE = { success: true, mode: 'regate_queue', checked: 0, dropped: [], approved_flagged: [], skipped_stale: 0, failures: [] };
+
 /** A matcher page that read `rowsIn` rows and scored all of them (`errored` failures besides). */
 function matcherPage(rowsIn: number, errored = 0): FakePage {
   // rows_in is what the drain reads as `processed`; scored keeps the page off the stall cap.
@@ -78,12 +83,13 @@ function matcherPage(rowsIn: number, errored = 0): FakePage {
  * Runs the drain with a fake count response; every fetch is logged as `FETCH <method> <url>`
  * and every pacing pause as `SLEEP <ms>`. `pages` scripts each agent's answers in order;
  * once an agent's list runs out it answers its empty page, which ends the stage.
+ * `regate` is the one answer to the auditor's `?mode=regate_queue` call (default: nothing to drop).
  */
-function runDrain(count: { status: number; contentRange: string | null }, fromStage = '', pages: Partial<Record<keyof typeof EMPTY_PAGES, FakePage[]>> = {}): { code: number | null; stdout: string } {
+function runDrain(count: { status: number; contentRange: string | null }, fromStage = '', pages: Partial<Record<keyof typeof EMPTY_PAGES, FakePage[]>> = {}, regate: FakePage = okPage(EMPTY_REGATE)): { code: number | null; stdout: string } {
   // The fake fetch, as source text, so the child needs nothing from this process.
   const fakeFetch = [
-    // The count response the case wants, the empty agent pages, and the scripted ones.
-    `const COUNT = ${JSON.stringify(count)}; const PAGES = ${JSON.stringify(EMPTY_PAGES)}; const SCRIPTED = ${JSON.stringify(pages)};`,
+    // The count response the case wants, the empty agent pages, the scripted ones, and the re-gate answer.
+    `const COUNT = ${JSON.stringify(count)}; const PAGES = ${JSON.stringify(EMPTY_PAGES)}; const SCRIPTED = ${JSON.stringify(pages)}; const REGATE = ${JSON.stringify(regate)};`,
     // The fake sleep. The script imports setTimeout from node:timers/promises; replacing it on the
     // builtin and syncing makes the script's live ESM binding the fake, so the yml needs no test
     // seam and a 45 s pause costs nothing. Logged, so a case can count pauses and their lengths.
@@ -100,6 +106,8 @@ function runDrain(count: { status: number; contentRange: string | null }, fromSt
     "  if (String(url).includes('/auth/v1/token')) return new Response(JSON.stringify({ access_token: 'test-token' }), { status: 200 });",
     // The count gate's HEAD: the case's status and Content-Range header.
     "  if (String(url).includes('/rest/v1/applications')) return new Response(null, { status: COUNT.status, headers: COUNT.contentRange === null ? {} : { 'content-range': COUNT.contentRange } });",
+    // The approval-queue re-gate goes to the auditor URL too; matched first so it never eats an auditor STAGE page.
+    "  if (String(url).includes('/functions/v1/auditor?mode=regate_queue')) return new Response(REGATE.body, { status: REGATE.status });",
     // An agent page, chosen by the function name in the URL.
     "  const agent = /functions\\/v1\\/(\\w+)/.exec(String(url))?.[1];",
     // An unexpected endpoint is a test bug; say so.
@@ -145,10 +153,17 @@ function agentNames(stdout: string): string[] {
   return agentCalls(stdout).map((line) => line.split('/functions/v1/')[1]!.split('?')[0]!);
 }
 
-/** The FETCH lines that called an agent function. */
+/** The FETCH lines that called an agent function for a drain STAGE page. */
 function agentCalls(stdout: string): string[] {
-  // Only the edge-function calls, never sign-in or the count.
-  return stdout.split('\n').filter((line) => line.startsWith('FETCH ') && line.includes('/functions/v1/'));
+  // Only the edge-function calls, never sign-in or the count; the re-gate is counted apart by
+  // regateCalls, so "no agent called" keeps meaning no matcher/tailor/auditor stage page.
+  return stdout.split('\n').filter((line) => line.startsWith('FETCH ') && line.includes('/functions/v1/') && !line.includes('mode=regate_queue'));
+}
+
+/** The FETCH lines that called the auditor's approval-queue re-gate. */
+function regateCalls(stdout: string): string[] {
+  // Asserted by count in the cases, so a drain that drops the re-gate step goes red.
+  return stdout.split('\n').filter((line) => line.startsWith('FETCH ') && line.includes('/functions/v1/auditor?mode=regate_queue'));
 }
 
 describe('postscreen-drain.yml count gate', () => {
@@ -161,6 +176,8 @@ describe('postscreen-drain.yml count gate', () => {
     expect(run.stdout).toContain('SKIP: nothing eligible; no agent called.');
     // And it really called nothing.
     expect(agentCalls(run.stdout)).toEqual([]);
+    // But the re-gate still ran: it sits BEFORE the gate so an empty drain still clears foreign queue rows.
+    expect(regateCalls(run.stdout)).toEqual(['FETCH POST https://example.supabase.co/functions/v1/auditor?mode=regate_queue']);
   });
 
   test('the count asks for every status the three agents read', () => {
@@ -394,5 +411,51 @@ describe('postscreen-drain.yml stage isolation', () => {
     expect(run.stdout).toContain('::error::ABORT: matcher: pipeline is disabled (skipped_disabled)');
     // Nothing after the matcher: isolation must never route around the kill switch.
     expect(agentNames(run.stdout)).toEqual(['matcher']);
+  });
+});
+
+// THE APPROVAL-QUEUE RE-GATE (c1b82fc, 2026-11-11). One auditor call before the count gate. Its verdict
+// must be read EXACTLY (§6): a body the drain cannot read is never "nothing to drop".
+describe('postscreen-drain.yml approval-queue re-gate', () => {
+  test('dropped rows are named in the summary line, and the drain still runs', () => {
+    // Two foreign awaiting_approval rows dropped, one row left alone because it moved mid-run.
+    const run = runDrain({ status: 200, contentRange: '*/0' }, '', {}, okPage({ ...EMPTY_REGATE, checked: 5, dropped: [{ id: 'row-a', reason: 'work_auth: US only' }, { id: 'row-b', reason: 'work_auth: DACH' }], skipped_stale: 1 }));
+    // Green: a drop is the step doing its job, not an error.
+    expect(run.code, run.stdout).toBe(0);
+    // The ids are in the log, so a drop is traceable without opening the DB.
+    expect(run.stdout).toContain('regate_queue: checked=5 dropped=row-a,row-b stale=1 failures=0');
+    // The count gate still ran after it.
+    expect(run.stdout).toContain('SKIP: nothing eligible; no agent called.');
+  });
+
+  test('an approved row that fails today\'s gate becomes a ::warning:: line, and the run stays green', () => {
+    // An approved row the auditor may not drop (only Teja withdraws approved rows).
+    const run = runDrain({ status: 200, contentRange: '*/0' }, '', {}, okPage({ ...EMPTY_REGATE, checked: 1, approved_flagged: [{ id: 'row-c', reason: 'work_auth: EU only' }] }));
+    // Green: a warning, not a stop.
+    expect(run.code, run.stdout).toBe(0);
+    // The exact annotation, with id and reason, so it shows on the run summary for Teja.
+    expect(run.stdout).toContain('::warning::approved row row-c fails work-auth today (work_auth: EU only); withdraw it on the Approval page');
+  });
+
+  test.each([
+    // The normal audit body: the bug c1b82fc's first CI run hit when the fake answered every auditor URL alike.
+    ['the audit-page body', okPage(EMPTY_PAGES.auditor), 'regate_queue: unexpected shape'],
+    // A report missing a bucket: the summary line would lie about it.
+    ['no failures array', okPage({ ...EMPTY_REGATE, failures: undefined }), 'regate_queue: unexpected shape'],
+    // A count that is not a number is a changed shape, never 0.
+    ['a non-numeric checked', okPage({ ...EMPTY_REGATE, checked: '3' }), 'regate_queue'],
+    // A server error is not a verdict.
+    ['HTTP 500', { status: 500, body: '{"error":"boom"}' }, 'regate_queue: HTTP 500'],
+  ])('a re-gate answer with %s stops the run red before the count gate', (_label, regate, reason) => {
+    // Rows are eligible, so only the re-gate can stop the stages.
+    const run = runDrain({ status: 200, contentRange: '0-22/23' }, '', {}, regate);
+    // Red.
+    expect(run.code, run.stdout).toBe(1);
+    // With the reason.
+    expect(run.stdout).toContain(`::error::ABORT: ${reason}`);
+    // Stopped before the count gate: no count request, no stage page.
+    expect(run.stdout).not.toContain('/rest/v1/applications');
+    // And no stage ran on an unread verdict.
+    expect(agentCalls(run.stdout)).toEqual([]);
   });
 });
