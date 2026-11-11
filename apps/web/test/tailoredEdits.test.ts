@@ -369,6 +369,37 @@ describe('tracesToMaster', () => {
     assert.equal(edits.tracesToMaster(orig, clone(orig), orig, MASTER), true);
   });
 
+  it('accepts the owner\'s dictated experience title (2026-11-11), and only a clean title, only the role', () => {
+    // The reference.
+    const orig = original();
+    // A resume whose first job title is the owner's wording, as the FamPay row needed ("Data Analyst Intern").
+    const titled = clone(orig);
+    // Only the role changes; company, dates and bullets are the master's.
+    titled.experience = titled.experience.map((e, i) => (i === 0 ? { ...e, role: 'Data Analyst Intern' } : e));
+    // Non-vacuity: the master really holds a different title, so this proves the role is freed, not unchanged.
+    assert.notEqual(orig.experience[0]!.role, 'Data Analyst Intern');
+    // Accepted: the title is the owner's to state.
+    assert.equal(edits.tracesToMaster(orig, titled, orig, MASTER), true);
+    // A title outside ROLE_TITLE_SHAPE (markup, a blob) is refused: freed means shape-checked, not unchecked.
+    const junk = clone(orig);
+    // Angle brackets and a newline are nothing a printed title holds.
+    junk.experience = junk.experience.map((e, i) => (i === 0 ? { ...e, role: '<b>CTO</b>\nand founder' } : e));
+    // Refused.
+    assert.equal(edits.tracesToMaster(orig, junk, orig, MASTER), false);
+    // A blank title is refused too (the shape needs 2+ characters starting with a letter).
+    const blank = clone(orig);
+    // Emptied.
+    blank.experience = blank.experience.map((e, i) => (i === 0 ? { ...e, role: '' } : e));
+    // Refused.
+    assert.equal(edits.tracesToMaster(orig, blank, orig, MASTER), false);
+    // Freeing the role frees NOTHING else: a clean title plus a renamed employer is still refused.
+    const both = clone(titled);
+    // The employer renamed alongside the title.
+    both.experience = both.experience.map((e, i) => (i === 0 ? { ...e, company: 'Bigger Corp' } : e));
+    // Refused.
+    assert.equal(edits.tracesToMaster(orig, both, orig, MASTER), false);
+  });
+
   it('fails closed when the master cannot be resolved', () => {
     // The reference.
     const orig = original();

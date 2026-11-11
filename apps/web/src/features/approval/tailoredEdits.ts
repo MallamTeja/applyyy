@@ -29,6 +29,8 @@ import type { EditTarget } from './diffModel';
    original with any other code would let "original" drift from what the tailor
    actually produced. Safe to bundle: pure, with type-only imports. */
 import { validateTailoredProfile } from '../../../../../supabase/functions/_shared/tailor/validator.ts';
+// The validator's one printable job-title shape, reused so a dictated experience title (2026-11-11) obeys the same rule as the header title.
+import { ROLE_TITLE_SHAPE } from '../../../../../supabase/functions/_shared/tailor/validator.ts';
 /* THE PRODUCER'S keyword rule (T3), the same relative-path import diffAdapter.ts uses: the tailor
    chose the JD keywords with this word-bounded matcher, so deciding which master skill supplies a
    keyword with any looser rule ("Go" inside "Google") would offer the wrong skill. Pure, no imports. */
@@ -543,8 +545,12 @@ export function tracesToMaster(
       const home = fullEntries.get(section + '/' + ref);
       /* Not in FULL there: an invented employer, project, degree, award or credential. */
       if (home === undefined) return false;
-      /* Every display field (company, role, dates, links, label...) is the master's, verbatim. */
-      if (!deepEqual(withoutKey(entry, 'bullets'), withoutEmptyKeysAbsentFrom(withoutKey(home, 'bullets'), entry))) return false;
+      /* An experience entry's job title may be the OWNER's dictated wording (Teja, 2026-11-11: "change the Aczen
+         title to Data Analyst Intern ... it need to accept it"), never a free-form blob: it must be a string in
+         the validator's ROLE_TITLE_SHAPE. Only the role, only in experience; company and dates stay locked. */
+      const titleFree = section === 'experience' && typeof entry['role'] === 'string' && ROLE_TITLE_SHAPE.test(entry['role']);
+      /* Every OTHER display field (company, dates, links, label...) is the master's, verbatim; the role too unless freed above. */
+      if (!deepEqual(titleFree ? withoutKey(withoutKey(entry, 'bullets'), 'role') : withoutKey(entry, 'bullets'), withoutEmptyKeysAbsentFrom(titleFree ? withoutKey(withoutKey(home, 'bullets'), 'role') : withoutKey(home, 'bullets'), entry))) return false;
       /* The entry's bullets, which must be an array to be walked at all. */
       const bullets = entry['bullets'];
       /* A non-array here is a malformed entry. */
