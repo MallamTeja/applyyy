@@ -1,10 +1,10 @@
 -- Why this migration exists: Teja ruled on 2026-11-11 (18:5x IST) that the One-on-One project's
 -- "Live Demo" link moves from https://open1on1.vercel.app to https://1on1-sb.vercel.app on every
--- resume, "in one shot". Scope he chose: every master version + every resume still in the live
+-- resume, "in one shot". Scope he chose: every master version except v2 + every resume still in the live
 -- queue (awaiting_approval, approved). Rows that were applied/failed/rejected/dropped keep the old
 -- link ON PURPOSE: that is the resume an employer actually received, and the snapshot is the record.
 --
--- Why it rewrites ALL 39 master versions instead of inserting a v40: each queued row pins its own
+-- Why it rewrites 38 of 39 master versions instead of inserting a v40: each queued row pins its own
 -- master (v27/29/32/39 measured) and the approval page rebuilds the row's "original" from that pin
 -- (rebuildOriginal, apps/web/src/features/approval/tailoredEdits.ts). Editing only the tailored copy
 -- would show the link as an unexplained edit on every row, and the validator re-resolves links from
@@ -24,7 +24,7 @@ alter table public.applications disable trigger guard_tailored_profile_freeze;
 
 do $$
 declare
-  -- How many master versions held the old link, so the report can be checked against the 39 measured.
+  -- How many master versions held the old link, so the report can be checked against the 38 expected.
   v_master int;
   -- How many queued resumes held it, checked against the 109 measured (92 awaiting + 17 approved).
   v_apps int;
@@ -38,7 +38,11 @@ begin
          content_hash = encode(pg_catalog.sha256(pg_catalog.convert_to(
            replace(profile::text, 'https://open1on1.vercel.app', 'https://1on1-sb.vercel.app')::jsonb::text, 'UTF8')), 'hex')
    -- Only rows that carry the old link; every other row stays byte-identical.
-   where profile::text like '%https://open1on1.vercel.app%';
+   where profile::text like '%https://open1on1.vercel.app%'
+     -- v2 predates the NOT VALID check master_profiles_nullable_keys_present (it lacks keys that
+     -- check demands), so ANY update of it is refused (first push attempt, 2026-11-11, rolled back).
+     -- No queued row pins v2 (pins measured: 27-39), so it keeps the old link as history.
+     and version <> 2;
   -- Rows the master update wrote.
   get diagnostics v_master = row_count;
 
