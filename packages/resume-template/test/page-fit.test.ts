@@ -95,8 +95,8 @@ test('a dense rung shrinks the summary paragraph margin too (the browser default
   const css = stepStylesheet(TYPOGRAPHY_LADDER.length - 1);
   // The summary paragraph rule, at the rung's em.
   assert.match(css, new RegExp(`\\.resume__summary \\{ margin: ${TYPOGRAPHY_LADDER[TYPOGRAPHY_LADDER.length - 1]!.paragraphEm}em 0; \\}`));
-  // And the old rungs do not emit it, so their output is unchanged.
-  for (let i = 0; i <= OLD_MINIMUM; i += 1) assert.equal(stepStylesheet(i).includes('.resume__summary'), false, `rung ${i}`);
+  // And the old rungs emit no summary MARGIN rule (since 2026-11-11 every rung > 0 sets the summary's font-size, so match the margin rule only).
+  for (let i = 0; i <= OLD_MINIMUM; i += 1) assert.equal(stepStylesheet(i).includes('.resume__summary { margin'), false, `rung ${i}`);
 });
 
 /*
@@ -167,10 +167,10 @@ test('SPLIT: a long left column is measured at HALF width: the block is at least
     const step = TYPOGRAPHY_LADDER[rung]!;
     // The modelled height of the whole split block.
     const block = flowHeight(flowOf(article(split(left, right))), step);
-    // The left section alone, at half width.
-    const leftHalf = flowHeight(flowOf(article(left)), step, halfWidth(rung));
-    // The left section alone, at full width (the default width).
-    const leftFull = flowHeight(flowOf(article(left)), step);
+    // The left section alone, at half width, in the split's own smaller type (inSplit = true, 2026-11-11).
+    const leftHalf = flowHeight(flowOf(article(left), true), step, halfWidth(rung));
+    // The left section alone, at full width (the default width), same type.
+    const leftFull = flowHeight(flowOf(article(left), true), step);
     // Precondition (non-vacuity): half width really wraps more, else the test proves nothing.
     assert.ok(leftHalf > leftFull, `rung ${rung}: half ${leftHalf} vs full ${leftFull}`);
     // The property: the block is never shorter than its longer column.
@@ -195,10 +195,10 @@ test('SPLIT: never lower than the max of each column modelled alone at half widt
         const step = TYPOGRAPHY_LADDER[rung]!;
         // The block as the model reads it.
         const block = flowHeight(flowOf(article(split(left, right))), step);
-        // Each column alone at half width.
-        const hL = flowHeight(flowOf(article(left)), step, halfWidth(rung));
+        // Each column alone at half width, in the split's smaller type (inSplit = true, 2026-11-11).
+        const hL = flowHeight(flowOf(article(left), true), step, halfWidth(rung));
         // Same, right.
-        const hR = flowHeight(flowOf(article(right)), step, halfWidth(rung));
+        const hR = flowHeight(flowOf(article(right), true), step, halfWidth(rung));
         // Never optimistic.
         assert.ok(block >= Math.max(hL, hR), `L${le}x${lb} R${re}x${rb} rung ${rung}: ${block} < max(${hL}, ${hR})`);
       }

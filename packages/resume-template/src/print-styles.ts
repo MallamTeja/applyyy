@@ -292,6 +292,28 @@ body {
   font-size: 10pt;
   margin: 0.6mm 0 0 0;
 }
+
+/* SECONDARY TEXT, smaller by Teja's ruling of 2026-11-11: the summary, achievements and
+   certifications give up a point so skills and project/experience bullets get the room.
+   Those two stay at the 10.5pt body size because they carry the JD keywords a matcher scores.
+   page-fit.ts STYLE.summary / splitTitle / splitDetail model these exact sizes. */
+.resume__summary {
+  /* One point under body: still a full sentence, but no longer the loudest block. */
+  font-size: 9.5pt;
+}
+
+/* Achievement / certification name, inside the side-by-side row only. */
+.resume__split .resume__entry-title {
+  /* A point under the project titles, so the eye ranks projects first. */
+  font-size: 9.5pt;
+}
+
+/* Achievement / certification description and credential links, inside the row only. */
+.resume__split .resume__entry-detail,
+.resume__split .resume__entry-subtitle {
+  /* Supporting detail; 9pt still extracts cleanly from Chromium's text layer. */
+  font-size: 9pt;
+}
 `;
 
 /**

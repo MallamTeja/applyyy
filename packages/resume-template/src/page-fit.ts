@@ -44,6 +44,9 @@ export interface TypographyStep {
  * body 9.5pt (10.5 × 0.905) and never smaller, line-height 1.15, page margin 7mm, summary
  * paragraph margin 0.3em. Below that a printed resume reads as small print, and a margin
  * under ~7mm reaches the unprintable edge of ordinary printers.
+ * The 9.5pt floor is the BODY's (skills, project/experience bullets). Since 2026-11-11 the
+ * secondary text (summary, achievement/certification names 9.5pt; their details and links 9pt
+ * at step 0) is deliberately smaller by Teja's ruling, so at this rung it prints at ~8.6pt / 8.1pt.
  *
  * Rungs 4-5 were added 2026-11-08: two live rows (Tether 04d5c6e4, L&T 7890ff1b) were 12-19%
  * over at rung 3 with every content floor reached. Teja's rule is layout before content, and the
@@ -140,8 +143,8 @@ type FlowItem =
   // Text set at a width; its height depends on the step.
   | { readonly kind: 'text'; readonly text: string; readonly style: TextStyle; readonly indentMm: number; readonly extraPt: number; readonly extraMm: number }
   // The flex entry head: a title and a no-wrap date on one row.
-  | { readonly kind: 'head'; readonly title: string; readonly dates: string }
-  // A vertical margin in mm at gapScale 1 (scaled by the step), or in em of the body font.
+  | { readonly kind: 'head'; readonly title: string; readonly dates: string; readonly titleStyle: TextStyle }
+  // A vertical margin in mm at gapScale 1 (scaled by the step), or in em of the summary <p>'s own font.
   | { readonly kind: 'margin'; readonly mm: number; readonly bodyEm?: number }
   // The .resume__split flex row: each column is its own flow, laid out side by side at an equal share of the width.
   | { readonly kind: 'columns'; readonly columns: readonly (readonly FlowItem[])[] };
@@ -246,6 +249,12 @@ const STYLE = {
   detail: { size: 10, bold: false },
   // .resume__skill-group: body size, label bold. Modelled all-bold: the wider table covers the label.
   skillGroup: { size: 10.5, bold: true, breakAnywhere: true },
+  // .resume__summary: 9.5pt since 2026-11-11 (Teja: secondary text shrinks so skills and bullets get the room).
+  summary: { size: 9.5, bold: false },
+  // .resume__split .resume__entry-title: achievement/certification names, 9.5pt bold (2026-11-11).
+  splitTitle: { size: 9.5, bold: true },
+  // .resume__split .resume__entry-detail / -subtitle: their descriptions and links, 9pt (2026-11-11).
+  splitDetail: { size: 9, bold: false },
 } as const satisfies Record<string, TextStyle>;
 
 /** A text box with no indent and no extra height. */
@@ -260,7 +269,7 @@ function text(t: string, style: TextStyle): FlowItem {
  * which is why it can be a scan rather than an HTML parser. An element it does not know is
  * read as body text, so new markup is still counted, never skipped.
  */
-export function flowOf(articleHtml: string): readonly FlowItem[] {
+export function flowOf(articleHtml: string, inSplit = false): readonly FlowItem[] {
   // The flow, in document order.
   const flow: FlowItem[] = [];
   // Every open or close tag, in order.
@@ -316,7 +325,7 @@ export function flowOf(articleHtml: string): readonly FlowItem[] {
       // Resume the outer scan after the split's close.
       tag.lastIndex = divs.lastIndex;
       // One column per section (sections never nest), in DOM order; any stray non-blank markup is a column too, so it is counted, never skipped.
-      const columns = inner.split(/(?<=<\/section>)/).filter((chunk) => chunk.trim() !== '').map((chunk) => flowOf(chunk));
+      const columns = inner.split(/(?<=<\/section>)/).filter((chunk) => chunk.trim() !== '').map((chunk) => flowOf(chunk, true));
       // One flow item for the whole row.
       flow.push({ kind: 'columns', columns });
       continue;
@@ -334,7 +343,8 @@ export function flowOf(articleHtml: string): readonly FlowItem[] {
       // The dates text (may be absent: certifications print no dates row).
       const dates = textOf(/<span class="resume__entry-dates">([\s\S]*?)<\/span>/.exec(inner)?.[1] ?? '');
       // One flow item for the row.
-      flow.push({ kind: 'head', title, dates });
+      // Inside the split row the title is the smaller .resume__split rule, so the model reads that size too.
+      flow.push({ kind: 'head', title, dates, titleStyle: inSplit ? STYLE.splitTitle : STYLE.entryTitle });
       continue;
     }
     // Every remaining element with content is a leaf.
@@ -350,13 +360,14 @@ export function flowOf(articleHtml: string): readonly FlowItem[] {
     // A bullet: indented 4.5mm by the list padding, then 0.8mm.
     if (cls === 'resume__bullet') { flow.push({ kind: 'text', text: t, style: STYLE.body, indentMm: 4.5, extraPt: 0, extraMm: 0 }, { kind: 'margin', mm: 0.8 }); continue; }
     // The italic subtitle line: 0.4mm above.
-    if (cls === 'resume__entry-subtitle') { flow.push({ kind: 'margin', mm: 0.4 }, text(t, STYLE.subtitle)); continue; }
+    if (cls === 'resume__entry-subtitle') { flow.push({ kind: 'margin', mm: 0.4 }, text(t, inSplit ? STYLE.splitDetail : STYLE.subtitle)); continue; }
     // A grade or description line: 0.6mm above.
-    if (cls === 'resume__entry-detail') { flow.push({ kind: 'margin', mm: 0.6 }, text(t, STYLE.detail)); continue; }
+    if (cls === 'resume__entry-detail') { flow.push({ kind: 'margin', mm: 0.6 }, text(t, inSplit ? STYLE.splitDetail : STYLE.detail)); continue; }
     // A skills line, then 1mm.
     if (cls === 'resume__skill-group') { flow.push(text(t, STYLE.skillGroup), { kind: 'margin', mm: 1 }); continue; }
     // The summary is a <p>: the browser's default 1em margins above and below.
-    if (name === 'p') { flow.push({ kind: 'margin', mm: 0, bodyEm: 1 }, text(t, STYLE.body), { kind: 'margin', mm: 0, bodyEm: 1 }); continue; }
+    // Its text is the 9.5pt summary style; the em margins are measured against that same size in flowHeight.
+    if (name === 'p') { flow.push({ kind: 'margin', mm: 0, bodyEm: 1 }, text(t, STYLE.summary), { kind: 'margin', mm: 0, bodyEm: 1 }); continue; }
     // Anything else (the headline, a future element): body text, so it is counted.
     flow.push(text(t, STYLE.body));
   }
@@ -377,9 +388,9 @@ export function flowHeight(flow: readonly FlowItem[], step: TypographyStep, widt
   for (const item of flow) {
     // A margin joins the pending run.
     if (item.kind === 'margin') {
-      // mm scaled by the step's gaps, or em of the body font (the <p> default).
+      // mm scaled by the step's gaps, or em of the summary <p>'s font (an em margin resolves against the element's OWN size).
       // (the <p> margin is scaled by the rung's paragraphEm: 1, the browser default, on the original rungs).
-      const v = item.bodyEm !== undefined ? item.bodyEm * step.paragraphEm * STYLE.body.size * step.fontScale : item.mm * MM * step.gapScale;
+      const v = item.bodyEm !== undefined ? item.bodyEm * step.paragraphEm * STYLE.summary.size * step.fontScale : item.mm * MM * step.gapScale;
       // Collapse.
       pending = Math.max(pending, v);
       continue;
@@ -400,13 +411,13 @@ export function flowHeight(flow: readonly FlowItem[], step: TypographyStep, widt
     // The entry head: the title wraps beside the no-wrap dates.
     if (item.kind === 'head') {
       // Sizes at this step.
-      const titleSize = STYLE.entryTitle.size * step.fontScale;
+      const titleSize = item.titleStyle.size * step.fontScale;
       // Same for the dates.
       const datesSize = STYLE.dates.size * step.fontScale;
       // The dates' width, plus the 4mm flex gap when there are dates.
       const datesWidth = item.dates === '' ? 0 : runWidth(item.dates, STYLE.dates, datesSize) + 4 * MM;
       // Title lines in what is left of the row (at least one line even when empty).
-      const titleLines = Math.max(1, lineCount(item.title, STYLE.entryTitle, titleSize, width - datesWidth));
+      const titleLines = Math.max(1, lineCount(item.title, item.titleStyle, titleSize, width - datesWidth));
       // The taller of the two columns.
       height += Math.max(titleLines * titleSize * step.lineHeight, datesSize * step.lineHeight);
       continue;
@@ -471,6 +482,9 @@ body { font-size: ${pt(10.5)}; line-height: ${s.lineHeight}; }
 .resume__bullet { margin: 0 0 ${mm(0.8)} 0; }
 .resume__skill-group { margin: 0 0 ${mm(1)} 0; }
 .resume__entry-detail { font-size: ${pt(10)}; margin: ${mm(0.6)} 0 0 0; }
+.resume__summary { font-size: ${pt(9.5)}; }
+.resume__split .resume__entry-title { font-size: ${pt(9.5)}; }
+.resume__split .resume__entry-detail, .resume__split .resume__entry-subtitle { font-size: ${pt(9)}; }
 ${s.paragraphEm === 1 ? '' : `.resume__summary { margin: ${s.paragraphEm}em 0; }
 `}`;
 }
