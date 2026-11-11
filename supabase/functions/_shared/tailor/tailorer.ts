@@ -197,10 +197,17 @@ export function dedupeRepeatedRefs(tailored: TailoredProfile): { readonly profil
  * web tailoredEdits.ts depends on that). Every ref added or dropped is reported, never silent. Exported
  * for the test. */
 export const SKILLS_PER_GROUP_FLOOR = 4;
-// The most groups one resume shows (Teja: "aim for 3-5").
-export const SKILLS_MAX_GROUPS = 5;
-// The fewest groups when the model chose enough (D2, Teja 2026-11-07: "aim for 3-5"); relevance comes first.
-export const SKILLS_MIN_GROUPS = 3;
+/* Teja, 2026-11-11 19:30 IST: "every resume need to have at least 5 skill groups with each one having 4+ skills for
+   some and 6 for some". So: at least 5 groups (was "aim for 3-5"), at most 6, every group at least 4, and the most
+   job-relevant groups at least 6. All capped at what the master holds: the master is the only honest source. */
+// The richer floor for the most job-relevant groups ("6 for some").
+export const SKILLS_TOP_GROUP_FLOOR = 6;
+// How many of the leading (most relevant) groups get SKILLS_TOP_GROUP_FLOOR.
+export const SKILLS_TOP_GROUPS = 2;
+// The most groups one resume shows: one past the minimum, so "at least 5" can be 6 when the posting touches 6.
+export const SKILLS_MAX_GROUPS = 6;
+// The fewest groups every resume shows (was 3 until 2026-11-11); topped up from the master's groups when needed.
+export const SKILLS_MIN_GROUPS = 5;
 
 // Decides the skills section; returns the profile plus the refs it added and dropped, in order.
 export function shapeSkillGroups(tailored: TailoredProfile, master: MasterProfile, jobDescription: string): { readonly profile: TailoredProfile; readonly added: readonly string[]; readonly dropped: readonly string[] } {
@@ -231,7 +238,12 @@ export function shapeSkillGroups(tailored: TailoredProfile, master: MasterProfil
   // nobody chose. Live: 6 of 20 rows tailored that morning showed 1-2 groups ("aim for 3-5").
   const topUp = [...modelGroups].filter((category) => !relevant.includes(category)).slice(0, Math.max(0, SKILLS_MIN_GROUPS - relevant.length));
   // No relevant group at all: keep the model's groups rather than show an empty section (unchanged).
-  const ranked0 = (relevant.length > 0 ? [...relevant, ...topUp] : [...modelGroups]).slice(0, SKILLS_MAX_GROUPS);
+  const base = relevant.length > 0 ? [...relevant, ...topUp] : [...modelGroups];
+  /* Still under SKILLS_MIN_GROUPS (2026-11-11, "at least 5"): the master's remaining groups in master order fill the
+     gap. Still truthful: every group and every skill in it is the owner's own master content. */
+  const masterTopUp = categories.filter((category) => !base.includes(category)).slice(0, Math.max(0, SKILLS_MIN_GROUPS - base.length));
+  // The groups in page order, capped at SKILLS_MAX_GROUPS.
+  const ranked0 = [...base, ...masterTopUp].slice(0, SKILLS_MAX_GROUPS);
   // Step 5: the AI group always holds a seat when the master has one. Already seated: it stays where relevance put it.
   // Not seated: it takes the last seat, so the group count never passes SKILLS_MAX_GROUPS.
   const seated = categories.includes(aiCategory) && !ranked0.includes(aiCategory) ? [...ranked0.slice(0, SKILLS_MAX_GROUPS - 1), aiCategory] : ranked0;
@@ -245,14 +257,15 @@ export function shapeSkillGroups(tailored: TailoredProfile, master: MasterProfil
   const present = new Set(kept.map(({ ref }) => ref));
   // The refs added, group by group in shown order.
   const added: string[] = [];
-  // Each shown group, filled to its floor.
-  for (const category of shown) {
+  // Each shown group, filled to its floor; the index says whether it is one of the leading (most relevant) groups.
+  for (const [position, category] of [...shown].entries()) {
     // How many the group holds already.
     const count = kept.filter(({ ref }) => byId.get(ref)?.category === category).length;
     // Its master skills not yet on the resume, in master order.
     const candidates = master.skills.filter((s) => s.category === category && !present.has(s.id));
     // This group's floor: 5 for the AI group (step 5), the shared per-group floor for every other.
-    const floor = category === aiCategory ? PAGE_FIT_FLOORS.minAiSkills : SKILLS_PER_GROUP_FLOOR;
+    // The leading SKILLS_TOP_GROUPS groups take the richer floor ("6 for some", 2026-11-11); the AI group never drops below its 5.
+    const floor = Math.max(position < SKILLS_TOP_GROUPS ? SKILLS_TOP_GROUP_FLOOR : SKILLS_PER_GROUP_FLOOR, category === aiCategory ? PAGE_FIT_FLOORS.minAiSkills : 0);
     // The floor, capped at what the master holds for this group, minus what is there.
     const fill = Math.min(floor, count + candidates.length) - count;
     // The AI group also takes EVERY AI skill the posting names, past the floor: "the most relevant AI skills to that

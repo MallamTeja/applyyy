@@ -577,22 +577,23 @@ function groupSizes(resume: { readonly skills: readonly { readonly category: str
 }
 
 // THE RED-ON-REVERT TEST: drop the shapeSkillGroups call in createTailorer and this goes red.
-test("skills shape: a backend posting shows its relevant groups at min(4, master size), topped up to three groups", async () => {
+test("skills shape: a backend posting shows its relevant groups first, topped up to five groups (2026-11-11), leading groups at min(6, size)", async () => {
   // The live 1-per-group shape, plus an ML pick the backend posting gives no reason for.
   const outcome = await shapeOutcome([{ ref: "skill-node" }, { ref: "dev-docker" }, { ref: "ml-xgboost" }], BACKEND_POSTING);
   // Topped-up refs still pass the unchanged validator: only master refs are ever added.
   assert.equal(outcome.kind, "tailored");
   if (outcome.kind !== "tailored") return;
-  // Languages reaches the floor; DevOps holds its whole group of 2. Only two groups are relevant, so
-  // D2 (2026-11-07) tops up to three with the model's ML group, filled to its whole group of 2.
-  assert.deepEqual(groupSizes(outcome.resume), { Languages: 4, DevOps: 2, "Machine Learning": 2 });
-  // Posting-named skills (SQL, TypeScript) before master order (Python); Go is left out; ML's floor adds SHAP.
-  assert.deepEqual(outcome.skillsAdded, ["lang-sql", "lang-ts", "lang-python", "dev-gcp", "ml-shap"]);
+  // 2026-11-11 ("at least 5 groups, 4+ skills, 6 for some"): Languages and DevOps lead, so they take the floor of 6,
+  // capped at their master size (5 and 2); D2 adds the model's ML group; the master's Tools group fills toward 5
+  // groups (this master holds only 4), at the floor of 4.
+  assert.deepEqual(groupSizes(outcome.resume), { Languages: 5, DevOps: 2, "Machine Learning": 2, Tools: 4 });
+  // Posting-named skills (SQL, TypeScript) before master order (Python, Go); ML's floor adds SHAP; Tools in master order.
+  assert.deepEqual(outcome.skillsAdded, ["lang-sql", "lang-ts", "lang-python", "lang-go", "dev-gcp", "ml-shap", "tool-git", "tool-jira", "tool-postman", "tool-slack"]);
   // Nothing dropped: the ML pick now fills the third group.
   assert.deepEqual(outcome.skillsDropped, []);
   // The stored refs are the shaped profile, so tailor_refs re-validates to this exact resume. Grouped
   // and ranked (2026-11-07): Languages (3 named) before DevOps (1 named), then the topped-up ML group.
-  assert.deepEqual(outcome.refs.skills.map((s) => s.ref), ["skill-node", "lang-sql", "lang-ts", "lang-python", "dev-docker", "dev-gcp", "ml-xgboost", "ml-shap"]);
+  assert.deepEqual(outcome.refs.skills.map((s) => s.ref), ["skill-node", "lang-sql", "lang-ts", "lang-python", "lang-go", "dev-docker", "dev-gcp", "ml-xgboost", "ml-shap", "tool-git", "tool-jira", "tool-postman", "tool-slack"]);
 });
 
 // RED 1 (review 2026-11-07; Teja: "rank by the JD"): inside a group, a skill the posting names comes
@@ -602,9 +603,9 @@ test("skills shape: inside a group, a posting-named skill ranks ahead of a model
   const outcome = await shapeOutcome([{ ref: "lang-python" }, { ref: "lang-go" }, { ref: "skill-node" }, { ref: "lang-sql" }], BACKEND_POSTING);
   assert.equal(outcome.kind, "tailored");
   if (outcome.kind !== "tailored") return;
-  // The Languages refs in page order: the three posting-named (master order), then the model's two others.
+  // The Languages refs in page order: the posting-named (master order; TypeScript added by the leading floor of 6), then the model's two others.
   const languages = outcome.refs.skills.map((s) => s.ref).filter((ref) => ref.startsWith("lang-") || ref === "skill-node");
-  assert.deepEqual(languages, ["skill-node", "lang-sql", "lang-python", "lang-go"]);
+  assert.deepEqual(languages, ["skill-node", "lang-sql", "lang-ts", "lang-python", "lang-go"]);
 });
 
 // Yellow (review 2026-11-07): the page orders groups by first appearance, so the shape must emit the
@@ -615,7 +616,8 @@ test("skills shape: the most relevant group comes first on the page even when th
   assert.equal(outcome.kind, "tailored");
   if (outcome.kind !== "tailored") return;
   // Group order on the resolved resume, by first appearance.
-  assert.deepEqual(Object.keys(groupSizes(outcome.resume)), ["Languages", "DevOps"]);
+  // Relevant groups first by relevance; the master's other groups follow (min 5 groups, 2026-11-11).
+  assert.deepEqual(Object.keys(groupSizes(outcome.resume)), ["Languages", "DevOps", "Machine Learning", "Tools"]);
 });
 
 // RED 2 (review 2026-11-07): the live master holds a skill named "C". A posting that names only C++ must
@@ -633,10 +635,9 @@ test("skills shape: a master skill named C is not made relevant by a C++ posting
   ] };
   // Only the look-alikes for C, plus the three real skills.
   const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "lang-c" }, { ref: "skill-node" }] }, master, "C++ and C# services on Node.js with PostgreSQL in Docker; C-level reporting.");
-  // The Systems group is irrelevant, so its pick is dropped and reported.
-  assert.deepEqual(shaped.dropped, ["lang-c"]);
-  // Only the three relevant groups remain.
-  assert.deepEqual(shaped.profile.skills.map((s) => s.ref), ["skill-node", "db-pg", "dev-docker"]);
+  // Systems earns no relevance from "C++": the three relevant groups come first, and Systems is seated LAST only by
+  // the min-5-groups top-up (2026-11-11), never ranked by relevance. Revert keywordAppearsIn's word bound and C ranks first.
+  assert.deepEqual(shaped.profile.skills.map((s) => s.ref), ["skill-node", "db-pg", "dev-docker", "lang-c"]);
 });
 
 // The groups come from the master by the posting, not from the model's choice alone.
@@ -645,17 +646,17 @@ test("skills shape: a group the posting names is shown even when the model skipp
   const outcome = await shapeOutcome([{ ref: "skill-node" }], { ...BACKEND_POSTING, jobDescription: "Node.js backend, tickets tracked in Jira." });
   assert.equal(outcome.kind, "tailored");
   if (outcome.kind !== "tailored") return;
-  // Languages and Tools, both at the floor.
-  assert.deepEqual(groupSizes(outcome.resume), { Languages: 4, Tools: 4 });
+  // Languages and Tools lead (floor 6, capped at 5 and 4), then the master's other groups toward 5 (2026-11-11).
+  assert.deepEqual(groupSizes(outcome.resume), { Languages: 5, Tools: 4, DevOps: 2, "Machine Learning": 2 });
   // Jira leads its group because the posting names it.
   assert.equal(outcome.refs.skills.find((s) => s.ref.startsWith("tool-"))?.ref, "tool-jira");
 });
 
 // A group already at the floor, with no other relevant group, is left exactly as the model chose it.
 test("skills shape: an answer that already fits comes back unchanged", async () => {
-  // Four Languages picks, already ranked by the posting (named Node.js and SQL first, then master order),
-  // and a posting that touches only Languages.
-  const picks = [{ ref: "skill-node" }, { ref: "lang-sql" }, { ref: "lang-python" }, { ref: "lang-go" }];
+  // Every master skill, already in the shape's order (2026-11-11: 5 groups wanted, this master holds 4; Languages
+  // leads with its posting-named Node.js, SQL, TypeScript first), and a posting that touches only Languages.
+  const picks = ["skill-node", "lang-sql", "lang-ts", "lang-python", "lang-go", "dev-docker", "dev-gcp", "ml-xgboost", "ml-shap", "tool-git", "tool-jira", "tool-postman", "tool-slack"].map((ref) => ({ ref }));
   const outcome = await shapeOutcome(picks, { ...BACKEND_POSTING, jobDescription: "SQL and TypeScript on Node.js services." });
   assert.equal(outcome.kind, "tailored");
   if (outcome.kind !== "tailored") return;
@@ -671,8 +672,8 @@ test("skills shape: with no relevant group, the model's own groups are kept rath
   const outcome = await shapeOutcome([{ ref: "ml-xgboost" }], { ...BACKEND_POSTING, jobDescription: "Join a friendly team." });
   assert.equal(outcome.kind, "tailored");
   if (outcome.kind !== "tailored") return;
-  // The ML group stays, holding its whole master group of 2.
-  assert.deepEqual(groupSizes(outcome.resume), { "Machine Learning": 2 });
+  // The model's ML group stays first, holding its whole master group of 2; the master's other groups follow toward 5 (2026-11-11).
+  assert.deepEqual(groupSizes(outcome.resume), { "Machine Learning": 2, Languages: 5, DevOps: 2, Tools: 4 });
 });
 
 // N1 (2026-11-07): a stored HTML posting reaches the model as text. Red on revert of the postingText
@@ -723,15 +724,15 @@ test("D1 control: an invented bullet ref is still refused", async () => {
 
 // D2 (Teja, 2026-11-07 10:38 IST): fewer than 3 JD-relevant groups are topped up to 3 with the model's own
 // groups, in the model's order, each still filled to the floor. Red on revert of the top-up.
-test("D2: one relevant group is topped up to three with the model's groups, in the model's order", async () => {
+test("D2: one relevant group is topped up with the model's groups first, in the model's order (min 5 groups, 2026-11-11)", async () => {
   // A posting naming only Python; the model picked from DevOps, Tools and Machine Learning, in that order.
   const outcome = await shapeOutcome([{ ref: "dev-docker" }, { ref: "tool-git" }, { ref: "ml-xgboost" }], { ...BACKEND_POSTING, jobDescription: "We write Python." });
   assert.equal(outcome.kind, "tailored");
   if (outcome.kind !== "tailored") return;
-  // Languages (relevant) first, then the first two model groups; ML is the fourth and is dropped.
-  assert.deepEqual(groupSizes(outcome.resume), { Languages: 4, DevOps: 2, Tools: 4 });
-  // The ML pick is reported as dropped.
-  assert.deepEqual(outcome.skillsDropped, ["ml-xgboost"]);
+  // Languages (relevant) first, then the model's groups in ITS order (Tools before ML, though master order is ML first).
+  assert.deepEqual(Object.keys(groupSizes(outcome.resume)), ["Languages", "DevOps", "Tools", "Machine Learning"]);
+  // Nothing dropped: five groups are wanted and the master holds four.
+  assert.deepEqual(outcome.skillsDropped, []);
 });
 
 // ---- summary variants end to end (pending #11, 2026-11-07) ---------------------------------------------
@@ -853,8 +854,8 @@ test("AI group (2026-11-10): R2 the AI group takes a seat even when 5+ other gro
   assert.ok(groups.includes("AI"), `AI group missing; groups shown: ${JSON.stringify(groups)}`);
   // Still at least 5 AI skills in it.
   assert.ok(aiRefsOf(shaped.profile.skills, master).length >= 5, "AI group holds fewer than 5 skills");
-  // And the cap holds: AI took a seat, it did not add a sixth group (SKILLS_MAX_GROUPS = 5).
-  assert.ok(groups.length <= 5, `more than 5 groups shown: ${JSON.stringify(groups)}`);
+  // And the cap holds: AI took a seat, it did not add a seventh group (SKILLS_MAX_GROUPS = 6 since 2026-11-11).
+  assert.ok(groups.length <= 6, `more than 6 groups shown: ${JSON.stringify(groups)}`);
 });
 
 // R3 RANKED: a JD-relevant AI skill is pulled in past the floor and leads the group.
@@ -898,10 +899,11 @@ test("AI group (2026-11-10): R4 control, a master with no AI category gets no AI
   const master: MasterProfile = { ...MASTER, skills: NON_AI_SKILLS };
   // Java pick, Java JD.
   const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "lang-java" }] }, master, JAVA_JD);
-  // The three JD-relevant groups, as the pre-AI rule shapes them: no AI seat, nothing else.
-  assert.deepEqual(groupsOf(shaped.profile.skills, master), ["Languages", "Frameworks", "Databases"]);
-  // The full shaped list, each group at the floor of 4, so any change at all to the no-AI path goes red here.
-  assert.deepEqual(shaped.profile.skills.map((s) => s.ref), ["lang-java", "lang-python", "lang-ts", "lang-sql", "fw-spring", "fw-react", "fw-express", "fw-fastapi", "db-pg", "db-mysql", "db-redis", "db-mongo"]);
+  // The three JD-relevant groups, then the master's next two toward 5 (2026-11-11): no AI seat, nothing else.
+  assert.deepEqual(groupsOf(shaped.profile.skills, master), ["Languages", "Frameworks", "Databases", "DevOps & Cloud", "Testing & Quality"]);
+  // The full shaped list: every fixture group holds 4, so the leading floor of 6 caps at 4 and each group shows all 4;
+  // any change at all to the no-AI path goes red here.
+  assert.deepEqual(shaped.profile.skills.map((s) => s.ref), ["lang-java", "lang-python", "lang-ts", "lang-sql", "fw-spring", "fw-react", "fw-express", "fw-fastapi", "db-pg", "db-mysql", "db-redis", "db-mongo", "dev-docker", "dev-aws", "dev-k8s", "dev-gha", "test-junit", "test-jest", "test-pw", "test-vitest"]);
 });
 
 // R5 KEEPS PICKS: the floor is a minimum. Seven model AI picks all survive, even against seven stronger groups.
