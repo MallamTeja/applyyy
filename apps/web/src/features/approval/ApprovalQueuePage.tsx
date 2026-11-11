@@ -90,6 +90,8 @@ import {
   addMasterBullet,
   addMasterEntry,
   removeEntry,
+  // A job title set to the owner's wording (2026-11-11).
+  setEntryRole,
   // FULL: the whole pinned master resolved once per row, the only source an add-back may copy from.
   resolveFullMaster,
 } from './tailoredEdits';
@@ -242,6 +244,8 @@ const EVENT_KIND: Readonly<Record<PageEditAction['kind'], EditEventKind>> = {
   add_master_entry: 'resume_add_entry',
   // A whole entry taken off.
   remove_entry: 'resume_remove_entry',
+  // A job's title set to the owner's wording (2026-11-11).
+  set_role: 'resume_set_role',
   // A brand-new bullet: master version first, then this resume (attestBullet.ts writes the event).
   attest_bullet: 'resume_attest_bullet',
 };
@@ -274,6 +278,8 @@ function eventRef(action: PageEditAction): string {
     case 'add_master_entry':
     // The entry taken off.
     case 'remove_entry':
+    // The job whose title changed (2026-11-11).
+    case 'set_role':
       // The node the log names.
       return action.ref;
     // Text actions name their line.
@@ -336,6 +342,10 @@ function announcementFor(
         kind === 'remove_entry'
       ? // A whole entry taken off.
         'Removed the entry.'
+      : // A job title changed (2026-11-11); the new title is on screen in the entry heading.
+        kind === 'set_role'
+      ? // Confirms the save.
+        'Changed the job title.'
       : kind === 'add_skill'
       ? // An add carries the new skill's name in `after`.
         `Added ${outcome.after ?? 'the skill'} to this resume.`
@@ -464,6 +474,9 @@ function pureEdit(
     // A whole entry off.
     case 'remove_entry':
       return removeEntry(current, action.section, action.ref);
+    // A job's title, as the owner dictated it; only the role field changes (2026-11-11).
+    case 'set_role':
+      return setEntryRole(current, action.ref, action.role);
     // Only for the never check: every kind is listed above.
     default: {
       // Unreachable while every arm is listed; a new arm turns this into a compile error.

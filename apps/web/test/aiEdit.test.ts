@@ -963,3 +963,42 @@ describe('T10 a new owner-named skill group', () => {
     assert.match(ai.holdReason(stored!) ?? '', /group/);
   });
 });
+
+describe('set_role: a job title by prompt (2026-11-11)', () => {
+  // The draft the op resolves against: e0 is the Aczen job, e1 the F1 project.
+  const draft = () => ai.buildAssistDraft(sdiff, [], 'change aczen title to data analyst intern', [], structure as never);
+
+  it('resolves a job to its ref and refuses a project, an unknown id, and a job an earlier op removed', () => {
+    // The job; a project; an id never sent; and the job again after removing it.
+    const ops = ai.resolveOps([{ op: 'set_role', entry: 'e0', text: 'Data Analyst Intern' }, { op: 'set_role', entry: 'e1', text: 'Lead' }, { op: 'set_role', entry: 'e9', text: 'Lead' }], draft());
+    // Each carries what its card and its Apply need, or the one check it failed.
+    assert.deepEqual(ops, [
+      { op: 'set_role', ref: 'x', label: 'Aczen Technologies · Full Stack AI Engineer', role: 'Data Analyst Intern' },
+      { op: 'rejected', what: 'Set job title to "Lead"', why: 'Only a job (experience entry) has a title that can be changed here.' },
+      { op: 'rejected', what: 'Set job title to "Lead"', why: 'The AI named an entry it was not shown.' },
+    ]);
+    // Removed earlier in the same answer: refused, never failed mid-run.
+    const after = ai.resolveOps([{ op: 'remove_entry', id: 'e0' }, { op: 'set_role', entry: 'e0', text: 'Data Analyst Intern' }], draft());
+    // The second op is a rejected card.
+    assert.equal(after[1]?.op, 'rejected');
+  });
+
+  it("maps onto the page's set_role action, always waits for a click, round-trips storage, and reads applied from the heading", () => {
+    // The stored shape.
+    const stored = { op: 'set_role', ref: 'x', label: 'Aczen Technologies · Full Stack AI Engineer', role: 'Data Analyst Intern' } as const;
+    // The page action.
+    assert.deepEqual(ai.toEditAction(stored), { kind: 'set_role', ref: 'x', role: 'Data Analyst Intern' });
+    // Never by itself, even when the operator typed the title: an employer verifies titles.
+    assert.equal(ai.shouldAutoApply(stored, 'change aczen title to data analyst intern'), false);
+    // And the card says why it waits.
+    assert.match(ai.holdReason(stored) ?? '', /job title change always needs your OK/);
+    // Stored and read back unchanged; a malformed one is refused.
+    assert.deepEqual([ai.readStoredOp(JSON.parse(JSON.stringify(stored))), ai.readStoredOp({ op: 'set_role', ref: 'x' })], [stored, null]);
+    // The old heading: not applied.
+    assert.equal(ai.isApplied(stored, sdiff, structure as never), false);
+    // The heading now ends in the new title: applied.
+    const retitled = { ...structure, entries: [{ ...structure.entries[0], label: 'Aczen Technologies · Data Analyst Intern' }, structure.entries[1]] };
+    // Read from the resume, never stored.
+    assert.equal(ai.isApplied(stored, sdiff, retitled as never), true);
+  });
+});

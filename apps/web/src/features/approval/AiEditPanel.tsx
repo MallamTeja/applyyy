@@ -331,6 +331,21 @@ export function OpBody({
       </div>
     );
   }
+  // A job title (2026-11-11): the job as it reads now, then the new title.
+  if (op.op === 'set_role') {
+    // Stacked like the entry cards.
+    return (
+      // The card root: ai-chat__change stacks the change and its notes.
+      <div className="ai-chat__change">
+        {/* Where it lands. */}
+        <span className="ai-chat__where">Job title</span>
+        {/* The job as it reads now, struck. */}
+        <del className="ai-chat__old">{op.label}</del>
+        {/* The new title. */}
+        <ins className="ai-chat__new">{op.role}</ins>
+      </div>
+    );
+  }
   // A removal: the bullet that goes.
   if (op.op === 'remove') {
     // The whole bullet, struck, so the operator sees exactly what leaves the PDF.

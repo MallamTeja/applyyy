@@ -123,6 +123,8 @@ export type EditAction =
   | { readonly kind: 'add_master_entry'; readonly section: BulletSection; readonly ref: string }
   // A whole entry off the resume.
   | { readonly kind: 'remove_entry'; readonly section: BulletSection; readonly ref: string }
+  // 2026-11-11: an experience entry's job title, as the owner dictated it (tailoredEdits.setEntryRole).
+  | { readonly kind: 'set_role'; readonly ref: string; readonly role: string }
   // Brand-new bullet text: written into the master first (attestBullet), then added by ref.
   | { readonly kind: 'attest_bullet'; readonly section: BulletSection; readonly parentRef: string; readonly text: string };
 

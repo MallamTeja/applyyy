@@ -49,6 +49,8 @@ const SAMPLES: Record<string, Record<string, unknown>> = {
   new_bullet: { op: 'new_bullet', entry: 'e1', text: 'New bullet.' },
   // Take a whole entry off.
   remove_entry: { op: 'remove_entry', id: 'e1' },
+  // A job's title set to the owner's wording (2026-11-11).
+  set_role: { op: 'set_role', entry: 'e0', text: 'Data Analyst Intern' },
 };
 
 // The smallest request parseAssistRequest accepts, so buildAssistPrompt can run.

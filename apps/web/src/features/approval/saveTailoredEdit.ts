@@ -47,6 +47,8 @@ export type EditEventKind =
   | 'resume_add_entry'
   // R0': a whole entry taken off.
   | 'resume_remove_entry'
+  // 2026-11-11: an experience entry's job title set to the owner's dictated wording.
+  | 'resume_set_role'
   // R0': a new bullet vouched for, written to the master first, then put on (re-pins).
   | 'resume_attest_bullet';
 

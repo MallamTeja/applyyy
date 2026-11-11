@@ -1017,6 +1017,28 @@ export function removeEntry(current: ResolvedResume, section: BulletSection, ref
   return { ok: true, resume, before: entryLabel(section, old), after: null };
 }
 
+/* The owner's dictated job title on one EXPERIENCE entry (Teja, 2026-11-11: "it need to allow me to change the
+   internship titles or roles too, by prompting it"). Only `role` changes; tracesToMaster frees exactly that field,
+   shape-checked by ROLE_TITLE_SHAPE, so company, dates and bullets still trace to the master. */
+export function setEntryRole(current: ResolvedResume, ref: string, role: string): EditOutcome {
+  /* The title as it will print: trimmed, inner runs of spaces collapsed. */
+  const title = role.replace(/\s+/g, ' ').trim();
+  /* Only a printable title; the save gate would refuse anything else, so refusing here gives the reason. */
+  if (!ROLE_TITLE_SHAPE.test(title)) return { ok: false, reason: 'A job title is 2-60 letters, digits, spaces or & + # . / -, starting with a letter.' };
+  /* The jobs on the resume now, typed as jobs so the copy below keeps every field. */
+  const present = current.experience;
+  /* The job, for the event's `before`. */
+  const old = present.find((entry) => entry.ref === ref);
+  /* Not printed: a title change must never be shown for a job that is gone. */
+  if (old === undefined) return { ok: false, reason: 'That job is no longer on this resume.' };
+  /* Already this title: a no-op must not read as a change. */
+  if (old.role === title) return { ok: false, reason: `The title is already "${title}".` };
+  /* A new list with only this job's role replaced; every other entry keeps its place and identity. */
+  const resume = { ...current, experience: present.map((entry) => (entry.ref === ref ? { ...entry, role: title } : entry)) } as ResolvedResume;
+  /* Both labels, "Aczen Technologies · <title>", so the history note reads what changed. */
+  return { ok: true, resume, before: entryLabel('experience', old), after: entryLabel('experience', { ...old, role: title }) };
+}
+
 /* The display fields that name an entry, per section, in heading order. The master node and the
    resolved entry use the same names, so one table labels both. */
 const LABEL_FIELDS: Readonly<Record<BulletSection, readonly string[]>> = {

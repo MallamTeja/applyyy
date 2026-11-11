@@ -158,7 +158,9 @@ export type AssistOp =
   // A printed skill off the resume, by its printed name (2026-11-04).
   | { readonly op: 'remove_skill'; readonly name: string; readonly category?: string }
   // A whole entry off the resume, by its "eN" id (2026-11-04).
-  | { readonly op: 'remove_entry'; readonly id: string };
+  | { readonly op: 'remove_entry'; readonly id: string }
+  // A job's title, by its "eN" id, set to the owner's dictated wording (2026-11-11).
+  | { readonly op: 'set_role'; readonly entry: string; readonly text: string };
 
 /* One change the AI proposed that cannot land, said in words (2026-11-04): what was asked, and the
    one check it failed. Shown as its own card, so a refusal is never hidden behind the AI's text. */
@@ -578,6 +580,8 @@ export function holdReason(op: StoredOp): string | null {
   }
   // A whole entry off: always the operator's call.
   if (op.op === 'remove_entry') return 'Waiting for your click: removing a whole entry always needs your OK.';
+  // A job title is a claim an employer can verify: always the owner's click (2026-11-11).
+  if (op.op === 'set_role') return 'Waiting for your click: a job title change always needs your OK.';
   /* A skill new to the master (2026-11-05): said, because a skill the operator named used to apply by
      itself, and a card that now waits would otherwise read as "did nothing". */
   if (op.op === 'add_skill' && !op.inMaster) return 'Waiting for your click: check its group first. A skill new to your master profile never applies by itself.';
@@ -616,6 +620,8 @@ export type StoredOp =
   | { readonly op: 'remove_skill'; readonly ref: string; readonly name: string }
   // A whole entry off the resume (2026-11-04), with its label for the card.
   | { readonly op: 'remove_entry'; readonly section: BulletSection; readonly ref: string; readonly label: string }
+  // A job's title (2026-11-11): the job's ref for the save, its label (old title) and the new title for the card.
+  | { readonly op: 'set_role'; readonly ref: string; readonly label: string; readonly role: string }
   /* A change that cannot land (2026-11-04): refused by the server or unresolvable here. Stored like
      any card so a reloaded chat still says what was NOT done and why; it has no action at all. */
   | ({ readonly op: 'rejected' } & Rejection);
@@ -714,6 +720,21 @@ function resolveOne(op: AssistOp, draft: AssistDraft, lists: string[][], section
     // Its section and ref are what remove_entry saves against; its label is what the card shows.
     return { op: 'remove_entry', section: entry.section, ref: entry.ref, label: entry.label };
   }
+  // A job's title (2026-11-11): a JOB the ask listed, still on the resume after this answer's earlier ops.
+  if (op.op === 'set_role') {
+    // The card's wording, used by every refusal below.
+    const what = `Set job title to "${clip(op.text, MAX_QUOTE, 'title')}"`;
+    // The entry, by short id.
+    const entry = draft.entries.get(op.entry);
+    // An id never sent cannot be applied.
+    if (entry === undefined) return reject(what, 'The AI named an entry it was not shown.');
+    // Only a job has a title (the server checks too; this page never trusts that alone).
+    if (entry.section !== 'experience') return reject(what, 'Only a job (experience entry) has a title that can be changed here.');
+    // Taken off by an earlier op in this answer.
+    if (gone.has(`entry:${entry.section}:${entry.ref}`)) return reject(what, GONE_WITH_ENTRY);
+    // Its ref is what the save targets; the label (old title) and the new title are what the card shows.
+    return { op: 'set_role', ref: entry.ref, label: entry.label, role: op.text };
+  }
   // A section: it must be in the order, with a neighbour on that side.
   if (op.op === 'move_section') {
     // The card's wording, used by every refusal below.
@@ -806,6 +827,8 @@ export function shouldAutoApply(op: StoredOp, instruction: string): boolean {
   /* A whole entry off is the biggest change one op can make, and since 2026-11-04 the untrusted JD is
      in the prompt, so a posting could ask for it (review finding): always the operator's click. */
   if (op.op === 'remove_entry') return false;
+  // A job title is a claim an employer verifies (2026-11-11): always the operator's click.
+  if (op.op === 'set_role') return false;
   /* A text edit applies by itself only when rule 5 found it grounded (Teja, 2026-11-04, "Audit-gated").
      The untrusted JD is in the prompt, so a posting can steer the wording; an injected claim almost
      always carries words the master lacks, which rule 5 names. Summary edits have no rule 5 and wait. */
@@ -864,6 +887,9 @@ export function toEditAction(stored: ApplicableOp): EditAction {
     // The entry off, by section and ref: the same action the entry's own Remove makes.
     case 'remove_entry':
       return { kind: 'remove_entry', section: stored.section, ref: stored.ref };
+    // The job's title, by ref (2026-11-11).
+    case 'set_role':
+      return { kind: 'set_role', ref: stored.ref, role: stored.role };
   }
 }
 
@@ -1017,6 +1043,9 @@ export function isApplied(stored: StoredOp, diff: ResumeDiff, structure: AssistS
     // Nothing to read them against.
     return structure !== null && structureApplied(stored, diff, structure);
   }
+  /* A job title (2026-11-11): applied when that job's heading now ends in the new title. The label is
+     "company · role" (entryLabel), so the last part is the title; without a structure nothing confirms it. */
+  if (stored.op === 'set_role') return structure !== null && structure.entries.some((entry) => entry.section === 'experience' && entry.ref === stored.ref && entry.label.split(' · ').at(-1) === stored.role);
   // A skill add or removal is read off the printed skills line.
   if (stored.op === 'add_skill' || stored.op === 'remove_skill') {
     // The skills line, if the diff has one.
@@ -1193,6 +1222,8 @@ export function readStoredOp(value: unknown): StoredOp | null {
     // Typed exactly.
     return section !== null && allStrings(value, ['ref', 'label']) ? { op: 'remove_entry', section, ref: value.ref as string, label: value.label as string } : null;
   }
+  // A job title (2026-11-11): ref, label and the new title, all strings.
+  if (value.op === 'set_role') return allStrings(value, ['ref', 'label', 'role']) ? { op: 'set_role', ref: value.ref as string, label: value.label as string, role: value.role as string } : null;
   // A rejected card: what was asked and why; without a reason it would say "not done" over nothing.
   if (value.op === 'rejected') return allStrings(value, ['what', 'why']) ? { op: 'rejected', what: value.what as string, why: value.why as string } : null;
   // A skill: name, group, and the master flag.
@@ -1269,6 +1300,8 @@ function readOp(value: unknown): AssistOp | null {
   }
   // An entry off: its short id (2026-11-04).
   if (value.op === 'remove_entry' && typeof value.id === 'string') return { op: 'remove_entry', id: value.id };
+  // A job title: an entry id and the new title (2026-11-11).
+  if (value.op === 'set_role' && typeof value.entry === 'string' && typeof value.text === 'string') return { op: 'set_role', entry: value.entry, text: value.text };
   // An edit carries an id, text and a list of new numbers.
   if (value.op === 'edit' && typeof value.id === 'string' && typeof value.text === 'string' && Array.isArray(value.newNumbers)) {
     // Every flagged number must be a string, or the warning shown would be wrong.
@@ -1325,6 +1358,9 @@ export function describeOp(op: StoredOp): string {
     // The entry going.
     case 'remove_entry':
       return `remove entry "${clip(op.label, MAX_QUOTE, op.section)}"`;
+    // The job and its new title (2026-11-11).
+    case 'set_role':
+      return `set job title of "${clip(op.label, MAX_QUOTE, 'job')}" to "${clip(op.role, MAX_QUOTE, 'title')}"`;
     // The new wording.
     case 'new_bullet':
       return `new bullet ${quote(op.text, 'bullet')}`;

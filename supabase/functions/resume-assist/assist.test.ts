@@ -486,17 +486,17 @@ test("parseAssistOps drops a move of a bullet removed earlier in the answer, and
   assert.deepEqual(flat.ok ? [flat.ops.length, flat.dropped] : null, [0, 1]);
 });
 
-test("the schema and the system text offer exactly the nine ops", () => {
+test("the schema and the system text offer exactly the ten ops (set_role joined 2026-11-11)", () => {
   // The prompt parts.
   const prompt = buildAssistPrompt(request());
   // The schema, read through its nested shape.
   const schema = prompt.responseSchema as { properties: { ops: { items: { properties: { op: { enum: string[] }; direction: { enum: string[] } } } } } };
   // Closed to what parseAssistOps reads; the two remove ops joined on 2026-11-04.
-  assert.deepEqual(schema.properties.ops.items.properties.op.enum, ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "add_back", "new_bullet", "remove_entry"]);
+  assert.deepEqual(schema.properties.ops.items.properties.op.enum, ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "add_back", "new_bullet", "remove_entry", "set_role"]);
   // Direction closed in the schema too.
   assert.deepEqual(schema.properties.ops.items.properties.direction.enum, ["up", "down"]);
   // Since 2026-11-04 the system text spells every op as exact JSON, so a skill's name cannot land in "text".
-  for (const kind of ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "add_back", "new_bullet", "remove_entry"]) {
+  for (const kind of ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "add_back", "new_bullet", "remove_entry", "set_role"]) {
     // Each kind appears as a JSON example, quoted exactly as the model must write it.
     assert.match(prompt.systemInstruction, new RegExp(`\\{"op":"${kind}"`), kind);
   }
@@ -1398,4 +1398,79 @@ test("T10 op cap: a swap pair is kept or cut together", () => {
   assert.deepEqual(ops.rejected.map((r) => r.what), ['Remove entry "F1 Race Pace Predictor"', 'Add back "One-on-One"']);
   // The remove's reason names the swap.
   assert.match(ops.rejected[0]!.why, /swap/);
+});
+
+/* ---- 2026-11-11: set_role, owner-named skill lists with typos, "do it" follow-ups --------------------------------- */
+
+/* One answer's ops parsed against a request: kept ops and refusals. */
+function parsedOps(ops: unknown[], req: AssistRequest) {
+  // The model's answer as the wire carries it.
+  const parsed = parseAssistOps(JSON.stringify({ ops, note: "" }), req);
+  // The fixture answer is always well-formed JSON.
+  if (!parsed.ok) throw new Error("answer did not parse");
+  // Kept and refused, side by side.
+  return parsed;
+}
+
+test("set_role: the owner's dictated title for a JOB is kept, typo-tolerant on the owner's side", () => {
+  // Teja's own words from the FamPay row, typo included.
+  const req = dictating("also change aczen title full stack ai eng to data anylist intern");
+  // The model spells it correctly.
+  const out = parsedOps([{ op: "set_role", entry: "e0", text: "Data  Analyst Intern " }], req);
+  // Kept, with the spacing collapsed to what will print.
+  assert.deepEqual(out.ops, [{ op: "set_role", entry: "e0", text: "Data Analyst Intern" }]);
+  // Nothing refused.
+  assert.deepEqual(out.rejected, []);
+});
+
+test("set_role: a title the owner never said, a non-job entry, and a junk title are each refused with a reason", () => {
+  // The owner asks about something else entirely; a posting could still steer the model toward a grander title.
+  const req = dictating("make my summary shorter");
+  // A title lifted from nowhere the owner typed.
+  const invented = parsedOps([{ op: "set_role", entry: "e0", text: "Senior Staff Engineer" }], req);
+  // Refused: the title is the owner's claim to make.
+  assert.equal(invented.ops.length, 0);
+  // The reason says to dictate it.
+  assert.match(invented.rejected[0]!.why, /not the title you asked for/);
+  // A project (e1) has no job title.
+  const project = parsedOps([{ op: "set_role", entry: "e1", text: "Data Analyst Intern" }], dictating("set e1 title to data analyst intern"));
+  // Refused with the experience-only reason.
+  assert.match(project.rejected[0]!.why, /Only a job/);
+  // Markup is not a printable title, even when the owner typed it.
+  const junk = parsedOps([{ op: "set_role", entry: "e0", text: "<b>CTO</b>" }], dictating("set my title to <b>CTO</b>"));
+  // Refused by the validator's own title shape.
+  assert.match(junk.rejected[0]!.why, /A job title is/);
+});
+
+test("owner-named skills: 'type grpahy' names Typography (two typos, a swap counted once); an unnamed skill is still refused", () => {
+  // Teja's RainFocus words, typos included.
+  const req = dictating("add type grpahy , wireframing , ux skills etc.. in skills");
+  // The model adds the three he named, plus one he did not.
+  const out = parsedOps([
+    // Named, two edits away.
+    { op: "add_skill", name: "Typography", category: "Languages" },
+    // Named exactly.
+    { op: "add_skill", name: "Wireframing", category: "Languages" },
+    // Named exactly.
+    { op: "add_skill", name: "UX", category: "Languages" },
+    // Never named.
+    { op: "add_skill", name: "Figma", category: "Languages" },
+  ], req);
+  // The three named ones are kept.
+  assert.deepEqual(out.ops.map((op) => ("name" in op ? op.name : op.op)), ["Typography", "Wireframing", "UX"]);
+  // The unnamed one is refused, so the wider match did not open the gate to anything.
+  assert.deepEqual(out.rejected.map((r) => r.what), ['Add skill "Figma"']);
+});
+
+test("the system text: titles are a set_role op, skills are not entries, moves carry a direction, and 'do it' repeats the request", () => {
+  // The prompt parts.
+  const prompt = buildAssistPrompt(request());
+  // A job title is changed here, not sent to the Master profile page.
+  assert.match(prompt.systemInstruction, /A JOB TITLE is the exception: .*use set_role/);
+  // Skills are never sent to the Master profile page.
+  assert.match(prompt.systemInstruction, /Skills are not entries: never send the owner to the Master profile page for a skill they name./);
+  // A move without a direction is ruled out in words as well as by the parser.
+  assert.match(prompt.systemInstruction, /move and move_section ALWAYS carry "direction"/);
+  // "do it" is the previous request, never a reorder.
+  assert.match(prompt.systemInstruction, /repeats the owner's previous request from CHAT SO FAR: make those ops now; it is never a reorder request./);
 });

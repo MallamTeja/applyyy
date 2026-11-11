@@ -1053,3 +1053,30 @@ describe('classifyTailored: the pin is blamed only when it is the ONLY problem',
     assert.equal(edits.classifyTailored(original()), 'resume');
   });
 });
+
+describe('setEntryRole (2026-11-11)', () => {
+  it("sets only the job's title, passes the save gate, and refuses a junk title, a repeat and a missing job", () => {
+    // The tailor's version.
+    const orig = original();
+    // The first job's ref.
+    const ref = orig.experience[0]!.ref;
+    // The owner's title.
+    const out = edits.setEntryRole(orig, ref, '  Data  Analyst Intern ');
+    // Landed.
+    assert.equal(out.ok, true);
+    // Narrowed.
+    if (!out.ok) return;
+    // Only the role changed, spacing collapsed; company and bullets are the master's.
+    assert.deepEqual({ ...out.resume.experience[0], role: orig.experience[0]!.role }, orig.experience[0]);
+    // The new title.
+    assert.equal(out.resume.experience[0]!.role, 'Data Analyst Intern');
+    // The save gate accepts what the edit built.
+    assert.equal(edits.tracesToMaster(orig, out.resume, orig, MASTER), true);
+    // Markup is refused before the gate.
+    assert.equal(edits.setEntryRole(orig, ref, '<b>CTO</b>').ok, false);
+    // The same title again is a no-op, refused so it never reads as a change.
+    assert.equal(edits.setEntryRole(out.resume, ref, 'Data Analyst Intern').ok, false);
+    // A job not on the resume.
+    assert.equal(edits.setEntryRole(orig, 'exp-gone', 'Data Analyst Intern').ok, false);
+  });
+});
