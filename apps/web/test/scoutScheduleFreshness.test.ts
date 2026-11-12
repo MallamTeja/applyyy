@@ -38,7 +38,8 @@ function scoutRunHours(): number[] {
 }
 
 // The words the Health page and the popup use for a run count.
-const PER_DAY: Readonly<Record<number, string>> = { 1: 'once a day', 2: 'twice a day', 3: 'three times a day' };
+// 10 added 2026-11-12, when scout.yml went to ten runs a day.
+const PER_DAY: Readonly<Record<number, string>> = { 1: 'once a day', 2: 'twice a day', 3: 'three times a day', 10: 'ten times a day' };
 
 test('the scout_ats threshold covers the longest gap between scheduled runs plus the start delay', () => {
   // The run times.

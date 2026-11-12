@@ -128,8 +128,11 @@ export const AGENT_CADENCE: Readonly<Partial<Record<AgentName, Cadence>>> = {
      the threshold is set by the LONGEST scheduled gap, 12:17 -> 00:17 UTC = 12 h, which the
      new run does not shorten; 12 h + the 6 h delay = 18 h still needs 20. Lowering it would
      call a healthy late night run dead. test/scoutScheduleFreshness.test.ts recomputes the
-     gap from scout.yml, so a schedule change that outgrows 20 goes red there. */
-  scout_ats: { expected: 'three times a day', staleAfterHours: 20 },
+     gap from scout.yml, so a schedule change that outgrows 20 goes red there.
+     Ten runs a day since 2026-11-12 (Teja: "scan daily 10 times"). The longest gap is now
+     3 h, so 3 h + the 6 h delay = 9 h; 12 leaves room for one dropped run (GitHub drops
+     scheduled runs under load) and still flags a dead schedule half a day sooner than 20. */
+  scout_ats: { expected: 'ten times a day', staleAfterHours: 12 },
   scout_aggregator: { expected: 'every morning', staleAfterHours: 30 },
   /* Deterministic, cheap, runs with discovery. */
   normalizer: { expected: 'every morning', staleAfterHours: 30 },

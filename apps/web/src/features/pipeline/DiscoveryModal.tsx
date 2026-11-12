@@ -151,7 +151,7 @@ export function DiscoveryModal({
                     so the list names what the scan really reads. */}
                 {isRemote
                   ? 'Runs on a schedule in GitHub Actions, through the same apply-link check and screener as the company-board scout.'
-                  : 'Polls Greenhouse, Lever, Ashby and Workday boards in your Company Watchlist. Every board is scanned automatically three times a day; this button scans the 10 least recently polled boards now.'}
+                  : 'Polls Greenhouse, Lever, Ashby and Workday boards in your Company Watchlist. Every board is scanned automatically ten times a day; each run starts with the least recently scanned companies, and this button scans the 10 least recently polled boards now.'}
               </p>
             </div>
           </div>

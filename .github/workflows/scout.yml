@@ -15,7 +15,7 @@ name: applyy scout (ats discovery)
 
 on:
   schedule:
-    # Twice a day, 00:17 and 12:17 UTC (05:47 and 17:47 IST). Teja ruled 2026-11-01 that
+    # HISTORY (superseded 2026-11-12, see below): twice a day, 00:17 and 12:17 UTC. Teja ruled 2026-11-01 that
     # two runs are enough (it was every 6 hours): each run uses ~10 Actions minutes of this
     # private repo's monthly quota, so this halves scout's share. 00:17 UTC collects the US
     # working day for the Indian morning review; 12:17 UTC collects the Indian and European
@@ -25,11 +25,17 @@ on:
     # (apps/web/src/data/agentFreshness.ts, guarded against this file by
     # apps/web/test/scoutScheduleFreshness.test.ts) and the scan panel's "three times a day"
     # (apps/web/src/features/pipeline/DiscoveryModal.tsx).
-    - cron: '17 0,12 * * *'
-    # Third run (2026-11-05): 04:17 UTC = 09:47 IST, so the Indian morning review sees a scan
-    # that is hours old, not one from 05:47. Costs ~10 more Actions minutes a day. The longest
-    # gap between runs is still 12:17 -> 00:17 UTC (12 h), so the Health threshold is unchanged.
-    - cron: '17 4 * * *'
+    # Third run (2026-11-05): 04:17 UTC = 09:47 IST, for the Indian morning review.
+    # TEN runs a day since 2026-11-12 (Teja: "automatically scan daily 10 times, each time
+    # different companies"). Gaps alternate 2 h / 3 h, so no posting waits more than ~3 h plus
+    # GitHub's start delay. The quota reason for cutting to two runs (2026-11-01) is gone: the
+    # repo is PUBLIC, and standard runners are free for public repos. "Different companies each
+    # time" is the oldest-last_polled_at-first order plus the 12-min budget (scout.ts): each
+    # run starts with the boards the previous run never reached. No per-run board cap on
+    # purpose: a 1/10 slice would scan each board once a day, fewer than the ~2 a day before.
+    # The drain (postscreen-drain.yml) runs after every scout, so each run's passed_filters
+    # rows go on to matcher -> tailor -> auditor without a hand.
+    - cron: '17 0,2,5,7,10,12,14,17,19,22 * * *'
   workflow_dispatch:
     inputs:
       force:

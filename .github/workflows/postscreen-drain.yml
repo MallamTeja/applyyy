@@ -30,8 +30,8 @@ on:
     workflows: ['applyy scout (ats discovery)', 'applyy scout (remote feeds)']
     # After the scout finishes, never while it is still inserting. A failed scout may still have inserted rows.
     types: [completed]
-  # SCHEDULED SWEEP: the safety net for a missed or failed trigger. 04:30 UTC is after both scout crons
-  # (scout.yml 00:17/04:17/12:17, scout-remote.yml 01:30). GitHub cron starts late; that is harmless here.
+  # SCHEDULED SWEEP: the safety net for a missed or failed trigger. Since 2026-11-12 scout.yml runs ten
+  # times a day, so this daily sweep only catches a trigger GitHub dropped. GitHub cron starts late; harmless here.
   schedule:
     - cron: '30 4 * * *'
   # Manual runs: full drains, re-runs (from_stage) and rehearsals (dry_count_only). On the two automatic
