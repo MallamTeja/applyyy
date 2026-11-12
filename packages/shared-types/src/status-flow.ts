@@ -53,7 +53,7 @@ export interface StatusTransition {
  *
  * BUT DO NOT READ THAT AS "THE GRAPH HAS NO BACKWARD EDGES" — corrected 2026-09-10,
  * because the previous wording ended "there is no backward path for a bug to wander
- * down" and that is false. ELEVEN backward edges exist, deliberately, and they are the
+ * down" and that is false. TWELVE backward edges exist, deliberately, and they are the
  * recovery lanes: `audit_flagged→tailored`, `interview→oa_pending`,
  * `blocked_needs_human→applied`, `blocked_needs_human→dropped_filter`,
  * `needs_verification→applied`, `needs_verification→approved`,
@@ -61,7 +61,8 @@ export interface StatusTransition {
  * the human re-adding a dropped job by pasting its link, and (2026-11-01)
  * `awaiting_approval→passed_filters` and `approved→passed_filters`, the human
  * re-running a row after the master changed, and (2026-11-02) `failed→passed_filters`,
- * re-running a row that failed before approval (guarded in SQL, see guard_failed_rerun).
+ * re-running a row that failed before approval (guarded in SQL, see guard_failed_rerun), and (2026-11-12)
+ * `interview→applied`, the human undoing a tracker misread (a receipt read as an interview invite).
  *
  * The true statement is narrower and is what the prose above was reaching for: no
  * backward edge exists on the AUTOMATED FORWARD PATH, and every backward edge except
@@ -185,6 +186,9 @@ export const STATUS_TRANSITIONS: readonly StatusTransition[] = [
   { from: 'interview', to: 'oa_pending', allowedAgents: ['tracker', 'human'], note: 'Multi-round loop sent a further assessment.' },
   { from: 'interview', to: 'offer', allowedAgents: ['tracker', 'human'], note: 'Terminal, good.' },
   { from: 'interview', to: 'rejected', allowedAgents: ['tracker', 'human'], note: 'Terminal, bad.' },
+  // A human undoing a tracker misread (2026-11-12, migration 20261112160000): Canonical's receipts were read as
+  // interview invites. Human-only, so no agent can walk a row back on its own reading of an email.
+  { from: 'interview', to: 'applied', allowedAgents: ['human'], note: 'Human correction: the interview was a misread email; back to applied.' },
 
   // ---- Human-only recovery lanes -------------------------------------------
   // STILL human-only (Teja, 2026-10-23): greenhouse.io signs for ALL its tenants, so anyone
