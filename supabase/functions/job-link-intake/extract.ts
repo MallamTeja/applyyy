@@ -20,13 +20,39 @@ export const MAX_SOURCE_CHARS = 30_000;
 // Below this, the "page" is a login wall or a JS shell, not a job description, so the human is asked for text.
 export const MIN_JOB_TEXT_CHARS = 200;
 
+// True when a parsed JSON-LD value is, or contains, a schema.org JobPosting. Walks arrays and
+// `@graph`, the two wrappers schema.org allows, and reads `@type` as a string or a list of strings.
+function holdsJobPosting(node: unknown): boolean {
+  // A top-level array of entities: any one of them may be the posting.
+  if (Array.isArray(node)) return node.some(holdsJobPosting);
+  // Strings, numbers and null carry no @type.
+  if (node === null || typeof node !== "object") return false;
+  // Read as a plain record from here on.
+  const record = node as Record<string, unknown>;
+  // @type may be one name or several; only an exact "JobPosting" counts (positive shape, §6).
+  const types = Array.isArray(record["@type"]) ? record["@type"] : [record["@type"]];
+  // The entity itself is the posting.
+  if (types.includes("JobPosting")) return true;
+  // Or the posting sits inside the page's @graph.
+  return holdsJobPosting(record["@graph"]);
+}
+
 // Readable text from raw HTML: JSON-LD JobPosting blocks first (the most structured thing a
 // careers page offers), then the visible body. Null when nothing readable is left.
 export function pageText(html: string): string | null {
   // JSON-LD blocks carry title/company/location as data; kept verbatim (stripHtml runs later on the whole).
   const ldJson = [...html.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)]
     // Group 1 is the block body; an empty one adds nothing.
-    .map((m) => m[1] ?? "");
+    .map((m) => m[1] ?? "")
+    // ONLY JobPosting blocks (2026-11-12). Every block used to be kept, so a JS-shell page whose
+    // static HTML held just a site-identity block (MongoDB, application 93f8e874) measured 272
+    // chars, passed MIN_JOB_TEXT_CHARS and was STORED AS THE DESCRIPTION; the render fallback that
+    // reads the real body never ran. Missing data became an answer (CLAUDE.md §6). A block that
+    // does not parse is dropped too: unreadable is not "job text".
+    .filter((block) => {
+      // JSON.parse throws on a broken block; that block is skipped, never kept as raw text.
+      try { return holdsJobPosting(JSON.parse(block)); } catch { return false; }
+    });
   // stripHtml keeps the TEXT of <script>/<style>, so those blocks go first or the "description" is JavaScript.
   const body = html.replace(/<(script|style|noscript|svg|template)\b[\s\S]*?<\/\1>/gi, " ");
   // Structured part first so a later cap never cuts it off.

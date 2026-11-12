@@ -2,7 +2,7 @@
 // Run with: node --test "supabase/functions/job-link-intake/*.test.ts"
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildExtractPrompt, pageText, parseExtraction } from "./extract.ts";
+import { buildExtractPrompt, MIN_JOB_TEXT_CHARS, pageText, parseExtraction } from "./extract.ts";
 import { UNTRUSTED_FENCE_CLOSE, UNTRUSTED_FENCE_OPEN } from "../_shared/match/prompt.ts";
 
 // The fields of a clean answer, varied per test.
@@ -16,6 +16,47 @@ test("pageText drops script and style bodies but keeps JSON-LD and visible text"
   assert.match(text, /"title":"Data Engineer"/);
   assert.match(text, /Join us & build pipelines\./);
   assert.doesNotMatch(text, /window\.track|color:red/);
+});
+
+// The live MongoDB shell (application 93f8e874, pasted 2026-11-01): the job body is a client-side
+// Greenhouse embed, so the static HTML holds only a site-identity JSON-LD block and the <title>.
+// Before the fix that block plus the title came to 272 chars, past MIN_JOB_TEXT_CHARS, and was
+// stored as the job description; the render fallback, which reads the real embed, never ran.
+test("pageText keeps only JobPosting JSON-LD, so a JS shell with a site-identity block stays under the floor", () => {
+  // Byte-for-byte the block the live page served (its @type is the brand name, not a schema.org job type).
+  const identity = `{
+ "@context":"http://schema.org",
+ "@type": "MongoDB",
+ "url":"https://www.mongodb.com",
+ "logo":"https://webassets.mongodb.com/_com_assets/cms/MongoDB-Logo-5c3a7405a85675366beb3a5ec4c032348c390b3f142f5e6dddf1d78e2df5cb5c.png"
+ }`;
+  // The shell: the identity block, the title, an empty mount point for the embed.
+  const html = `<html><head><script type="application/ld+json">${identity}</script></head>
+    <body><h1>2027 - Software Engineering Intern, AMER</h1><div id="grnhse_app"></div></body></html>`;
+  // What the handler measures against the floor.
+  const text = pageText(html) ?? "";
+  // The identity block is not job text.
+  assert.doesNotMatch(text, /schema\.org|webassets/);
+  // So the shell is short, and the handler goes on to the render fallback instead of storing it.
+  assert.ok(text.length < MIN_JOB_TEXT_CHARS, `shell text is ${text.length} chars`);
+});
+
+// The positive shape the filter keeps: a JobPosting inside an array or an @graph, and @type as an array.
+test("pageText keeps JobPosting blocks in every JSON-LD shape and drops unparseable ones", () => {
+  // Three wrappings of a JobPosting, plus a broken block and a non-job block.
+  const html = [
+    `<script type="application/ld+json">[{"@type":"JobPosting","title":"Arr Engineer"}]</script>`,
+    `<script type="application/ld+json">{"@graph":[{"@type":"WebSite"},{"@type":"JobPosting","title":"Graph Engineer"}]}</script>`,
+    `<script type="application/ld+json">{"@type":["JobPosting","Thing"],"title":"Multi Engineer"}</script>`,
+    `<script type="application/ld+json">{not json</script>`,
+    `<script type="application/ld+json">{"@type":"BreadcrumbList","name":"Crumbs"}</script>`,
+  ].join("");
+  // The text the filter leaves.
+  const text = pageText(html) ?? "";
+  // All three JobPosting wrappings survive.
+  for (const title of ["Arr Engineer", "Graph Engineer", "Multi Engineer"]) assert.match(text, new RegExp(title));
+  // The broken block and the breadcrumb do not.
+  assert.doesNotMatch(text, /not json|Crumbs/);
 });
 
 test("buildExtractPrompt fences the page and neutralises a forged fence inside it", () => {
