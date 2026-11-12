@@ -127,6 +127,14 @@
   white-space: pre-wrap;
 }
 
+/* A queued prompt, not sent yet: dashed and faded so it is never read as answered. */
+.ai-chat__msg--queued {
+  /* Dashed edge: pending, the same cue as a draft. */
+  border-style: dashed;
+  /* Faded: it has not happened yet. */
+  opacity: 0.75;
+}
+
 /* The AI's reply: full width, on the sheet, since it carries cards. */
 .ai-chat__msg--ai {
   /* Left side. */

@@ -430,6 +430,9 @@ describe('AI resume chat, end to end (2026-11-05)', () => {
       const input = chat.getByLabel('Message to the AI');
       // Ready once the history has loaded.
       await input.waitFor({ timeout: 10_000 });
+      /* Turn 2 was already sent while turn 1 was in flight (2026-11-12 queue): it is served from the queue, so
+         nothing is typed or clicked for it here; the loop only waits for its answer below. */
+      if (index !== 1) {
       // The prompt, typed.
       await input.fill(turn.prompt);
       // Sent (disabled while history loads, so wait for it to be enabled).
@@ -445,12 +448,26 @@ describe('AI resume chat, end to end (2026-11-05)', () => {
         arm('save');
       }
       await send.click();
+      }
       // While the AI is asked, then while its edit is saved, the next prompt can be typed and is kept.
       if (index === 0) {
         // The ask is in flight.
         await holds.get('assist')!.heldP;
         // Typing is open mid-ask (it used to be disabled for the whole ask).
         assert.equal(await input.isEnabled(), true, 'the prompt box must stay enabled while the AI is asked');
+        /* QUEUE (Teja, 2026-11-12: "if I send multiple prompts they need to be queued, applied and served by the
+           AI"). Turn 2 is sent NOW, mid-ask: it must show as Queued and must NOT reach resume-assist until turn 1's
+           answer and its edits have landed, or it would be built from the resume before them.
+           RED-ON-REVERT: with the old composer, Send is disabled mid-ask, so this click times out. */
+        await input.fill(TURNS[1]!.prompt);
+        // Clicked while turn 1 is still held.
+        await chat.getByRole('button', { name: 'Send', exact: true }).click({ timeout: 5_000 });
+        // Shown in the log as waiting.
+        await chat.locator('li.ai-chat__msg--queued').filter({ hasText: TURNS[1]!.prompt }).waitFor({ timeout: 5_000 });
+        // The box emptied, free for the next prompt.
+        assert.equal(await input.inputValue(), '', 'a queued prompt must leave the box');
+        // Only turn 1 has been asked so far.
+        assert.equal(assistBodies.length, 1, 'a queued prompt must wait for the answer ahead of it');
         // The owner starts the next message.
         await input.fill(NEXT_DRAFT);
         // The answer arrives.
@@ -463,6 +480,10 @@ describe('AI resume chat, end to end (2026-11-05)', () => {
         assert.equal(await input.inputValue(), NEXT_DRAFT, 'the reply must not clear a message typed while it was pending');
         // The save finishes.
         holds.get('save')!.release();
+        // The queued turn 2 now goes out on its own, served after turn 1's edits landed.
+        await chat.locator('li.ai-chat__msg--ai').filter({ hasText: `Done: ${TURNS[1]!.prompt}` }).waitFor({ timeout: 10_000 });
+        // And its Queued bubble is gone.
+        assert.equal(await chat.locator('li.ai-chat__msg--queued').count(), 0, 'a served prompt must leave the queue');
       }
       // This turn's answer: the (index+1)-th AI message carrying the stub's note.
       const answer = chat.locator('li.ai-chat__msg--ai').filter({ hasText: `Done: ${turn.prompt}` });

@@ -91,6 +91,13 @@ import './AiEditPanel.css';
    applied vanished with it (the chat e2e caught exactly that). Module scope lives as long as the tab, like the page's
    own row cache; nothing is persisted, so a reload still starts empty. */
 const drafts = new Map<string, string>();
+/* Queued prompts and their pause flag by application, outside the component for the same reason as drafts
+   (2026-11-12): turn 1's auto-applied edit moves the card and remounts the panel, and a queue held in state died
+   with it, so turn 2 was never served (the chat e2e caught it). */
+const queues = new Map<string, { readonly queue: readonly string[]; readonly paused: boolean }>();
+/* The ask running for each application, if any. A remounted panel starts with asking=false while the OLD instance's
+   ask may still be applying its edits; the drain waits on this promise instead, so two asks never overlap on one resume. */
+const inFlight = new Map<string, Promise<void>>();
 
 type OpState = { readonly status: 'applying' } | { readonly status: 'failed'; readonly reason: string };
 
@@ -438,6 +445,25 @@ export function AiEditPanel({
   }, [instruction, diff.applicationId]);
   // An ask is in flight.
   const [asking, setAsking] = useState<boolean>(false);
+  /* Prompts sent while another was still being answered or applied (Teja, 2026-11-12: "if I send multiple
+     prompts they need to be queued, applied and served by the AI"). Oldest first; the drain effect below sends
+     the head only once the panel is idle, so each prompt is built from the resume AFTER the previous one's
+     edits landed, never from a stale copy. */
+  // Seeded from the module store, so a remount picks up what was queued.
+  const [queue, setQueue] = useState<readonly string[]>(() => queues.get(diff.applicationId)?.queue ?? []);
+  /* A failed ask stops the drain: its prompt goes back to the head and waits for Resume. Without the pause, a
+     down AI would fail every queued prompt in a row, each error hiding the last. */
+  const [paused, setPaused] = useState<boolean>(() => queues.get(diff.applicationId)?.paused ?? false);
+  /* Mirrored into the store on every change. The panel is keyed by application (DiffView), so another row is a new
+     instance reading its OWN entry: one row's prompts are never sent against another's resume. */
+  useEffect(() => {
+    // Nothing queued and not paused: no entry to keep.
+    if (queue.length === 0 && !paused) queues.delete(diff.applicationId);
+    // Otherwise the latest, for whichever instance mounts next.
+    else queues.set(diff.applicationId, { queue, paused });
+  }, [queue, paused, diff.applicationId]);
+  // Bumped when an earlier instance's ask ends, so the drain looks again (nothing else re-renders this one then).
+  const [settled, setSettled] = useState<number>(0);
   // The last failure (an ask, a load or a save), in plain words.
   const [error, setError] = useState<string | null>(null);
   // Applies in flight or refused, by op key.
@@ -497,11 +523,22 @@ export function AiEditPanel({
     // A new message or a different chat.
   }, [active.length, chatId]);
 
-  /* Send the instruction, with this chat's memory, and store the exchange. */
-  async function ask(): Promise<void> {
+  /* Queue what is typed and empty the box. Send never waits any more: the drain effect asks when the panel is
+     idle. The job description and the stored chats must have loaded first, as before, so the button holds then. */
+  function send(): void {
     // The operator's words, trimmed.
     const text = instruction.trim();
-    // Blank, mid-ask, mid-load, mid-save, or the job description not loaded yet: nothing to send.
+    // Blank, or the chats or the job description not loaded yet: nothing to queue.
+    if (text === '' || loading || jdPending) return;
+    // Appended, so prompts are served in the order they were sent.
+    setQueue((current) => [...current, text]);
+    // The box is free for the next prompt at once.
+    setInstruction('');
+  }
+
+  /* Send one queued instruction, with this chat's memory, and store the exchange. Called only by the drain. */
+  async function ask(text: string): Promise<void> {
+    // Mid-ask, mid-load, mid-save, or the job description not loaded yet: the drain never calls then; kept as a guard.
     if (text === '' || asking || loading || busy || jdPending) return;
     // Locks the composer.
     setAsking(true);
@@ -515,10 +552,16 @@ export function AiEditPanel({
     const draft = buildAssistDraft(diff, categories, text, historyFor(turns), structure ?? null);
     // The call; never throws.
     const result = await onAssist(draft.body);
-    // A failed ask is said and nothing is stored; the instruction stays for a retry.
+    // A failed ask is said and nothing is stored; the prompt goes back to the head of the queue for a retry.
     if (result.kind === 'error') {
       // Shown above the composer.
       setError(result.message);
+      /* First again, so order holds when the owner resumes.
+         ponytail: if the panel remounted while this ask ran, these sets reach the old instance and the failed
+         prompt is lost (its error too); write through the queues store if that ever bites. */
+      setQueue((current) => [text, ...current]);
+      // The drain stops until Resume.
+      setPaused(true);
       // Unlocks.
       setAsking(false);
       // Nothing else changes.
@@ -546,10 +589,8 @@ export function AiEditPanel({
     setMessages((current) => [...current, ...shown]);
     // Said, so the operator knows this exchange will not be remembered.
     if (saved !== null && saved.kind === 'error') setError(saved.message);
-    /* The composer empties for the next message, unless the owner already started that next message while this
-       ask was in flight (2026-11-09: the box no longer freezes, so typed text must survive the reply). Only the
-       sent text, untouched, is cleared. */
-    setInstruction((current) => (current.trim() === text ? '' : current));
+    /* No box clearing here (2026-11-12): send() emptied it when the prompt was queued, so whatever the box
+       holds now is the owner's next message and must survive this reply (the 2026-11-09 rule). */
     // The reply whose ops are applied now.
     const reply = shown.find((m) => m.role === 'assistant');
     /* THE AI PERFORMS THE ACTIONS (2026-11-01): each op that shouldAutoApply allows is applied in
@@ -782,6 +823,54 @@ export function AiEditPanel({
      with an empty one that looks, to the model, like a job with no description. undefined = not loaded;
      null = loaded, none stored, which may be sent. */
   const jdPending = diff.jobDescription === undefined;
+  /* The drain: when nothing is in flight, take the oldest queued prompt and ask it. ask() sets `asking` in the
+     same batch as the shift, so the next run of this effect sees the panel locked and waits; it fires again once
+     the reply and every edit it auto-applied have landed (asking, applyingAll and the page's busy all clear). */
+  useEffect(() => {
+    // Paused after a failure, nothing queued, something in flight, or the description not loaded: wait.
+    if (paused || queue.length === 0 || locked || jdPending) return;
+    // An ask started by an earlier instance of this panel (before a remount) is still running.
+    const earlier = inFlight.get(diff.applicationId);
+    if (earlier !== undefined) {
+      // Set on unmount, so a gone panel does not re-render.
+      let live = true;
+      // Look again once it ends; its edits have landed by then.
+      void earlier.then(() => {
+        // Only a mounted panel.
+        if (live) setSettled((n) => n + 1);
+      });
+      // Cleanup: this run's wait is no longer wanted.
+      return () => {
+        // Ignore the settle.
+        live = false;
+      };
+    }
+    // The oldest prompt.
+    const [next, ...rest] = queue;
+    // Taken off the queue before it is asked, so a re-render cannot send it twice.
+    setQueue(rest);
+    // Nothing to ask (the length check above makes this unreachable; it narrows the type).
+    if (next === undefined) return;
+    // Asked with this render's ask, which reads the resume as it is now; ask never throws.
+    const run = ask(next);
+    // Registered for this application, so a remounted panel waits for it.
+    inFlight.set(diff.applicationId, run);
+    // Cleared when it ends, unless a newer ask already replaced it.
+    void run.then(() => {
+      // Only our own entry.
+      if (inFlight.get(diff.applicationId) === run) inFlight.delete(diff.applicationId);
+    });
+    // ask is redefined each render; the state it reads is listed, so it is not.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queue, paused, locked, jdPending, settled, diff.applicationId]);
+  /* Remove one queued prompt before it is sent (the owner changed their mind). By position, since two
+     prompts can share a text. */
+  function unqueue(index: number): void {
+    // Every other prompt stays, in order.
+    setQueue((current) => current.filter((_, i) => i !== index));
+  }
+  // Switching or starting a chat waits for the queue too: queued prompts belong to the chat they were typed in.
+  const switchLocked = locked || queue.length > 0;
 
   // A labelled region, so a screen reader can jump to the chat by name.
   return (
@@ -796,7 +885,7 @@ export function AiEditPanel({
           Past chats
         </label>
         {/* Native select: keyboard and screen-reader support for free, no custom dropdown. */}
-        <select id={`${baseId}-chats`} className="ai-chat__picker" value={chatId} onChange={(event) => setChatId(event.target.value)} disabled={locked}>
+        <select id={`${baseId}-chats`} className="ai-chat__picker" value={chatId} onChange={(event) => setChatId(event.target.value)} disabled={switchLocked}>
           {/* The open chat before its first message is not stored yet, so it is listed by hand. */}
           {/* Worded apart from the "New chat" button beside it (2026-11-07 audit: two "New chat" side by side). */}
           {threads.some((t) => t.chatId === chatId) ? null : <option value={chatId}>Current chat (not started)</option>}
@@ -808,7 +897,7 @@ export function AiEditPanel({
           ))}
         </select>
         {/* Starts a clean chat; earlier ones stay in the picker. */}
-        <button type="button" className="button button--secondary button--small" onClick={newChat} disabled={locked || active.length === 0}>
+        <button type="button" className="button button--secondary button--small" onClick={newChat} disabled={switchLocked || active.length === 0}>
           New chat
         </button>
       </div>
@@ -953,6 +1042,19 @@ export function AiEditPanel({
         })}
         {/* The pending reply, so the operator sees the ask is in flight. */}
         {asking ? <li className="ai-chat__msg ai-chat__msg--ai ai-chat__meta">Thinking…</li> : null}
+        {/* Prompts waiting their turn, oldest first, after the one being answered: the order they will be served in. */}
+        {queue.map((text, index) => (
+          // Keyed by position and text: two queued prompts may share a text.
+          <li key={`queued|${index}|${text}`} className="ai-chat__msg ai-chat__msg--user ai-chat__msg--queued">
+            {text}
+            {/* Says it has not been sent yet, so the bubble is not read as answered. */}
+            <span className="ai-chat__meta"> · Queued</span>
+            {/* A way out before it is sent; named by its text so each Remove is distinguishable to a screen reader. */}
+            <button type="button" className="button button--secondary button--small" aria-label={`Remove queued prompt: ${text}`} onClick={() => unqueue(index)}>
+              Remove
+            </button>
+          </li>
+        ))}
       </ol>
 
       {/* Any failure, polite: news, not an emergency. */}
@@ -960,6 +1062,23 @@ export function AiEditPanel({
         {/* Empty when nothing failed; the live region stays for the next announcement. */}
         {error ?? ''}
       </p>
+      {/* The drain stopped on a failure: the failed prompt is first in the queue again, sent on Resume. */}
+      {paused && queue.length > 0 ? (
+        <button
+          type="button"
+          className="button button--secondary button--small"
+          /* Clears the old failure and lets the drain run. */
+          onClick={() => {
+            // The failure was about the last try.
+            setError(null);
+            // The drain picks the head up on its next run.
+            setPaused(false);
+          }}
+        >
+          {/* Says how much will be sent. */}
+          Resume queue ({queue.length})
+        </button>
+      ) : null}
 
       {/* The composer: a form, so Enter-to-submit semantics and the button agree. */}
       <form
@@ -968,8 +1087,8 @@ export function AiEditPanel({
         onSubmit={(event) => {
           // No page reload.
           event.preventDefault();
-          // Same guards as everywhere.
-          void ask();
+          // Queued; the drain sends it when the panel is idle.
+          send();
         }}
       >
         {/* A real label, hidden: the placeholder vanishes on typing and is no label. */}
@@ -989,7 +1108,7 @@ export function AiEditPanel({
           maxLength={MAX_MESSAGE}
           /* Short, since the empty chat already shows an example. */
           placeholder="Message the AI about this resume"
-          /* Controlled, so ask() reads exactly what is shown. */
+          /* Controlled, so send() queues exactly what is shown. */
           value={instruction}
           /* Every keystroke kept. */
           onChange={(event) => setInstruction(event.target.value)}
@@ -999,13 +1118,14 @@ export function AiEditPanel({
             if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
               // No newline inserted.
               event.preventDefault();
-              // Same guards as the button.
-              void ask();
+              // Same as the button: queued.
+              send();
             }
           }}
           /* Never disabled (2026-11-09, Teja): it used to freeze for the whole ask, auto-applied saves included,
              so the next prompt could not be typed while an edit landed. Typing stays open; SENDING still waits
-             (the Send button's `locked`, and ask()'s own guard on Enter), and the typed text is kept, never dropped. */
+             (the Send button's `locked`, and ask()'s own guard on Enter), and the typed text is kept, never dropped.
+             2026-11-12: SENDING no longer waits either: a prompt sent mid-ask is queued and served in order. */
         />
         {/* The length near the cap: maxLength cuts a paste silently, so the count makes the cut visible. */}
         {instruction.length >= SHOW_COUNT_FROM ? (
@@ -1016,9 +1136,9 @@ export function AiEditPanel({
         {/* Why Send is off while the description loads, so a disabled button is never unexplained. */}
         {jdPending ? <span className="ai-chat__meta" role="status">Loading the job description…</span> : null}
         {/* Primary: the one action the composer exists for. */}
-        <button type="submit" className="button button--primary button--small" disabled={locked || jdPending || instruction.trim() === ''}>
-          {/* The label says when an ask is in flight. */}
-          {asking ? 'Sending…' : 'Send'}
+        <button type="submit" className="button button--primary button--small" disabled={loading || jdPending || instruction.trim() === ''}>
+          {/* Always Send: a prompt sent mid-ask is queued, shown in the log as Queued (2026-11-12). */}
+          Send
         </button>
       </form>
     </section>
