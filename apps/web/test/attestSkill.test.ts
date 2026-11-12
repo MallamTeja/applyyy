@@ -166,6 +166,8 @@ function run(answers: Parameters<typeof fakeClient>[0], overrides: Record<string
     jdKeywords: [],
     // A hand attest on the page unless a test says otherwise.
     source: 'operator',
+    // The row's PINNED master (the one it was tailored from); the latest may have moved on (2026-11-12).
+    pinnedMaster: clone(MASTER_V3),
     ...overrides,
   } as never);
   return { done, calls: fake.calls };
@@ -373,5 +375,33 @@ describe('attestSkill keeps every skill group on one line (2026-11-12)', () => {
     assert.equal(out.ok, true);
     // And the wrap is never silent.
     assert.match(out.ok ? out.notice ?? '' : '', /"Frameworks" now wraps onto a second line/);
+  });
+});
+
+/* OLDER ROWS (2026-11-12 16:53, Teja blocked on DXC): the latest master moved on (v45, v47 dropped skills) after
+   most queue rows were tailored, so re-pinning to it changes other lines and every add was refused with "your
+   master profile changed". A skill the row's PINNED master already holds needs no master write and no re-pin:
+   it is added against the pin, and ONLY that skill changes. */
+describe('attestSkill on a row tailored from an older master (2026-11-12)', () => {
+  // Latest v5: PostgreSQL (printed on this row) was removed, so a re-pin would drop a printed skill.
+  const latestV5 = () => ({ ...clone(MASTER_V3), skills: MASTER_V3.skills.filter((skill) => skill.id !== 'skill-pg') });
+
+  it('adds a skill the pinned master holds, at the pin: no master version, no re-pin, only that skill added', async () => {
+    // Docker is in v3 (the pin), unprinted, in Tools.
+    const { done, calls } = run({ latest: { data: { profile: latestV5(), version: 5 }, error: null } }, { keyword: 'Docker', category: 'Tools' });
+    // Awaited.
+    const out = await done;
+    // Saved, not refused with "your master profile changed".
+    assert.equal(out.ok, true, out.ok ? '' : out.message);
+    // No master version was written.
+    assert.equal(callsOf(calls, 'master_profiles', 'insert').length, 0);
+    // The one row write.
+    const written = callsOf(calls, 'applications', 'update')[0]!.args[0] as { tailored_profile: { skills: unknown[]; master_version: number }; master_version?: number };
+    // Still pinned to v3: the pin did not move.
+    assert.equal(written.tailored_profile.master_version, V3);
+    // No pin column in the write: only tailored_profile changes.
+    assert.equal(written.master_version, undefined);
+    // Exactly the old skills plus Docker, from the PINNED master.
+    assert.deepEqual(written.tailored_profile.skills, [...originalV3().skills, { ref: 'skill-docker', name: 'Docker', category: 'Tools' }]);
   });
 });

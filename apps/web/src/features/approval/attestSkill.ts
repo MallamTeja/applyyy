@@ -50,6 +50,9 @@ export interface AttestArgs {
   readonly newSkillId: string;
   // Who decided the attest (a hand click, or the AI chat), for the history note; required so no caller defaults it.
   readonly source: EditSource;
+  /* The PINNED master: the version this row was tailored from (2026-11-12). A skill it already holds is added
+     at the pin, with no master write and no re-pin. Required, so no caller falls back to the latest by omission. */
+  readonly pinnedMaster: MasterProfile;
   /* The row's JD keywords (selected_jd_keywords), for the one-page fit this save runs (2026-11-07).
      Required, so no caller can skip the fit by omission. */
   readonly jdKeywords: readonly string[];
@@ -124,6 +127,68 @@ const CHANGED_MASTER =
   // Names the safe alternative, so a refusal is never a dead end.
   'your master profile changed since this resume was tailored, so adding a skill here would also change other lines. Add it on the Master Profile page instead.';
 
+/* Add a skill the row's PINNED master already holds (2026-11-12): no master write, no re-pin, so the tailor's
+   original, the pin and every other line stay exactly as they are. The same one-line and one-page rules as the
+   attest below; the event is resume_add_skill, because nothing was vouched into the master and the pin did not move. */
+async function addAtPin(client: Client, args: AttestArgs, skillRef: string): Promise<AttestOutcome> {
+  // The pinned master node, for the one-line check in the spelling and group that will print.
+  const node = args.pinnedMaster.skills.find((skill) => skill.id === skillRef);
+  // Defensive: the caller found it in this master, so this only guards a future caller.
+  if (node === undefined) return { ok: false, message: 'That skill is not in your master profile, so it cannot be added.', masterInserted: false };
+  // One line per group (c01372e), judged before any write.
+  const wraps = skillGroupWrapReason(args.current, node.name, node.category);
+  // Would wrap and the owner did not say "all": nothing written.
+  if (wraps !== null && args.wrap !== 'allow') return { ok: false, message: wraps, masterInserted: false };
+  // The pure add at the pin; it refuses a skill already printed, in its own words.
+  const added = addSkill(args.current, args.pinnedMaster, skillRef, 'allow');
+  // Refused: nothing written.
+  if (!added.ok) return { ok: false, message: added.reason, masterInserted: false };
+  // One page, against the pinned master, exactly as every other edit at the pin.
+  const fitted = fitEditToOnePage(added.resume, args.jdKeywords, { previous: args.current, master: args.pinnedMaster });
+  // Refused before the write, in the check's own words.
+  if (!fitted.ok) return { ok: false, message: fitted.reason, masterInserted: false };
+  // One write of tailored_profile only: no repin, so master_version and tailor_refs are untouched.
+  const saved = await saveTailoredEdit(client, {
+    // The row being written.
+    applicationId: args.applicationId,
+    // The resume with the one skill added, fitted on one page.
+    resume: fitted.resume,
+    // What is stored now, for the R0 check.
+    previous: args.current,
+    // The tailor's version at the same pin.
+    original: args.original,
+    // The pinned master, the only source the skill comes from.
+    master: args.pinnedMaster,
+    // Optimistic concurrency, as every edit.
+    expectedUpdatedAt: args.expectedUpdatedAt,
+    // An add of an existing master skill: the pin did not move.
+    event: { kind: 'resume_add_skill', ref: skillRef, before: null, after: node.name, source: args.source, pageFitTrimmed: fitted.trimmed },
+  });
+  // Refused or unknown: the page shows what is stored.
+  if (!saved.ok) return { ok: false, message: saved.message, masterInserted: false, ...(saved.stored ? { stored: saved.stored } : {}) };
+  // The page swaps in the SAME pin's master, original and refs, so its source does not change.
+  return {
+    // Landed.
+    ok: true,
+    // As stored.
+    resume: fitted.resume,
+    // The trim and an allowed wrap, in words; null when neither happened.
+    notice: [fitted.notice, wraps === null ? null : `"${node.category}" now wraps onto a second line, because you said "all".`].filter((line): line is string => line !== null).join(' ') || null,
+    // Unchanged pin.
+    master: args.pinnedMaster,
+    // Unchanged original.
+    original: args.original,
+    // Unchanged tailor record.
+    tailorRefs: args.tailorRefs,
+    // For Undo.
+    skillRef,
+    // The next edit's stamp.
+    updatedAt: saved.updatedAt,
+    // Whether the history note landed.
+    eventRecorded: saved.eventRecorded,
+  };
+}
+
 export async function attestSkill(client: Client, args: AttestArgs): Promise<AttestOutcome> {
   // The printed name: the keyword as shown, trimmed.
   const name = args.keyword.trim();
@@ -154,6 +219,13 @@ export async function attestSkill(client: Client, args: AttestArgs): Promise<Att
     // Nothing written; said in the operator's own word.
     return { ok: false, message: `"${name}" is already on this resume.`, masterInserted: false };
   }
+  /* OLDER ROWS (Teja blocked 2026-11-12 16:53, DXC row): the latest master moved on (v45 and v47 dropped skills)
+     after most queue rows were tailored, so re-pinning to it changed other lines and every add was refused with
+     CHANGED_MASTER. A skill the PINNED master already holds needs neither: it is added at the pin, so only that
+     skill changes. The tailor's match rule first, then the Master page's name match ("fastapi" -> "FastAPI"). */
+  const atPin = addableSkillFor(name, args.current, args.pinnedMaster) ?? masterSkillNamed(args.pinnedMaster, name);
+  // Held by the pin: the add needs no master version, whatever the latest says.
+  if (atPin !== undefined && atPin !== null) return addAtPin(client, args, 'ref' in atPin ? atPin.ref : atPin.id);
   /* Another row may already have attested this skill: reuse that master skill by its id rather than
      inserting a duplicate version. Same matching rule the existing "＋ Add" offer uses. */
   const existing = addableSkillFor(name, args.current, latestMaster);

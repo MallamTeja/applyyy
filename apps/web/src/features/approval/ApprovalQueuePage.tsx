@@ -1686,6 +1686,8 @@ export function ApprovalQueuePage(): ReactElement {
         source: editSource,
         // One line per group: refused unless the owner said "all" (2026-11-12); absent means refuse.
         wrap: action.wrap ?? 'refuse',
+        // The master this row was tailored from: a skill it holds is added at the pin, never re-pinned (2026-11-12).
+        pinnedMaster: source.master,
       });
     // Runs on success, refusal and throw alike.
     } finally {
