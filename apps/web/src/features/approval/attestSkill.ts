@@ -81,6 +81,8 @@ export type AttestOutcome =
       readonly skillRef: string;
       // The row's new stamp.
       readonly updatedAt: string;
+      // Whether this save wrote a new MASTER version; false at the pin (2026-11-12), so the page never says it did.
+      readonly masterInserted: boolean;
       // Whether the history note landed.
       readonly eventRecorded: boolean;
     }
@@ -184,6 +186,8 @@ async function addAtPin(client: Client, args: AttestArgs, skillRef: string): Pro
     skillRef,
     // The next edit's stamp.
     updatedAt: saved.updatedAt,
+    // Nothing was written to the master on this path.
+    masterInserted: false,
     // Whether the history note landed.
     eventRecorded: saved.eventRecorded,
   };
@@ -343,6 +347,8 @@ export async function attestSkill(client: Client, args: AttestArgs): Promise<Att
     skillRef,
     // The stamp the next edit must present.
     updatedAt: saved.updatedAt,
+    // True only when this click inserted the master version.
+    masterInserted,
     // So the page can say when only the history note is missing.
     eventRecorded: saved.eventRecorded,
   };

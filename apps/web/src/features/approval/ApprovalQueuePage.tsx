@@ -1725,7 +1725,9 @@ export function ApprovalQueuePage(): ReactElement {
     // Bucket after; undefined only for a row never loaded, which editRow's guards refused.
     const to = nextDiff === undefined ? undefined : deriveBucket(nextDiff);
     // Page-level only on a move; an in-bucket attest is announced by CoverageBar's own region.
-    if (from !== to) setAnnouncement(announcementFor('attest_skill', { before: null, after: action.keyword }, from, to));
+    /* 'attest_skill' says "added to your master profile and this resume": true only when a master version was written.
+       At the pin (2026-11-12) nothing was, so it is announced as a plain add to this resume. */
+    if (from !== to) setAnnouncement(announcementFor(attested.masterInserted ? 'attest_skill' : 'add_skill', { before: null, after: action.keyword }, from, to));
     // A move needs the page to place focus.
     if (from !== undefined && to !== undefined && from !== to) setPendingFocusId(applicationId);
     // Saved; only the history note is missing.

@@ -117,10 +117,14 @@ type Plan =
   // Not provable: the sentence to show, and nothing has been written because of it.
   | { readonly ok: false; readonly message: string };
 
-// One refusal sentence for "the newer master would change this resume", used before and after insert.
-const CHANGED_MASTER =
-  // Names the safe alternative, so a refusal is never a dead end.
-  'your master profile changed since this resume was tailored, so adding a line here would also change other lines. Add it on the Master Profile page instead.';
+/* One refusal sentence for "the newer master would change this resume", used before and after insert. Since
+   2026-11-12 (orch decision A) it names the master version the row was tailored from and BOTH ways forward. A new
+   line must be written into the master, and writing it at that old version would make it the newest master and
+   undo later master edits, so on an older row it is refused, never guessed at. */
+function changedMaster(pinnedVersion: number): string {
+  // The pin, then the two ways forward, so a refusal is never a dead end.
+  return `this resume was tailored from master profile v${pinnedVersion}, and your master has changed since, so a new line here would also change other lines. Add the line on the Master Profile page, or re-tailor this job to use your latest master.`;
+}
 
 /* THE PROOF THAT MAKES THE RE-PIN AND THE ADD HONEST, all pure, run before the master insert and
  * again at the version the database actually assigned:
@@ -134,13 +138,13 @@ const CHANGED_MASTER =
  *      target master's, field for field. */
 function plan(target: MasterProfile, version: number, args: AttestBulletArgs): Plan {
   // tailor_refs must be an object to carry a pin at all.
-  if (typeof args.tailorRefs !== 'object' || args.tailorRefs === null) return { ok: false, message: CHANGED_MASTER };
+  if (typeof args.tailorRefs !== 'object' || args.tailorRefs === null) return { ok: false, message: changedMaster(args.current.master_version) };
   // The tailor's record, relabelled to the target version and nothing else.
   const refs = { ...(args.tailorRefs as Record<string, unknown>), master_version: version };
   // (1) The validator's own rebuild; null means the target master no longer supports this tailoring.
   const original = rebuildOriginal(refs, target, version);
   // Same claims as at the current pin, apart from the version label.
-  if (original === null || !deepEqual(original, { ...args.original, master_version: version })) return { ok: false, message: CHANGED_MASTER };
+  if (original === null || !deepEqual(original, { ...args.original, master_version: version })) return { ok: false, message: changedMaster(args.current.master_version) };
   // (2) The target's skills by id.
   const skillsById = new Map(target.skills.map((skill) => [skill.id, skill]));
   // Every printed skill must exist there, spelled and grouped the same.
@@ -151,11 +155,11 @@ function plan(target: MasterProfile, version: number, args: AttestBulletArgs): P
     return node !== undefined && node.name === skill.name && node.category === skill.category;
   });
   // A changed skill is a changed line: refuse the re-pin.
-  if (!skillsHold) return { ok: false, message: CHANGED_MASTER };
+  if (!skillsHold) return { ok: false, message: changedMaster(args.current.master_version) };
   // (3) FULL at the target, which holds the new bullet under its parent.
   const full = resolveFullMaster(target, version);
   // No FULL means nothing can be traced at that version.
-  if (full === null) return { ok: false, message: CHANGED_MASTER };
+  if (full === null) return { ok: false, message: changedMaster(args.current.master_version) };
   // The stored resume relabelled to the target pin: the only difference a re-pin may add.
   const atPin = { ...args.current, master_version: version };
   // The new bullet onto the re-pinned resume by ref, inserted where the master puts it.
@@ -163,7 +167,7 @@ function plan(target: MasterProfile, version: number, args: AttestBulletArgs): P
   // e.g. the parent entry is not printed; said in addMasterBullet's own words.
   if (!added.ok) return { ok: false, message: added.reason };
   // (4) The save boundary's rule, run here first so a refusal never leaves a stray master version.
-  if (!tracesToMaster(atPin, added.resume, original, target)) return { ok: false, message: CHANGED_MASTER };
+  if (!tracesToMaster(atPin, added.resume, original, target)) return { ok: false, message: changedMaster(args.current.master_version) };
   // Proven: everything the write needs.
   return { ok: true, refs, original, resume: added.resume };
 }

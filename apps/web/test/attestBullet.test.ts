@@ -361,8 +361,9 @@ describe('attestBullet: one click puts the line in the master, then on the resum
     const out = await done;
     // Refused.
     assert.equal(out.ok, false);
-    // Refused by the proof, not by ingest validation (which would also write nothing).
-    if (!out.ok) assert.match(out.message, /changed since this resume was tailored/);
+    /* Refused by the proof, not by ingest validation (which would also write nothing). Since 2026-11-12 (orch
+       decision A) the sentence names the version the row was tailored from and both ways forward. */
+    if (!out.ok) assert.equal(out.message, 'this resume was tailored from master profile v3, and your master has changed since, so a new line here would also change other lines. Add the line on the Master Profile page, or re-tailor this job to use your latest master.');
     // Neither a master version...
     assert.equal(callsOf(calls, 'master_profiles', 'insert').length, 0);
     // ...nor an application write.
@@ -385,7 +386,7 @@ describe('attestBullet: one click puts the line in the master, then on the resum
     // Refused.
     assert.equal(out.ok, false);
     // The re-pin would print a different employer name: refused as a changed master.
-    if (!out.ok) assert.match(out.message, /changed since this resume was tailored/);
+    if (!out.ok) assert.match(out.message, /^this resume was tailored from master profile v3, and your master has changed since/);
     // Proven before writing: no master version...
     assert.equal(callsOf(calls, 'master_profiles', 'insert').length, 0);
     // ...and no application write.

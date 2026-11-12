@@ -395,6 +395,8 @@ describe('attestSkill on a row tailored from an older master (2026-11-12)', () =
     assert.equal(out.ok, true, out.ok ? '' : out.message);
     // No master version was written.
     assert.equal(callsOf(calls, 'master_profiles', 'insert').length, 0);
+    // And the outcome says so, so the page never announces "added to your master profile".
+    assert.equal(out.ok && out.masterInserted, false);
     // The one row write.
     const written = callsOf(calls, 'applications', 'update')[0]!.args[0] as { tailored_profile: { skills: unknown[]; master_version: number }; master_version?: number };
     // Still pinned to v3: the pin did not move.

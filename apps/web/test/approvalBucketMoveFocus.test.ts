@@ -72,6 +72,11 @@ describe('announcementFor (the page-level announcement text)', () => {
 });
 
 describe('ApprovalQueuePage wiring for a cross-bucket save', () => {
+  it('an attest that wrote no master version is announced as an add to this resume only (2026-11-12)', () => {
+    // The pin path (attestSkill addAtPin) writes no master version, so the master sentence would be false there.
+    assert.ok(page.includes("announcementFor(attested.masterInserted ? 'attest_skill' : 'add_skill'"), 'the attest announcement must branch on masterInserted');
+  });
+
   it('has exactly one page-level polite status region, rendering the announcement', () => {
     // The HIDDEN page-level announcer specifically. Visible per-card stale notices are also
     // role="status" (approvalStaleClick.test.ts), so counting every status region would conflate the two.
