@@ -1636,8 +1636,8 @@ export function ApprovalQueuePage(): ReactElement {
   async function attestRow(
     // The row being reviewed.
     applicationId: string,
-    // What the operator vouched for, and the group it prints under.
-    action: { readonly keyword: string; readonly category: string },
+    // What the operator vouched for, the group it prints under, and whether it may wrap that group ("all").
+    action: { readonly keyword: string; readonly category: string; readonly wrap?: 'allow' },
     // The row's load inputs, which the re-pin replaces.
     source: RowSource,
     // The tailor's version at the current pin; editRow has proven it non-null.
@@ -1684,6 +1684,8 @@ export function ApprovalQueuePage(): ReactElement {
         jdKeywords: source.application.selected_jd_keywords,
         // Into the history note's detail.source.
         source: editSource,
+        // One line per group: refused unless the owner said "all" (2026-11-12); absent means refuse.
+        wrap: action.wrap ?? 'refuse',
       });
     // Runs on success, refusal and throw alike.
     } finally {

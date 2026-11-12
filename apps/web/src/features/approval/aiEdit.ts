@@ -604,7 +604,9 @@ export type StoredOp =
   // One bullet dropped, with the text it had.
   | { readonly op: 'remove'; readonly ref: string; readonly before: string | null }
   // A skill, and whether the master already had it when proposed.
-  | { readonly op: 'add_skill'; readonly name: string; readonly category: string; readonly inMaster: boolean }
+  /* `allowWrap` (2026-11-12) is present, and true, only when the owner's instruction said "all": the add may then
+     wrap its group past one line. Stored on the card, so a later click still knows what the owner said. */
+  | { readonly op: 'add_skill'; readonly name: string; readonly category: string; readonly inMaster: boolean; readonly allowWrap?: true }
   /* A bullet one place up or down. `past` is the sibling it moves past: what makes the op's effect
      checkable later ("ref now sits above past"), since "up" alone means nothing once it is applied. */
   | { readonly op: 'move'; readonly ref: string; readonly direction: MoveDirection; readonly past: string; readonly before: string | null }
@@ -668,6 +670,9 @@ export function resolveOps(ops: readonly AssistOp[], draft: AssistDraft): Stored
   return ops.map((op) => resolveOne(op, draft, lists, sections, gone));
 }
 
+// The owner said "all" as a word: the one override of the one-line skill group rule (2026-11-12).
+const SAYS_ALL = /\ball\b/i;
+
 // The reason every op on something an earlier remove_entry took away is refused with.
 const GONE_WITH_ENTRY = 'An earlier change in this answer removes its entry.';
 
@@ -694,7 +699,13 @@ function swapPast<T>(list: T[], item: T, direction: MoveDirection): T | undefine
    failed, wherever it cannot land. */
 function resolveOne(op: AssistOp, draft: AssistDraft, lists: string[][], sections: SectionKind[], gone: Set<string>): StoredOp {
   // A skill needs no target; the master check is made once, now.
-  if (op.op === 'add_skill') return { op: 'add_skill', name: op.name, category: op.category, inMaster: draft.masterSkills.has(op.name.trim().toLowerCase()) };
+  if (op.op === 'add_skill') {
+    // The card as before: name, group, and whether the master holds it.
+    const card = { op: 'add_skill', name: op.name, category: op.category, inMaster: draft.masterSkills.has(op.name.trim().toLowerCase()) } as const;
+    /* "all" as a whole word (the server's top-up reads the same word): the owner asked for every skill, so the
+       add may wrap its group (2026-11-12). "small" or "install" never count. */
+    return SAYS_ALL.test(draft.body.instruction) ? { ...card, allowWrap: true } : card;
+  }
   // A skill off: it must be printed now; the page's own record gives its ref and spelling.
   if (op.op === 'remove_skill') {
     // Every printed copy of that name, compared the way every skill check here compares names.
@@ -859,7 +870,8 @@ export function toEditAction(stored: ApplicableOp): EditAction {
        master already has the skill, and otherwise records the operator's vouch as a new master
        version first. Either way the printed skill traces to the master, which the auditor demands. */
     case 'add_skill':
-      return { kind: 'attest_skill', keyword: stored.name, category: stored.category };
+      // The owner's "all" travels to the save as wrap: 'allow'; otherwise the save refuses a wrap.
+      return stored.allowWrap === true ? { kind: 'attest_skill', keyword: stored.name, category: stored.category, wrap: 'allow' } : { kind: 'attest_skill', keyword: stored.name, category: stored.category };
     // New text on its resolved target.
     case 'edit':
       return { kind: 'edit', target: stored.target, text: stored.text };
@@ -1230,7 +1242,8 @@ export function readStoredOp(value: unknown): StoredOp | null {
   if (value.op === 'add_skill') {
     // All three typed exactly.
     return typeof value.name === 'string' && typeof value.category === 'string' && typeof value.inMaster === 'boolean'
-      ? { op: 'add_skill', name: value.name, category: value.category, inMaster: value.inMaster }
+      ? // allowWrap kept only when it is exactly true; anything else reads as "refuse a wrap" (fail closed).
+        { op: 'add_skill', name: value.name, category: value.category, inMaster: value.inMaster, ...(value.allowWrap === true ? { allowWrap: true as const } : {}) }
       : null;
   }
   // A removal: a ref and the old text.

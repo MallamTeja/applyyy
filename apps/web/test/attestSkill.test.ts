@@ -344,3 +344,34 @@ describe('T10 attestSkill into a group the master does not have yet (2026-11-10)
     assert.deepEqual(written.tailored_profile.skills.at(-1), { ref: NEW_ID, name: 'Pulumi', category: 'Infrastructure as Code' });
   });
 });
+
+/* ONE LINE PER SKILL GROUP (2026-11-12, after commit 4b7e75a). The check runs BEFORE any write: refused
+   after the master insert, a new master version would stay behind (versions are immutable). */
+describe('attestSkill keeps every skill group on one line (2026-11-12)', () => {
+  // Long enough that "Frameworks: Node.js, <this>" cannot print on one line at any typography rung.
+  const LONG = 'Java Enterprise Edition and Spring Framework Microservices Architecture Patterns';
+
+  it('refuses an add that would wrap its group, with no master version and no row write', async () => {
+    // No `wrap` passed, like any caller that omits it: must fail CLOSED.
+    const { done, calls } = run({}, { keyword: LONG, category: 'Frameworks' });
+    // Awaited.
+    const out = await done;
+    // Refused, naming the full group, and nothing was inserted.
+    assert.deepEqual(out, { ok: false, message: `"Frameworks" is full: adding ${LONG} would wrap it onto a second line. Remove a skill from that group first, or say "all" to add it anyway.`, masterInserted: false });
+    // No master version.
+    assert.equal(callsOf(calls, 'master_profiles', 'insert').length, 0);
+    // No row write.
+    assert.equal(callsOf(calls, 'applications', 'update').length, 0);
+  });
+
+  it('with wrap "allow" (the owner said "all") it saves and says the group now wraps', async () => {
+    // The same add, allowed.
+    const { done } = run({}, { keyword: LONG, category: 'Frameworks', wrap: 'allow' });
+    // Awaited.
+    const out = await done;
+    // Saved.
+    assert.equal(out.ok, true);
+    // And the wrap is never silent.
+    assert.match(out.ok ? out.notice ?? '' : '', /"Frameworks" now wraps onto a second line/);
+  });
+});

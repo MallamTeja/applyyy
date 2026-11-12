@@ -39,6 +39,10 @@ import { keywordAppearsIn } from '../../../../../supabase/functions/_shared/tail
    schema offers exactly these to the model, with a compile-time check against the contract type, so
    "a known kind" here can never drift from what a tailoring may name. Type-only imports, no I/O. */
 import { TAILOR_SECTION_KINDS } from '../../../../../supabase/functions/_shared/tailor/prompt.ts';
+/* THE RENDERER'S line model (2026-11-12), by the same relative path renderPreview.ts uses: the tailor, the
+   trimmer and resume-assist ask this exact helper whether a skill group prints on ONE line (commit 4b7e75a),
+   so an edit here can never call a group "one line" that the printed PDF wraps. Pure, no imports. */
+import { skillGroupFitsOneLine } from '../../../../../packages/resume-template/src/index.ts';
 
 /* The bullet node, derived from ResolvedResume rather than imported, because the
    contract seam re-exports only ResolvedResume and widening it is not this file's call. */
@@ -321,15 +325,36 @@ export function addableSkillFor(keyword: string, resume: ResolvedResume, master:
   return { ref: hit.id, name: hit.name, category: hit.category };
 }
 
+/* Whether one more skill would push its group onto a SECOND printed line (Teja 2026-11-12 13:57: every
+ * skill group is one full line). Answers the refusal sentence, naming the full group, or null when the
+ * group still fits. Both add paths ask it: addSkill below, and attestSkill BEFORE it writes a master
+ * version, so a refused add never leaves a stray version behind. The group is the printed `category`
+ * string, exactly as DiffView and renderSkills group by it; the order is the print order (resume order,
+ * the new skill last, as addSkill appends it). */
+export function skillGroupWrapReason(resume: ResolvedResume, name: string, category: string): string | null {
+  // The group's printed names now, in print order, with the new one last.
+  const names = [...resume.skills.filter((skill) => skill.category === category).map((skill) => skill.name), name];
+  // Still one line at every typography rung: nothing to say.
+  if (skillGroupFitsOneLine(category, names)) return null;
+  // Said for the owner: which group, what to do, and the one word that overrides it.
+  return `"${category}" is full: adding ${name} would wrap it onto a second line. Remove a skill from that group first, or say "all" to add it anyway.`;
+}
+
 /* Append one unselected master skill to the resume. Refuses anything that is not a master skill
- * or is already printed, so the only skills this can produce are ones the master holds. */
-export function addSkill(resume: ResolvedResume, master: MasterProfile, skillRef: string): EditOutcome {
+ * or is already printed, so the only skills this can produce are ones the master holds. Since
+ * 2026-11-12 it also refuses an add that would wrap its group onto a second line, unless the caller
+ * passes 'allow' (the owner said "all"). 'refuse' is the default so no caller loses the rule by omission. */
+export function addSkill(resume: ResolvedResume, master: MasterProfile, skillRef: string, wrap: 'refuse' | 'allow' = 'refuse'): EditOutcome {
   /* The master node by id; the caller supplies ONLY the ref, never the name. */
   const node = master.skills.find((skill) => skill.id === skillRef);
   /* Not a master skill: adding it would be inventing one. */
   if (node === undefined) return { ok: false, reason: 'That skill is not in your master profile, so it cannot be added.' };
   /* Already printed: a duplicate is no change, and the validator would refuse it. */
   if (resume.skills.some((skill) => skill.ref === skillRef)) return { ok: false, reason: 'That skill is already on this resume.' };
+  /* One line per group: asked with the master's own spelling and group, which is what will print. */
+  const wraps = wrap === 'refuse' ? skillGroupWrapReason(resume, node.name, node.category) : null;
+  /* It would wrap and the owner did not say "all": nothing changes, the group is named. */
+  if (wraps !== null) return { ok: false, reason: wraps };
   /* Built field for field from the master, the same shape validator.ts resolves. */
   const added: ResolvedSkill = { ref: node.id, name: node.name, category: node.category };
   /* A NEW array and a NEW resume; the tailor's skills keep their order, the addition goes last. */

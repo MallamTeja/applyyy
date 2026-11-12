@@ -20,7 +20,7 @@ import { checkMasterProfile } from '../settings/masterIngest';
 // The Master page's own name match (bf's e136e52), so both add paths refuse the same duplicates.
 import { masterSkillNamed } from '../settings/masterAdd';
 // The pure edits: the shape check, the rebuild from tailor_refs, the existing add/match rules.
-import { addableSkillFor, addSkill, deepEqual, masterFromRow, rebuildOriginal, skillTokens } from './tailoredEdits';
+import { addableSkillFor, addSkill, deepEqual, masterFromRow, rebuildOriginal, skillGroupWrapReason, skillTokens } from './tailoredEdits';
 // The write boundary every resume edit goes through, now able to move the pin with the resume.
 import { saveTailoredEdit, type EditSource, type StoredRow } from './saveTailoredEdit';
 // The one-page rule, live: the attested resume is fitted on one page before it is saved (2026-11-07).
@@ -53,6 +53,9 @@ export interface AttestArgs {
   /* The row's JD keywords (selected_jd_keywords), for the one-page fit this save runs (2026-11-07).
      Required, so no caller can skip the fit by omission. */
   readonly jdKeywords: readonly string[];
+  /* One line per skill group (2026-11-12): 'refuse' an add that would wrap its group, or 'allow' it with a
+     notice when the owner said "all". Required, so no caller can skip the rule by omission. */
+  readonly wrap: 'refuse' | 'allow';
 }
 
 /* How an attest ends. On success the page gets the new pin's master and original, which it must
@@ -163,6 +166,15 @@ export async function attestSkill(client: Client, args: AttestArgs): Promise<Att
     // No insert ran, so masterInserted is false.
     return { ok: false, message: `"${name}" is already in your master profile as "${held.name}" (${held.category}); nothing was added.`, masterInserted: false };
   }
+  /* ONE LINE PER GROUP (2026-11-12), checked BEFORE any write: refused after the master insert, the new
+     version would stay behind (versions are immutable). Asked with what will print: the master's own
+     spelling and group when it already holds the skill, else the vouched name under the picked group. */
+  const wraps = skillGroupWrapReason(args.current, existing?.name ?? name, existing?.category ?? category);
+  // Would wrap and the owner did not say "all": nothing written, the full group named.
+  // `!== 'allow'`, not `=== 'refuse'`: a caller that sends no value (an untyped test double) fails CLOSED.
+  if (wraps !== null && args.wrap !== 'allow') return { ok: false, message: wraps, masterInserted: false };
+  // Allowed past the line: said after the save, so the wrap is never silent.
+  const wrapNotice = wraps === null ? null : `"${existing?.category ?? category}" now wraps onto a second line, because you said "all".`;
   // The master skill that will go on the resume.
   const skillRef = existing?.ref ?? args.newSkillId;
   // The master the row will be pinned to, before the database assigns a version.
@@ -207,7 +219,8 @@ export async function attestSkill(client: Client, args: AttestArgs): Promise<Att
   // Refused after the insert: the version stays (immutable), the row is untouched.
   if (rebuilt === null) return { ok: false, message: CHANGED_MASTER, masterInserted };
   // The existing add, against the re-pinned resume: the skill is built field for field from the master node.
-  const added = addSkill({ ...args.current, master_version: version }, target, skillRef);
+  // The line was already judged above, against this same resume; 'allow' keeps addSkill from judging it twice.
+  const added = addSkill({ ...args.current, master_version: version }, target, skillRef, 'allow');
   // e.g. already on the resume; said in addSkill's own words.
   if (!added.ok) return { ok: false, message: added.reason, masterInserted };
   /* One page (2026-11-07): the attested resume is fitted BEFORE the write, and the fitted one is
@@ -246,8 +259,8 @@ export async function attestSkill(client: Client, args: AttestArgs): Promise<Att
     ok: true,
     // The resume as stored (fitted).
     resume: fitted.resume,
-    // What the one-page fit cut, in words, for the page to show; null when nothing was cut.
-    notice: fitted.notice,
+    // What the one-page fit cut, and an allowed wrap, in words for the page to show; null when neither happened.
+    notice: [fitted.notice, wrapNotice].filter((line): line is string => line !== null).join(' ') || null,
     // The pin's master, which the page swaps into the row's source.
     master: target,
     // The pin's original, so "edited" keeps being derived correctly.

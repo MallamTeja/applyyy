@@ -37,8 +37,9 @@ const JOB_TITLE = 'Page Fit Engineer';
 /* Four master AI skills not on the stored resume, as the AI answer adds them. Four, because they join the
    existing AI line and only the fourth wraps it onto a new line (measured: 1-3 add no height). */
 const ADDED_SKILLS = ['RAG Pipelines', 'Prompt Engineering', 'Context Engineering', 'Tool Calling & Guardrails'].map((name) => ({ name, category: 'AI' }));
-// The prompt.
-const PROMPT = 'Add RAG Pipelines, Prompt Engineering, Context Engineering and Tool Calling to my skills.';
+/* The prompt. It says "all" since 2026-11-12: an add that wraps a skill group onto a second line is refused
+   unless the owner says "all" (tailoredEdits.skillGroupWrapReason), and this test needs exactly that wrap. */
+const PROMPT = 'Add all of RAG Pipelines, Prompt Engineering, Context Engineering and Tool Calling to my skills.';
 
 /* The resume with the four skills appended as addSkill builds them (the master's ref, name, category). */
 function withAddedSkills(resume: ResolvedResume): ResolvedResume {

@@ -110,7 +110,8 @@ export type EditAction =
   // A skill the master LACKS: it goes into a new master version first, then onto this resume
   // (attestSkill.ts). Carries a name, unlike the T3 arms, because there is no master node to
   // point at yet; `category` is one of the master's own groups.
-  | { readonly kind: 'attest_skill'; readonly keyword: string; readonly category: string }
+  // `wrap: 'allow'` (2026-11-12) only when the owner said "all": the add may wrap its group past one line.
+  | { readonly kind: 'attest_skill'; readonly keyword: string; readonly category: string; readonly wrap?: 'allow' }
   // STRUCTURAL EDITS (2026-11-01, docs/ui/2026-11-01-review-structure-edits-contract.md). Every one keeps
   // each node traced to the master; tracesToMaster checks that at the save boundary.
   // One bullet one place up or down among its siblings.
