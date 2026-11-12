@@ -649,3 +649,77 @@ test("T4 guard: an underscore-joined title still meets its exclusion ('Manager__
   // Dropped by the live "Manager" exclusion, with the exclusion's code.
   assert.equal(verdict.drop && verdict.code, "tech_gate", JSON.stringify(verdict));
 });
+
+// ---- 2026-11-12: vague titles reach the matcher (Teja approved 16:55 IST) -------------------------------------
+// Peer recon (16:52): three live false drops. A bare generic title ("Engineer - Target India", GE's "Intern")
+// names no discipline, so it matched no configured title and was dropped unclassified; DXC's "Sr Analyst I
+// Software Engineering" was dropped by the configured exclusion "Sr", though "Analyst I" is DXC's entry grade.
+// The matcher's score floor (30) still drops a vague title whose job is not software, so the gate lets it through.
+
+test("vague title: 'Engineer - Target India' (live, no description) reaches the matcher", () => {
+  // The live title; its description is absent, as on the live row.
+  assert.deepEqual(screenTechRole("Engineer - Target India", null, LIVE_PREFS), { drop: false });
+});
+
+test("vague title: GE HealthCare's bare 'Intern' (live, no description) reaches the matcher", () => {
+  // A level word with nothing else: no discipline is named, so it is not judged non-technical.
+  assert.deepEqual(screenTechRole("Intern", null, LIVE_PREFS), { drop: false });
+});
+
+test("entry grade: DXC's 'Sr Analyst I Software Engineering' is not dropped by the 'Sr' exclusion", () => {
+  // Every live spelling of the title (four of the six rows), each a software-engineering role at DXC's entry grade.
+  for (const title of ["Sr Analyst I Software Engineering", "Sr Analyst I Software Engineering (Java + API)", "Sr Analyst I Software Engineering / RR-0437720"]) {
+    // Recognised as the software title it is.
+    assert.deepEqual(screenTechRole(title, null, LIVE_PREFS), { drop: false }, title);
+  }
+});
+
+test("vague title control: a named non-software intern stays dropped ('Sales Intern')", () => {
+  // The title names its discipline, and it is not software.
+  assert.equal(screenTechRole("Sales Intern", null, LIVE_PREFS).drop, true);
+});
+
+test("vague title control: an Analyst I that is not software stays dropped ('Finance Analyst I', 'Sr Finance Analyst I')", () => {
+  // No software word: the entry grade alone vouches for nothing.
+  assert.equal(screenTechRole("Finance Analyst I", null, LIVE_PREFS).drop, true);
+  // The "Sr" exclusion still applies when the title is not a software role.
+  assert.deepEqual(screenTechRole("Sr Finance Analyst I", null, LIVE_PREFS), { drop: true, code: "tech_gate", reason: 'title matches excluded term "Sr"' });
+});
+
+test("vague title control: 'Account Executive' stays dropped", () => {
+  // A named sales role, untouched by the rescue.
+  assert.equal(screenTechRole("Account Executive", null, LIVE_PREFS).drop, true);
+});
+
+test("vague title control: a bare 'Intern' whose suffix or description shows a non-software function stays dropped", () => {
+  // The function in the title's suffix.
+  assert.equal(screenTechRole("Intern - Finance", null, LIVE_PREFS).drop, true);
+  // The function in the description head the gate can see.
+  assert.equal(screenTechRole("Intern", "Join our Human Resources team to support talent acquisition and onboarding.", LIVE_PREFS).drop, true);
+  // The same for a bare "Engineer": a sales-engineering description.
+  assert.equal(screenTechRole("Engineer", "This sales role partners with account executives to close deals.", LIVE_PREFS).drop, true);
+});
+
+test("entry grade control: 'Analyst II/III' and a real senior software title still drop", () => {
+  // Grade II is not the entry grade; the live "II" exclusion drops it.
+  assert.equal(screenTechRole("Analyst II Software Engineering", null, LIVE_PREFS).drop, true);
+  // No entry grade: "Sr" means senior.
+  assert.equal(screenTechRole("Sr Software Engineer", null, LIVE_PREFS).drop, true);
+  // "Senior ... Engineer I" is not the DXC grade spelling: still dropped by "Senior".
+  assert.equal(screenTechRole("Senior Software Engineer", null, LIVE_PREFS).drop, true);
+});
+
+test("vague title control: a suffix that names a DISCIPLINE is not a company/location suffix (live Micron, Intel, MBA rows)", () => {
+  // Each was dropped before the rescue and must stay dropped: the suffix says what the job is, and it is not software.
+  for (const title of ["Engineer, HBM LAYOUT", "Engineer, SSD Validation", "Engineer - Electronic HW", "ENGINEER, SIG ELECTRICAL DESIGN", "Engineer-std cell layout", "ENGINEER, EQUIPMENT ENGINEER", "Engineer, GQ OPS -REL Process", "Intern: MBA/Graduate"]) {
+    // Not rescued.
+    assert.equal(screenTechRole(title, null, LIVE_PREFS).drop, true, title);
+  }
+});
+
+test("vague title: a company or location suffix is still rescued ('Engineer - Target India-1', 'Intern - Pune')", () => {
+  // Live Target spelling with a requisition counter.
+  assert.deepEqual(screenTechRole("Engineer - Target India-1", null, LIVE_PREFS), { drop: false });
+  // A city.
+  assert.deepEqual(screenTechRole("Intern - Pune", null, LIVE_PREFS), { drop: false });
+});

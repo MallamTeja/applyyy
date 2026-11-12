@@ -231,6 +231,35 @@ const SOFTWARE_ROLE_SPELLINGS: readonly RegExp[] = [
   /\b(?:kernel|model|research|deployed)\s+engineer\b/i,
 ];
 
+// BARE GENERIC TITLES (Teja approved 2026-11-12 16:55 IST). A title that is ONLY a generic role word, optionally
+// followed by a separator and a company/location/requisition suffix: "Engineer - Target India", GE HealthCare's
+// "Intern". It names no discipline, so it matched no configured title and was dropped unclassified, live, while the
+// job could be software. Such a title is not evidence either way, so it goes on to the matcher, whose score floor
+// (30) drops it if the job is not software. Anchored at both ends: "Sales Intern" or "Mechanical Engineer" name a
+// discipline and are judged by the rules as before.
+// Group 1 is the suffix after the separator (absent for the bare word itself).
+const BARE_GENERIC_TITLE = /^(?:engineer|intern|internship)\b\s*(?:[-–—,|:(/]\s*(.*))?$/i;
+// A suffix that names a DISCIPLINE is not a company/location suffix: measured live (2026-11-12), Micron and others
+// title hardware jobs "Engineer, HBM LAYOUT", "Engineer, SSD Validation", "Engineer - Electronic HW", which were
+// dropped and must stay dropped (Teja: "don't loosen anything else"). Any TECH_TITLE_SIGNAL word disqualifies a
+// suffix too ("Engineer - AI Platform" stays judged as before), as does a hardware/process word below or a
+// NON_TECH_FUNCTION. ponytail: a closed word list; an acronym-only discipline suffix ("Engineer, PDE CEM") still
+// passes to the matcher, which scores it. Extend the list from the next live sample if that leaks.
+const DISCIPLINE_SUFFIX = /\b(hw|hardware|layout|electrical|electronics?|design|validation|verification|process|equipment|dram|hbm|ssd|semiconductor|cells?|ops|mechanical|civil|chemical|quality|reliability|methodology|service desk|mba)\b/i;
+// What the gate CAN see of a vague posting that is not software: a non-software function named in the title's
+// suffix ("Intern - Finance") or the description head. Any one keeps the bare title dropped. Word-bounded and
+// closed; "operations" is left out on purpose because software descriptions use it ("DevOps operations").
+const NON_TECH_FUNCTION = /\b(sales|marketing|finance|financial|accounting|accountants?|account executives?|human resources|hr|talent acquisition|recruiter|recruiting|recruitment|legal|company secretary|business development|customer (?:service|success|support)|procurement|supply chain)\b/i;
+
+// DXC'S ENTRY GRADE (2026-11-12). DXC titles its graduate software hires "Sr Analyst I Software Engineering":
+// "Analyst I" is the entry grade and "Sr" belongs to the grade's name, not a senior role. The configured exclusion
+// "Sr" dropped every such row (6 live). Exactly that spelling, "Sr"/"Senior" + "Analyst I": grade I only, because
+// `i\b` fails on "II", "III" and "IV". It waives ONLY the "Sr"/"Senior" exclusion terms, and ONLY on a title the
+// software-role spellings recognise, so "Sr Finance Analyst I" and "Sr Software Engineer" are still dropped.
+const ENTRY_GRADE_ANALYST_I = /\b(?:sr\.?|senior)\s+analyst\s+i\b/i;
+// The exclusion terms the entry grade waives, lower-cased.
+const GRADE_NAME_EXCLUSIONS: ReadonlySet<string> = new Set(["sr", "sr.", "senior"]);
+
 // Is this configured title term a level word rather than a discipline?
 function isLevelOnly(term: string): boolean {
   // Normalised the same way firstMatch normalises before compiling, then lower-cased.
@@ -363,7 +392,12 @@ export function screenTechRole(
   // was dropped by the exclusion "Head" found in its body — "…MongoDB is at the head of its
   // disruption…". Bare seniority words (Head, Lead, Staff, Manager) are ordinary company
   // prose; in a TITLE they describe the role, which is what an exclusion is for.
-  const excluded = firstMatch(preferences.excludedKeywords, title);
+  // DXC's entry grade on a software title: the "Sr"/"Senior" terms name the grade there, so they are set aside.
+  const entryGrade = ENTRY_GRADE_ANALYST_I.test(title) && SOFTWARE_ROLE_SPELLINGS.some((pattern) => pattern.test(collapseWhitespace(title)));
+  // Every other exclusion still applies to such a title (an "II" or "Manager" in it still drops it).
+  const exclusions = entryGrade ? preferences.excludedKeywords.filter((term) => !GRADE_NAME_EXCLUSIONS.has(collapseWhitespace(term).trim().toLowerCase())) : preferences.excludedKeywords;
+  // The first exclusion the title carries, if any.
+  const excluded = firstMatch(exclusions, title);
   // A genuine rejection, naming the term so a wrong drop is diagnosable.
   if (excluded !== undefined) {
     return { drop: true, code: "tech_gate", reason: `title matches excluded term "${excluded}"` };
@@ -395,6 +429,13 @@ export function screenTechRole(
   // A software-role spelling the configured list does not literally contain (T4): recognised the same way.
   // After the exclusions and title rules above, so a senior or non-software title is never rescued by it.
   if (SOFTWARE_ROLE_SPELLINGS.some((pattern) => pattern.test(collapseWhitespace(title)))) return { drop: false };
+  // A bare generic title goes on to the matcher unless the title or the description head names a non-software
+  // function (see BARE_GENERIC_TITLE). After the exclusions and title rules, so "Sr Engineer" is never rescued.
+  const bare = BARE_GENERIC_TITLE.exec(collapseWhitespace(title).trim());
+  // The suffix, or "" for the bare word alone.
+  const suffix = bare?.[1] ?? "";
+  // Rescued only when the suffix names no discipline and nothing the gate can see names a non-software function.
+  if (bare !== null && !TECH_TITLE_SIGNAL.test(suffix) && !DISCIPLINE_SUFFIX.test(suffix) && !NON_TECH_FUNCTION.test(`${title} ${(description ?? "").slice(0, FUNCTION_HEAD_LIMIT)}`)) return { drop: false };
 
   // Only a level word matched. It recognises the posting when the title is technical, and
   // the drop below names the level term when it is not ("Intern, Company Secretary").
