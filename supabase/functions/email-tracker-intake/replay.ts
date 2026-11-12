@@ -112,7 +112,8 @@ async function readChunked(ids: readonly string[], page: (chunk: string[], from:
  * now match. The decision is decide.ts's rematchUnmatched; this is only its reads and writes.
  * Returns its errors; never throws (the caller's try covers a client that throws anyway).
  */
-async function linkUnmatchedEmails(db: SupabaseClient, apps: readonly ActiveApplication[]): Promise<string[]> {
+// ownerEmail: passed through to rematchUnmatched, so a re-read of the owner's own stored mail never becomes an employer verdict.
+async function linkUnmatchedEmails(db: SupabaseClient, apps: readonly ActiveApplication[], ownerEmail: string | null): Promise<string[]> {
   // Each candidate's FIRST entry into approved, so an older email can't attach to a newer row.
   const approvals = await readChunked(apps.map((app) => app.id), (chunk, from, to) =>
     db
@@ -163,7 +164,7 @@ async function linkUnmatchedEmails(db: SupabaseClient, apps: readonly ActiveAppl
   // §6: a non-array is a broken answer, not "no emails".
   if (!Array.isArray(data)) return ["rematch: email_events read was not an array"];
   // The pure decision.
-  const links = rematchUnmatched(data as Record<string, unknown>[], apps, firstApprovedAt);
+  const links = rematchUnmatched(data as Record<string, unknown>[], apps, firstApprovedAt, ownerEmail);
   // Collected per link.
   const errors: string[] = [];
   // One guarded write per link.
@@ -199,6 +200,9 @@ export async function replayStoredMoves(
   db: SupabaseClient,
   systemEnabled: boolean | null,
   liveDecisions: ReadonlyMap<string, MessageDecision>,
+  // The owner's address (APP_USER_EMAIL), read by index.ts: this file is node-tested, so it never reads Deno.env.
+  // Required, not optional, so no caller can skip the owner-sent check by omission (CLAUDE.md §6).
+  ownerEmail: string | null,
 ): Promise<ReplayResult> {
   // Off (false) is a deliberate pause: no reads, no moves, no error. Unreadable (null) is a
   // fault: still no move, but counted, so a broken settings read can't look like a quiet day.
@@ -253,7 +257,7 @@ export async function replayStoredMoves(
 
     // RE-MATCH FIRST (2026-11-04), so an email linked here is read as owed just below and moves in
     // this same run. Its errors are counted but never refuse the moves: they are a separate write.
-    if (matchable.length > 0) errors.push(...(await linkUnmatchedEmails(db, matchable)));
+    if (matchable.length > 0) errors.push(...(await linkUnmatchedEmails(db, matchable, ownerEmail)));
 
     // Stored, matched, move-capable emails of tracked rows, moved and pending alike (the
     // moved ones tell replayQueue what is already settled). Newest first; see REPLAY_WINDOW.

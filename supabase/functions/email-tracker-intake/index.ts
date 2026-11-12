@@ -107,6 +107,11 @@ interface DecidedMessage {
   readonly matchedApplicationId: string | null;
 }
 
+// The owner's address, read ONCE: the To check on receipts and (2026-11-12) the From check that keeps the
+// owner's own replies from classifying as employer mail both read this one value. Blank or unset = null (unknown):
+// classifyMessage then classifies as before, and addressedTo fails closed, as it did when it read the env inline.
+const ownerEmail: string | null = Deno.env.get(APP_USER_EMAIL_ENV_VAR)?.trim() || null;
+
 // Main Edge Function HTTP server entry point registered with `Deno.serve`.
 Deno.serve(async (request: Request): Promise<Response> => {
   // Validate HTTP method before performing any expensive operations.
@@ -265,7 +270,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
   if (batch.messages.length === 0) {
     // W6 (2026-11-01): the heartbeat also re-drives owed moves. Without this, a move paused
     // by the kill switch would wait for the next email to arrive, which may never come.
-    const replay = await replayStoredMoves(client.db, await readSystemEnabled(), new Map());
+    const replay = await replayStoredMoves(client.db, await readSystemEnabled(), new Map(), ownerEmail);
     // A recorded heartbeat is a succeeded run that stored nothing; replay errors are counted
     // on it (the first five in the detail), so a refused move can't hide behind a heartbeat.
     await closeRun("succeeded", 0, replay.errors.length > 0 ? replay.errors.slice(0, 5).join("; ") : null, replay.errors.length);
@@ -326,7 +331,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
   // Classify and match every message first; nothing is written yet.
   const decided: DecidedMessage[] = batch.messages.map((message) => {
     // Outcome first, out-of-office never advances, receipt only as a fallback.
-    const decision = classifyMessage(message);
+    const decision = classifyMessage(message, ownerEmail);
     // The pool rule used to live in decide.ts (matchPoolFor) so it was node-tested: receipts
     // saw every row (a needs_verification sibling can force ambiguity), everything else only
     // post-submit rows. The 2026-10-23 wrong-row regression was an inline filter here.
@@ -498,7 +503,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
       titleMatches: titleNamedIn(message, activeApplications.find((app) => app.id === applicationId)?.jobs?.title),
       // The signed To names Teja (not a replay of someone else's receipt). The owner
       // is the app user the function signs in as; unset means nothing is confirmed.
-      addressedToOwner: addressedTo(message.to, Deno.env.get(APP_USER_EMAIL_ENV_VAR)),
+      addressedToOwner: addressedTo(message.to, ownerEmail),
     })
       ? "applied"
       : null;
@@ -574,7 +579,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
     decided.filter((d) => newlyInserted.has(d.message.message_id)).map((d) => [d.message.message_id, d.decision] as const),
   );
   // Never throws; returns its own errors.
-  const replay = await replayStoredMoves(client.db, systemEnabled, liveDecisions);
+  const replay = await replayStoredMoves(client.db, systemEnabled, liveDecisions, ownerEmail);
   // Receipt refusals first, then the sweep's.
   const runErrors = [...moveErrors, ...replay.errors];
 

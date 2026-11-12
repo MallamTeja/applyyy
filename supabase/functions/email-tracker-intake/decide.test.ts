@@ -20,7 +20,7 @@ const REJECTION = {
 
 test("a rejection that opens with 'thank you for applying' is a rejection, not a receipt", () => {
   // The old ordering read the receipt phrase first and returned application_received.
-  const decision = classifyMessage(REJECTION);
+  const decision = classifyMessage(REJECTION, null);
   // Classified by its outcome.
   assert.equal(decision.classification, "rejection");
   // And it moves the application to rejected, never to employer_screening.
@@ -29,14 +29,14 @@ test("a rejection that opens with 'thank you for applying' is a rejection, not a
 
 test("a plain receipt with no outcome still reads as application_received", () => {
   // The fallback must survive the reordering.
-  const decision = classifyMessage({ from: "jobs@acme.com", subject: "Application received", snippet: "Thank you for applying. We will review your profile." });
+  const decision = classifyMessage({ from: "jobs@acme.com", subject: "Application received", snippet: "Thank you for applying. We will review your profile." }, null);
   // Receipt is the fallback reading.
   assert.equal(decision.classification, "application_received");
 });
 
 test("an out-of-office reply never advances, even when it quotes an interview subject", () => {
   // Quoted thread text would otherwise classify as interviewing.
-  const decision = classifyMessage({ from: "Jane <jane@acme.com>", subject: "Out of Office: Re: Interview invitation", snippet: "I am out of office until Monday." });
+  const decision = classifyMessage({ from: "Jane <jane@acme.com>", subject: "Out of Office: Re: Interview invitation", snippet: "I am out of office until Monday." }, null);
   // No status for an OOO.
   assert.equal(targetStatusFor(decision.classification), null);
 });
@@ -113,14 +113,14 @@ function appAt(id: string, slug: string, status: ActiveApplication["status"]): A
 // The whole pure pipeline an email takes: classify, then ask what status it moves to.
 function moveFor(message: { from: string; subject: string; snippet: string }, current: ActiveApplication["status"]) {
   // Same two calls index.ts makes, in the same order.
-  return statusMoveFor(classifyMessage(message), current);
+  return statusMoveFor(classifyMessage(message, null), current);
 }
 
 test("(a) 'Unfortunately, we need to reschedule your interview' is not a rejection and moves nothing", () => {
   // The exact trigger: a bare "unfortunately, we" used to score 0.85.
   const message = { from: "jobs@acme.com", subject: "Interview scheduling", snippet: "Unfortunately, we need to reschedule your interview. Please pick a new time." };
   // Classified as anything but a rejection.
-  assert.notEqual(classifyMessage(message).classification, "rejection");
+  assert.notEqual(classifyMessage(message, null).classification, "rejection");
   // And an application at `interview` stays there.
   assert.equal(moveFor(message, "interview"), null);
 });
@@ -129,7 +129,7 @@ test("(b) 'Unfortunately, we have decided not to move forward' is a rejection th
   // Strong form: decision phrase after the opener.
   const message = { from: "jobs@acme.com", subject: "Your application", snippet: "Unfortunately, we have decided not to move forward with your application." };
   // Classified as a rejection.
-  assert.equal(classifyMessage(message).classification, "rejection");
+  assert.equal(classifyMessage(message, null).classification, "rejection");
   // The move clears the terminal gate.
   assert.equal(moveFor(message, "applied"), "rejected");
 });
@@ -138,7 +138,7 @@ test("(c) 'We regret to inform you' is a rejection", () => {
   // Formal boilerplate opener.
   const message = { from: "jobs@acme.com", subject: "Application update", snippet: "We regret to inform you that your application was unsuccessful." };
   // Classified by outcome.
-  assert.equal(classifyMessage(message).classification, "rejection");
+  assert.equal(classifyMessage(message, null).classification, "rejection");
   // And it is confident enough to move.
   assert.equal(moveFor(message, "applied"), "rejected");
 });
@@ -147,7 +147,7 @@ test("(d) a moderate rejection (0.5 to 0.8) is stored as a rejection but moves n
   // Subject signal 0.25 plus the bare opener 0.35 gives 0.6: the classifier's moderate branch.
   const message = { from: "jobs@acme.com", subject: "Update on your application", snippet: "Unfortunately, we are still reviewing candidates." };
   // Classification is kept so the email stays visible.
-  const decision = classifyMessage(message);
+  const decision = classifyMessage(message, null);
   // Moderate band: a rejection label with confidence strictly between the two cutoffs.
   assert.equal(decision.classification, "rejection");
   // Confidence sits under the terminal gate.
@@ -200,7 +200,7 @@ test("(g) GitLab-shaped emails each cause only their own outcome", () => {
   // Each email matches the GitLab application, and only that one.
   for (const message of [confirmation, rejection, invite]) {
     // Domain from the parser, as index.ts passes it.
-    assert.equal(matchApplication(message, classifyMessage(message).senderDomain, candidates), "g1");
+    assert.equal(matchApplication(message, classifyMessage(message, null).senderDomain, candidates), "g1");
   }
   // Receipt on an applied row -> stored as an event, status stays put (Teja, 2026-10-23).
   assert.equal(moveFor(confirmation, "applied"), null);
@@ -216,7 +216,7 @@ test("'After careful consideration, we have scheduled your final round' is not a
   // Politeness opener with a scheduling verb: used to score 0.85.
   const message = { from: "jobs@acme.com", subject: "Final round", snippet: "After careful consideration, we have scheduled your final round for Tuesday." };
   // Classify once; both assertions read it.
-  const decision = classifyMessage(message);
+  const decision = classifyMessage(message, null);
   // Never a rejection at or above the terminal gate.
   assert.ok(!(decision.classification === "rejection" && decision.confidence >= 0.8));
   // And an application at interview stays put.
@@ -234,7 +234,7 @@ test("'Thank you for your interest, we'd love to schedule a call' and a bare sig
   // Politeness preamble plus an invitation to talk.
   const interest = { from: "jobs@acme.com", subject: "Next steps", snippet: "Thank you for your interest. We'd love to schedule a call this week." };
   // Not a rejection label at all.
-  assert.notEqual(classifyMessage(interest).classification, "rejection");
+  assert.notEqual(classifyMessage(interest, null).classification, "rejection");
   // A sign-off alone is politeness, below every gate.
   assert.equal(moveFor({ from: "jobs@acme.com", subject: "Hello", snippet: "We wish you the best in your job search." }, "applied"), null);
 });
@@ -245,7 +245,7 @@ test("(h) an exact vendor sender 'Stripe Recruiting <no-reply@lever.co>' matches
   // Domain is nulled by the parser, so only the display name can name the company.
   const message = { from: "Stripe Recruiting <no-reply@lever.co>", subject: "Your application", snippet: "" };
   // Use the parser's domain exactly as index.ts does, so the vendor filter is part of the test.
-  assert.equal(matchApplication(message, classifyMessage(message).senderDomain, [app("s1", "stripe"), app("o1", "other")]), "s1");
+  assert.equal(matchApplication(message, classifyMessage(message, null).senderDomain, [app("s1", "stripe"), app("o1", "other")]), "s1");
 });
 
 test("(i) a vendor SUBDOMAIN sender 'Stripe Recruiting <no-reply@hire.lever.co>' still matches stripe", () => {
@@ -253,14 +253,14 @@ test("(i) a vendor SUBDOMAIN sender 'Stripe Recruiting <no-reply@hire.lever.co>'
   // matcher then skipped the display-name fallback entirely.
   const message = { from: "Stripe Recruiting <no-reply@hire.lever.co>", subject: "Your application", snippet: "" };
   // Parser domain, not a hand-picked null, so a parser OR matcher regression turns this red.
-  assert.equal(matchApplication(message, classifyMessage(message).senderDomain, [app("s1", "stripe"), app("o1", "other")]), "s1");
+  assert.equal(matchApplication(message, classifyMessage(message, null).senderDomain, [app("s1", "stripe"), app("o1", "other")]), "s1");
 });
 
 test("(j) a spoof 'x@stripe.evil.com' with no other signal matches nothing, even with the fallback open", () => {
   // No display name, a neutral subject: the only place 'stripe' appears is the attacker's address.
   const message = { from: "x@stripe.evil.com", subject: "Hi", snippet: "" };
   // The domain rule refuses it, and the fallback must not read the address to win it back.
-  assert.equal(matchApplication(message, classifyMessage(message).senderDomain, [app("s1", "stripe")]), null);
+  assert.equal(matchApplication(message, classifyMessage(message, null).senderDomain, [app("s1", "stripe")]), null);
   // Same with the bracketed form, which the old fallback also read in full.
   assert.equal(matchApplication({ ...message, from: "<x@stripe.evil.com>" }, "stripe.evil.com", [app("s1", "stripe")]), null);
 });
@@ -397,14 +397,14 @@ test("spoof: a receipt without a passing dkim/spf for the vendor domain is refus
 
 test("classifyMessage reads a realistic Greenhouse receipt as application_received", () => {
   // The exact email the confirm path is built for; a classifier change that drifts it shows here.
-  assert.equal(classifyMessage(GREENHOUSE_RECEIPT).classification, "application_received");
+  assert.equal(classifyMessage(GREENHOUSE_RECEIPT, null).classification, "application_received");
 });
 
 test("ambiguous: two applications to the same company match neither, so nothing is confirmed", () => {
   // One row mid-submit and one already in needs_verification, both at acme.
   const rows = [appAt("a1", "acme", "applying"), appAt("a2", "acme", "needs_verification")];
   // Parser domain exactly as index.ts passes it (a vendor sender, so the subject carries the match).
-  const domain = classifyMessage(GREENHOUSE_RECEIPT).senderDomain;
+  const domain = classifyMessage(GREENHOUSE_RECEIPT, null).senderDomain;
   // Two candidates: refuse to guess.
   assert.equal(matchApplication(GREENHOUSE_RECEIPT, domain, rows), null);
   // Positive control: with one acme row the same email DOES match, so the null above is ambiguity, not a dead matcher.
@@ -445,7 +445,7 @@ test("a needs_verification sibling still trips the ambiguity refusal", () => {
   // could belong to either attempt, so matching must refuse rather than guess.
   const rows = [appAt("a1", "acme", "applying"), appAt("a2", "acme", "needs_verification")];
   // Parser domain exactly as index.ts passes it.
-  const domain = classifyMessage(GREENHOUSE_RECEIPT).senderDomain;
+  const domain = classifyMessage(GREENHOUSE_RECEIPT, null).senderDomain;
   // The LIVE pool rule: index.ts loads exactly TRACKED_STATUSES and matches every email
   // against all of them (matchPoolFor, which hid these lanes from non-receipts, is gone).
   const pool = rows.filter((row) => receipt.TRACKED_STATUSES.includes(row.status));
@@ -460,7 +460,7 @@ test("W6: an outcome email for a needs_verification row is matched to it, and it
   // rejection below was stored unmatched and lost for good.
   const rows = [appAt("a2", "acme", "needs_verification")];
   // The ATS rejection fixture from the top of this file (subject names Acme).
-  const decision = classifyMessage(REJECTION);
+  const decision = classifyMessage(REJECTION, null);
   // The match is KEPT, so the replay sweep can apply it once a human resolves the row.
   assert.equal(matchApplication(REJECTION, decision.senderDomain, rows), "a2");
   // Deferred, not applied: the graph gives the tracker no edge out of needs_verification.
@@ -678,7 +678,7 @@ const OFFER = {
 
 test("W32: a real offer email is an offer and moves interview to offer", () => {
   // The classification the tracker stores.
-  const decision = classifyMessage(OFFER);
+  const decision = classifyMessage(OFFER, null);
   // An offer, not the interview the snippet also mentions: the later stage wins.
   assert.equal(decision.classification, "offer");
   // Clears the terminal gate on its own decision phrase.
@@ -693,7 +693,7 @@ test("W32: 'pleased to offer you the position' is an offer", () => {
   // The other common phrasing, from an ATS sender this time.
   const message = { from: "Acme <no-reply@greenhouse.io>", subject: "Next steps", snippet: "We are pleased to offer you the position of Backend Engineer at Acme." };
   // An offer.
-  assert.equal(classifyMessage(message).classification, "offer");
+  assert.equal(classifyMessage(message, null).classification, "offer");
 });
 
 test("W32: recruiter spam about offer letter templates is never an offer", () => {
@@ -709,7 +709,7 @@ test("W32: recruiter spam about offer letter templates is never an offer", () =>
   // Every one of them.
   for (const message of spam) {
     // Not an offer.
-    assert.notEqual(classifyMessage(message).classification, "offer", message.subject);
+    assert.notEqual(classifyMessage(message, null).classification, "offer", message.subject);
     // And moves nothing from interview, the only stage an offer could leave.
     assert.equal(moveFor(message, "interview"), null, message.subject);
   }
@@ -726,7 +726,7 @@ test("W32: a refused offer is never an offer", () => {
   // Each one.
   for (const snippet of refusals) {
     // Same sender and subject as the real offer, so only the body differs.
-    const decision = classifyMessage({ ...OFFER, snippet });
+    const decision = classifyMessage({ ...OFFER, snippet }, null);
     // Not an offer.
     assert.notEqual(decision.classification, "offer", snippet);
   }
@@ -744,7 +744,7 @@ test("W32: offer corroborate-only rules, all firing at once, never reach an offe
   // And the live message built from those signals alone is not an offer.
   const weakOnly = { from: "recruiting@stripe.com", subject: "Your offer letter", snippet: "Your offer letter is attached." };
   // Not an offer.
-  assert.notEqual(classifyMessage(weakOnly).classification, "offer");
+  assert.notEqual(classifyMessage(weakOnly, null).classification, "offer");
 });
 
 // ---- W33 (2026-11-02): an email with no signal and no match is stored without its text ----
@@ -821,7 +821,7 @@ const BJAK_RECEIPT = { id: "e-bjak", matched_application_id: null, from_address:
 
 test("re-match: the live Bjak receipt links to the Bjak row approved before it arrived", () => {
   // Approved 2026-10-24 13:44 IST, five days before the receipt.
-  const plan = receipt.rematchUnmatched([BJAK_RECEIPT], [BJAK_APP], new Map([["bjak-1", "2026-10-24T08:14:13+00:00"]]));
+  const plan = receipt.rematchUnmatched([BJAK_RECEIPT], [BJAK_APP], new Map([["bjak-1", "2026-10-24T08:14:13+00:00"]]), null);
   // One link, to that row, carrying the receipt verdict re-read from the stored subject (Q3).
   // Linked; its stored body is empty (redacted), so no re-read verdict: the stored one stands (§6).
   assert.deepEqual(plan, [{ eventId: "e-bjak", applicationId: "bjak-1", verdict: null }]);
@@ -829,18 +829,18 @@ test("re-match: the live Bjak receipt links to the Bjak row approved before it a
 
 test("re-match: an email received BEFORE the row was approved never attaches to it", () => {
   // Approved after the email arrived: the email is about an earlier application, not this one.
-  const plan = receipt.rematchUnmatched([BJAK_RECEIPT], [BJAK_APP], new Map([["bjak-1", "2026-10-30T00:00:00+00:00"]]));
+  const plan = receipt.rematchUnmatched([BJAK_RECEIPT], [BJAK_APP], new Map([["bjak-1", "2026-10-30T00:00:00+00:00"]]), null);
   // Nothing.
   assert.deepEqual(plan, []);
 });
 
 test("re-match: no approval time, a malformed time, or an already-matched row links nothing", () => {
   // No approval on record: fail closed (CLAUDE.md §6).
-  assert.deepEqual(receipt.rematchUnmatched([BJAK_RECEIPT], [BJAK_APP], new Map()), []);
+  assert.deepEqual(receipt.rematchUnmatched([BJAK_RECEIPT], [BJAK_APP], new Map(), null), []);
   // A received_at Date.parse can't read is not "now".
-  assert.deepEqual(receipt.rematchUnmatched([{ ...BJAK_RECEIPT, received_at: "soon" }], [BJAK_APP], new Map([["bjak-1", "2026-10-24T08:14:13+00:00"]])), []);
+  assert.deepEqual(receipt.rematchUnmatched([{ ...BJAK_RECEIPT, received_at: "soon" }], [BJAK_APP], new Map([["bjak-1", "2026-10-24T08:14:13+00:00"]]), null), []);
   // An email already matched elsewhere is never re-pointed.
-  assert.deepEqual(receipt.rematchUnmatched([{ ...BJAK_RECEIPT, matched_application_id: "other" }], [BJAK_APP], new Map([["bjak-1", "2026-10-24T08:14:13+00:00"]])), []);
+  assert.deepEqual(receipt.rematchUnmatched([{ ...BJAK_RECEIPT, matched_application_id: "other" }], [BJAK_APP], new Map([["bjak-1", "2026-10-24T08:14:13+00:00"]]), null), []);
 });
 
 // ---- Job alerts (2026-11-05, Teja: track "all jobs allerts apply portal application") -------------
@@ -849,7 +849,7 @@ test("re-match: no approval time, a malformed time, or an already-matched row li
 
 test("job_alert: a LinkedIn job alert is a job alert, not unclassified", () => {
   // LinkedIn's alert sender and its usual subject shape.
-  const decision = classifyMessage({ from: "LinkedIn Job Alerts <jobalerts-noreply@linkedin.com>", subject: "Software Engineer: Google and 10 more jobs in Hyderabad", snippet: "Your job alert for Software Engineer in Hyderabad." });
+  const decision = classifyMessage({ from: "LinkedIn Job Alerts <jobalerts-noreply@linkedin.com>", subject: "Software Engineer: Google and 10 more jobs in Hyderabad", snippet: "Your job alert for Software Engineer in Hyderabad." }, null);
   // The new class.
   assert.equal(decision.classification, "job_alert");
   // It maps to no status: an alert says nothing about an application.
@@ -858,21 +858,21 @@ test("job_alert: a LinkedIn job alert is a job alert, not unclassified", () => {
 
 test("job_alert: an alert phrase from any sender counts (a company's own careers mailer)", () => {
   // Not a board sender; the subject says what it is.
-  const decision = classifyMessage({ from: "Acme Careers <careers@acme.com>", subject: "New jobs matching your profile", snippet: "Here are this week's openings." });
+  const decision = classifyMessage({ from: "Acme Careers <careers@acme.com>", subject: "New jobs matching your profile", snippet: "Here are this week's openings." }, null);
   // The phrase alone is enough.
   assert.equal(decision.classification, "job_alert");
 });
 
 test("job_alert: a board's non-job notification stays unclassified (precision)", () => {
   // A board sender, but a social notification with no job wording.
-  const decision = classifyMessage({ from: "LinkedIn <notifications-noreply@linkedin.com>", subject: "Priya reacted to your post", snippet: "See who reacted." });
+  const decision = classifyMessage({ from: "LinkedIn <notifications-noreply@linkedin.com>", subject: "Priya reacted to your post", snippet: "See who reacted." }, null);
   // Not an alert: it keeps the redacted default.
   assert.equal(decision.classification, "unclassified");
 });
 
 test("job_alert: a board-sent interview invite is still an interview invite", () => {
   // A lifecycle outcome from a board sender: the outcome wins, the alert reading is a fallback.
-  const decision = classifyMessage({ from: "Naukri <info@naukri.com>", subject: "Interview invitation from Acme", snippet: "We would like to invite you to interview for the Backend Engineer role." });
+  const decision = classifyMessage({ from: "Naukri <info@naukri.com>", subject: "Interview invitation from Acme", snippet: "We would like to invite you to interview for the Backend Engineer role." }, null);
   // Unchanged by the alert rule.
   assert.equal(decision.classification, "interview_invite");
 });
@@ -935,7 +935,7 @@ test("match-only: the replay's re-match links a stored email to an approved row 
   // The stored email, unmatched, as the replay reads it.
   const stored = [{ id: "ev-hr", matched_application_id: null, from_address: HACKERRANK_MAIL.from, subject: HACKERRANK_MAIL.subject, snippet: "", received_at: "2026-11-04T19:19:00.000Z" }];
   // The approved HackerRank row, first approved the day before.
-  const links = receipt.rematchUnmatched(stored, [poolApp("hr-1", "approved", "hackerrank", "AI Researcher Intern")], new Map([["hr-1", "2026-11-03T10:00:00.000Z"]]));
+  const links = receipt.rematchUnmatched(stored, [poolApp("hr-1", "approved", "hackerrank", "AI Researcher Intern")], new Map([["hr-1", "2026-11-03T10:00:00.000Z"]]), null);
   // Linked; the move is a separate question statusMoveFor refuses.
   // The re-read verdict (Q3) is the receipt, so the link carries no move either.
   // Linked; an empty stored body is never re-classified from the subject alone, so the verdict is null.
@@ -957,7 +957,7 @@ const HACKERRANK_RECEIPT = {
 
 test("receipt: HackerRank's 'we have received your application' is application_received, not oa_invite", () => {
   // The live email.
-  const decision = classifyMessage(HACKERRANK_RECEIPT);
+  const decision = classifyMessage(HACKERRANK_RECEIPT, null);
   // A receipt.
   assert.equal(decision.classification, "application_received");
   // Which moves nothing.
@@ -966,14 +966,14 @@ test("receipt: HackerRank's 'we have received your application' is application_r
 
 test("receipt control: a real HackerRank test invitation stays oa_invite", () => {
   // No receipt wording; a direct invitation with the test link.
-  const decision = classifyMessage({ from: "HackerRank <support@hackerrankforwork.com>", subject: "Acme has invited you to take a test", snippet: "Hi Teja, Acme has invited you to complete your HackerRank assessment for the Backend Engineer role. Start the test: https://www.hackerrank.com/tests/abc123/login" });
+  const decision = classifyMessage({ from: "HackerRank <support@hackerrankforwork.com>", subject: "Acme has invited you to take a test", snippet: "Hi Teja, Acme has invited you to complete your HackerRank assessment for the Backend Engineer role. Start the test: https://www.hackerrank.com/tests/abc123/login" }, null);
   // Still an assessment invite.
   assert.equal(decision.classification, "oa_invite");
 });
 
 test("receipt control: a receipt that ALSO invites to the assessment stays oa_invite", () => {
   // Receipt wording plus a direct invitation: the invitation is the news.
-  const decision = classifyMessage({ from: "Acme Careers <careers@acme.com>", subject: "Thank you for applying to Acme", snippet: "Thank you for applying. As the next step, please complete your HackerRank assessment within 5 days: https://www.hackerrank.com/tests/xyz/login" });
+  const decision = classifyMessage({ from: "Acme Careers <careers@acme.com>", subject: "Thank you for applying to Acme", snippet: "Thank you for applying. As the next step, please complete your HackerRank assessment within 5 days: https://www.hackerrank.com/tests/xyz/login" }, null);
   // The invitation wins.
   assert.equal(decision.classification, "oa_invite");
 });
@@ -1004,4 +1004,89 @@ test("careers suffix: two companies the label could name is ambiguous, so no mat
   const id = matchApplication({ from: "x@acmecareers.com", subject: "Update", snippet: "" }, "acmecareers.com", [app("a1", "acme"), app("a2", "acmecareers")]);
   // Never a guess.
   assert.equal(id, null);
+});
+
+// ---- 2026-11-12: the owner's own mail, and the receipts that stayed unclassified ----------------
+// Live on 2026-11-12: 3 of 5 stored rejections were Teja's own replies in the HackerRank thread (the
+// Apps Script sends every message of a matched thread, and his reply quotes the employer's text), and
+// 6 genuine ATS receipts sat in `unclassified` because their wording matched no receipt pattern.
+
+// The owner's address as APP_USER_EMAIL holds it.
+const OWNER = "tejamallam00@gmail.com";
+// Teja's reply, shaped like live row 06aaeec1: his words, then the quoted rejection beneath.
+const OWNER_REPLY = {
+  // His display name and address, as Gmail's getFrom() returns it.
+  from: "Teja Mallam <tejamallam00@gmail.com>",
+  // The thread's subject with "Re:".
+  subject: "Re: Thank you for your interest in HackerRank || AI Researcher Intern",
+  // His reply, then the quoted employer mail that carries the 0.95 rejection phrase.
+  snippet: "Dear HackerRank Talent Acquisition Team, thank you for reviewing my application. On Fri, Nov 7, HackerRank wrote: unfortunately we will not be moving forward with your application.",
+};
+
+test("owner-sent: the owner's own reply quoting a rejection is never a rejection", () => {
+  // Classified knowing who the owner is, as the intake now does.
+  const decision = classifyMessage(OWNER_REPLY, OWNER);
+  // Never an employer verdict: unclassified maps to no status.
+  assert.equal(decision.classification, "unclassified");
+  // And the reason is recorded, so the row is not mistaken for a classifier miss.
+  assert.deepEqual(decision.matchedSignals, ["owner_sent"]);
+});
+
+test("owner-sent control: the same text from the employer IS a rejection (the fixture really carries one)", () => {
+  // Without this, the test above could pass on a fixture no classifier would call a rejection.
+  assert.equal(classifyMessage({ ...OWNER_REPLY, from: "HackerRank <no-reply@hackerrank.com>" }, OWNER).classification, "rejection");
+});
+
+test("owner-sent: the address is compared case-insensitively, and a bare address counts", () => {
+  // Gmail may print the address bare, and in any case.
+  assert.deepEqual(classifyMessage({ ...OWNER_REPLY, from: "TejaMallam00@Gmail.com" }, OWNER).matchedSignals, ["owner_sent"]);
+});
+
+test("owner-sent: the owner's address in a DISPLAY NAME does not make mail owner-sent", () => {
+  // A display name is anyone's text; only the bracketed address counts, so this stays the rejection it is.
+  assert.equal(classifyMessage({ ...OWNER_REPLY, from: '"tejamallam00@gmail.com" <hr@acme.com>' }, OWNER).classification, "rejection");
+});
+
+test("owner-sent: an owner-sent row is stored blanked, like every unclassified unmatched row", () => {
+  // The owner's own mail includes forwarded security alerts and codes: their text must not be kept.
+  const decision = classifyMessage(OWNER_REPLY, OWNER);
+  // The stored row for it, unmatched.
+  const row = receipt.emailEventRowOf({ message_id: "m-own", thread_id: "t", from: OWNER_REPLY.from, to: "no-reply@hackerrank.com", subject: OWNER_REPLY.subject, snippet: OWNER_REPLY.snippet, received_at: "2026-11-07T17:55:25Z", label_ids: [] }, decision, null, "2026-11-12T10:00:00Z");
+  // Body blanked.
+  assert.equal(row.snippet, "");
+});
+
+test("owner-sent: re-match re-reads a stored owner reply as unclassified, never as the rejection it quotes", () => {
+  // Stored like live 06aaeec1 (it carries its body: it was stored as a rejection, so never blanked).
+  const stored = { id: "e-own", matched_application_id: null, from_address: OWNER_REPLY.from, subject: OWNER_REPLY.subject, snippet: OWNER_REPLY.snippet, received_at: "2026-11-07T17:55:25+00:00" };
+  // The HackerRank row it would match, approved before the email.
+  const links = receipt.rematchUnmatched([stored], [poolApp("hr-1", "applied", "hackerrank", "AI Researcher Intern")], new Map([["hr-1", "2026-11-03T10:00:00.000Z"]]), OWNER);
+  // Linked (it is in that thread), with the corrected verdict, which the link write stores.
+  assert.deepEqual(links.map((l) => l.verdict?.classification), ["unclassified"]);
+});
+
+// The live receipt wordings no pattern matched (2026-11-12), by subject, each with its real sender.
+const MISSED_RECEIPTS = [
+  // Lever (Gushwork f09dd17e, Acron Aviation caa9bdff).
+  { from: "Gushwork <no-reply@hire.lever.co>", subject: "Thank you for your application to Gushwork", snippet: "" },
+  // Workday (Fiserv f16da394).
+  { from: "Workday fiserv <fiserv@myworkday.com>", subject: "Thank you for your application with Fiserv!", snippet: "" },
+  // Workday (NIKE 5e92f7f5).
+  { from: "NIKE <nike@myworkday.com>", subject: "You have successfully applied to NIKE!", snippet: "" },
+  // Workday (HPE c43ef548).
+  { from: "Hewlett Packard Enterprise <hpe@myworkday.com>", subject: "Thank you for your online submission", snippet: "" },
+  // Recruitee (Bromcom 9ab2b073).
+  { from: "Bromcom Computers Plc <no-reply@recruitee.com>", subject: "SQL Developer - Confirmation of your application", snippet: "" },
+];
+
+test("receipts: every live receipt wording that stayed unclassified now reads as application_received", () => {
+  // Each one, named in the failure.
+  for (const message of MISSED_RECEIPTS) assert.equal(classifyMessage(message, OWNER).classification, "application_received", message.subject);
+});
+
+test("receipts control: 'thank you for your application' followed by a rejection is still a rejection", () => {
+  // The common rejection opening: the strong rejection rule decides before any receipt reading.
+  const message = { from: "Acme <no-reply@hire.lever.co>", subject: "Thank you for your application to Acme", snippet: "Thank you for your application to Acme. Unfortunately, we will not be moving forward with your candidacy." };
+  // Rejection, not a receipt.
+  assert.equal(classifyMessage(message, OWNER).classification, "rejection");
 });

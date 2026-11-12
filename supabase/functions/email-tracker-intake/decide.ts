@@ -113,11 +113,28 @@ const OUT_OF_OFFICE = /\b(?:out\s+of\s+(?:the\s+)?office|automatic\s+reply|auto-
 // 2026-10-23 a receipt maps to no status at all): a rejection advanced the application.
 // Now: out-of-office first (never advances), then real outcomes, and the receipt reading
 // only when no outcome matched.
-export function classifyMessage(message: DecidableMessage): MessageDecision {
+//
+// OWNER-SENT FIRST (2026-11-12). The Apps Script sends EVERY message of a matched thread, the
+// owner's own replies included, and a reply quotes the recruiter's mail below it ("On Mon, Acme
+// wrote: ... we will not be moving forward"). Classified like inbound mail, Teja's own reply was
+// stored as a `rejection` (live, 2026-11-12). Mail FROM the owner says nothing an employer
+// decided, so it is `unclassified` (maps to no status) before any phrase is read. Unclassified,
+// NOT `other`: emailEventRowOf blanks only unclassified unmatched rows, and the owner's own mail
+// includes forwarded security alerts and verification codes (16 live rows on 2026-11-12), whose
+// text must not be stored. The `owner_sent` signal is what says why. `ownerEmail` is
+// required, not optional: a default would let a caller skip this check by omission (CLAUDE.md §6).
+// null = owner unknown (the intake cannot sign in without it, so only tests pass null).
+export function classifyMessage(message: DecidableMessage, ownerEmail: string | null): MessageDecision {
   // Parse once; the classifier and the matcher both read the result.
   const parsed = parseEmail({ subject: message.subject, body: message.snippet, sender: message.from });
   // Shared fields every branch returns.
   const senderDomain = parsed.extractedCompanyDomain;
+  // The owner's own message: the same address test the receipt check runs on To, here on From
+  // (bracketed addr-spec only when brackets exist, so a display name can't impersonate).
+  if (addressedTo(message.from, ownerEmail)) {
+    // Fixed confidence: an exact address match, not a phrase guess.
+    return { classification: "unclassified", confidence: 1, matchedSignals: ["owner_sent"], reasoning: "Sent by the owner; quoted employer text never classifies the owner's own mail.", senderDomain };
+  }
   // Out-of-office: stored as `other`, which maps to no status.
   if (OUT_OF_OFFICE.test(`${parsed.cleanSubject} ${parsed.cleanBody}`)) {
     // Fixed confidence: the pattern is explicit.
@@ -398,6 +415,8 @@ export function rematchUnmatched(
   applications: readonly ActiveApplication[],
   // Each application's FIRST entry into `approved`, as the database's ISO text.
   firstApprovedAt: ReadonlyMap<string, string>,
+  // The owner's address, so a re-classified stored row of the owner's own mail stays `other` (classifyMessage).
+  ownerEmail: string | null,
 ): RematchLink[] {
   // The links to write.
   const links: RematchLink[] = [];
@@ -428,7 +447,7 @@ export function rematchUnmatched(
     // No owner (or several): nothing to link, so nothing to re-classify either.
     if (applicationId === null) continue;
     // The same classifier the ingest path runs, on the same three fields it read (as stored now); never on a blanked body.
-    const decision = email.snippet === "" ? null : classifyMessage(message);
+    const decision = email.snippet === "" ? null : classifyMessage(message, ownerEmail);
     // Exactly one owner, with the verdict to store beside the link (or none: the stored one stands).
     links.push({ eventId: email.id, applicationId, verdict: decision === null ? null : { classification: decision.classification, confidence: decision.confidence } });
   }

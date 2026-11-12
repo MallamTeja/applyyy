@@ -190,6 +190,17 @@ const AUTO_REPLY_PATTERNS: readonly RegExp[] = [
   // (2026-11-04) said "We’ve Received Your Application" and went unclassified under "we have" alone.
   /\bwe(?:\s+have|['’]ve)\s+received\s+your\s+application\b/i,
   /\bapplication\s+confirmation\b/i,
+  // LIVE RECEIPT WORDINGS THAT STAYED UNCLASSIFIED (2026-11-12, 6 rows): Lever/Workday "Thank you for your
+  // application to|with X", Workday "You have successfully applied", Workday (HPE) "Thank you for your online
+  // submission", Recruitee "Confirmation of your application". Safe beside rejections that open the same way:
+  // classifyEmail reads the receipt flag only AFTER its strong-rejection rule (decide.test.ts "receipts control").
+  /\bthank\s+you\s+for\s+your\s+application\b/i,
+  // "successfully applied" (Workday's subject); "have" is optional so "You've successfully applied" matches too.
+  /\bsuccessfully\s+applied\b/i,
+  // "online" optional: the bare "thank you for your submission" is the same acknowledgement.
+  /\bthank\s+you\s+for\s+your\s+(?:online\s+)?submission\b/i,
+  // Recruitee's subject suffix.
+  /\bconfirmation\s+of\s+your\s+application\b/i,
   /\bout\s+of\s+office\b/i,
   /\bautomatic\s+reply\b/i,
   /\bauto-reply\b/i,

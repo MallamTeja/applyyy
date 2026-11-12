@@ -121,7 +121,7 @@ test("W6: a stored rejection whose move never happened is re-driven", async () =
   // The kill-switch-paused (or refused) move from an earlier call.
   const { db, calls } = fakeDb({ apps: { data: [APPLIED], error: null }, emails: { data: [STORED_REJECTION], error: null } });
   // Switch on.
-  const result = await replayStoredMoves(db, true, NO_LIVE);
+  const result = await replayStoredMoves(db, true, NO_LIVE, null);
   // Moved once, nothing wrong.
   assert.deepEqual(result, { moved: 1, errors: [] });
   // Through the one correct RPC, as the tracker, to the mapped status.
@@ -149,7 +149,7 @@ test("W6: a fresh email's move keeps its classifier evidence in the detail", asy
   // Same rows as above.
   const { db, calls } = fakeDb({ apps: { data: [APPLIED], error: null }, emails: { data: [STORED_REJECTION], error: null } });
   // Switch on.
-  await replayStoredMoves(db, true, live);
+  await replayStoredMoves(db, true, live, null);
   // The note shape the first-try path always wrote.
   const detail = calls.rpc[0]!.p_detail as Record<string, unknown>;
   // Signals and reasoning ride along.
@@ -160,7 +160,7 @@ test("W6: an email the tracker already moved on is not moved again", async () =>
   // The tracker's note for m1 exists: the move committed.
   const { db, calls } = fakeDb({ apps: { data: [APPLIED], error: null }, emails: { data: [STORED_REJECTION], error: null }, notes: { data: [{ provider_message_id: "m1" }], error: null } });
   // Switch on.
-  const result = await replayStoredMoves(db, true, NO_LIVE);
+  const result = await replayStoredMoves(db, true, NO_LIVE, null);
   // Nothing to do, nothing wrong.
   assert.deepEqual(result, { moved: 0, errors: [] });
   // No RPC at all.
@@ -171,7 +171,7 @@ test("W6: a refused move is a run error, not a log line", async () => {
   // The database refuses (e.g. 42501 without the agent key, or a concurrent move).
   const { db } = fakeDb({ apps: { data: [APPLIED], error: null }, emails: { data: [STORED_REJECTION], error: null }, rpcError: { message: "agent tracker requires a valid x-applyy-agent-key header" } });
   // Switch on.
-  const result = await replayStoredMoves(db, true, NO_LIVE);
+  const result = await replayStoredMoves(db, true, NO_LIVE, null);
   // Not moved.
   assert.equal(result.moved, 0);
   // Counted, so Health shows "succeeded with 1 error" instead of green.
@@ -184,13 +184,13 @@ test("W6: the kill switch off moves nothing; unreadable moves nothing and is an 
   // Off: a deliberate pause, so no error and no reads at all.
   const off = fakeDb({ apps: { data: [APPLIED], error: null }, emails: { data: [STORED_REJECTION], error: null } });
   // Off.
-  assert.deepEqual(await replayStoredMoves(off.db, false, NO_LIVE), { moved: 0, errors: [] });
+  assert.deepEqual(await replayStoredMoves(off.db, false, NO_LIVE, null), { moved: 0, errors: [] });
   // Not a single query or RPC.
   assert.deepEqual([off.calls.queries.length, off.calls.rpc.length], [0, 0]);
   // Unreadable: fail closed (no move) AND visible (an error).
   const unreadable = fakeDb({ apps: { data: [APPLIED], error: null }, emails: { data: [STORED_REJECTION], error: null } });
   // Null is "could not read".
-  const result = await replayStoredMoves(unreadable.db, null, NO_LIVE);
+  const result = await replayStoredMoves(unreadable.db, null, NO_LIVE, null);
   // No move, one error.
   assert.deepEqual([result.moved, result.errors.length, unreadable.calls.rpc.length], [0, 1, 0]);
 });
@@ -199,13 +199,13 @@ test("W6: unreadable or truncated move history never becomes 'move anyway'", asy
   // The notes read fails: every email would look pending, so nothing may move.
   const notesDown = fakeDb({ apps: { data: [APPLIED], error: null }, emails: { data: [STORED_REJECTION], error: null }, notes: { data: null, error: { message: "boom" } } });
   // Refused, with an error.
-  const a = await replayStoredMoves(notesDown.db, true, NO_LIVE);
+  const a = await replayStoredMoves(notesDown.db, true, NO_LIVE, null);
   // No RPC, one error.
   assert.deepEqual([a.moved, a.errors.length, notesDown.calls.rpc.length], [0, 1, 0]);
   // The stage-move read fails: a human move could make the email stale, so nothing may move.
   const stagesDown = fakeDb({ apps: { data: [APPLIED], error: null }, emails: { data: [STORED_REJECTION], error: null }, stageMoves: { data: null, error: { message: "boom" } } });
   // Refused, with an error.
-  const b = await replayStoredMoves(stagesDown.db, true, NO_LIVE);
+  const b = await replayStoredMoves(stagesDown.db, true, NO_LIVE, null);
   // No RPC, one error.
   assert.deepEqual([b.moved, b.errors.length, stagesDown.calls.rpc.length], [0, 1, 0]);
   // Review #3: a history read that fails on a LATER page is the same refusal, not "page 1 was enough".
@@ -215,7 +215,7 @@ test("W6: unreadable or truncated move history never becomes 'move anyway'", asy
   // Same rows plus that notes read.
   const truncated = fakeDb({ apps: { data: [APPLIED], error: null }, emails: { data: [STORED_REJECTION], error: null }, notes: secondPageDown });
   // Refused, with an error.
-  const c = await replayStoredMoves(truncated.db, true, NO_LIVE);
+  const c = await replayStoredMoves(truncated.db, true, NO_LIVE, null);
   // No RPC, one error naming the read.
   assert.deepEqual([c.moved, c.errors.length, truncated.calls.rpc.length], [0, 1, 0]);
 });
@@ -224,11 +224,11 @@ test("W6: an email for a needs_verification row waits, then moves once a human s
   // While the row sits in the human-review lane, the stored match is kept but not acted on.
   const waiting = fakeDb({ apps: { data: [{ id: "a1", status: "needs_verification" }], error: null }, emails: { data: [STORED_REJECTION], error: null } });
   // No move, and waiting is not an error.
-  assert.deepEqual(await replayStoredMoves(waiting.db, true, NO_LIVE), { moved: 0, errors: [] });
+  assert.deepEqual(await replayStoredMoves(waiting.db, true, NO_LIVE, null), { moved: 0, errors: [] });
   // Teja verified the submit and set applied: the next run applies the rejection.
   const resolved = fakeDb({ apps: { data: [APPLIED], error: null }, emails: { data: [STORED_REJECTION], error: null } });
   // Moved.
-  assert.deepEqual(await replayStoredMoves(resolved.db, true, NO_LIVE), { moved: 1, errors: [] });
+  assert.deepEqual(await replayStoredMoves(resolved.db, true, NO_LIVE, null), { moved: 1, errors: [] });
   // To rejected.
   assert.equal(resolved.calls.rpc[0]!.p_to_status, "rejected");
 });
@@ -239,7 +239,7 @@ test("W6: a full replay window is reported, so a backlog is never silent", async
   // Shape-invalid rows: they also prove a malformed row is skipped, not moved.
   const { db, calls } = fakeDb({ apps: { data: [APPLIED], error: null }, emails: { data: page, error: null } });
   // Switch on.
-  const result = await replayStoredMoves(db, true, NO_LIVE);
+  const result = await replayStoredMoves(db, true, NO_LIVE, null);
   // One error naming the window, and nothing moved.
   assert.deepEqual([result.moved, result.errors.length, calls.rpc.length], [0, 1, 0]);
   // The message says what happened.
@@ -261,7 +261,7 @@ test("Review #3: tracked ids are sent in bounded chunks that together cover ever
   // Nothing stored: only the reads matter here.
   const { db, calls } = fakeDb({ apps: { data: rows, error: null } });
   // Switch on.
-  const result = await replayStoredMoves(db, true, NO_LIVE);
+  const result = await replayStoredMoves(db, true, NO_LIVE, null);
   // Nothing to move, nothing wrong.
   assert.deepEqual(result, { moved: 0, errors: [] });
   // Every id-scoped filter the sweep sent, per read.
@@ -281,7 +281,7 @@ test("Review #3: a done-marker on the second history page is honoured, not refus
   // The stored rejection whose move already committed.
   const { db, calls } = fakeDb({ apps: { data: [APPLIED], error: null }, emails: { data: [STORED_REJECTION], error: null }, notes: { data: notes, error: null } });
   // Switch on.
-  const result = await replayStoredMoves(db, true, NO_LIVE);
+  const result = await replayStoredMoves(db, true, NO_LIVE, null);
   // Not refused (the old cap), and not moved again (page 2 was read).
   assert.deepEqual([result, calls.rpc.length], [{ moved: 0, errors: [] }, 0]);
 });
@@ -292,7 +292,7 @@ test("Review #3: a history longer than the page cap is refused, never read forev
   // A pending email beside it.
   const { db, calls } = fakeDb({ apps: { data: [APPLIED], error: null }, emails: { data: [STORED_REJECTION], error: null }, notes: { data: huge, error: null } });
   // Switch on.
-  const result = await replayStoredMoves(db, true, NO_LIVE);
+  const result = await replayStoredMoves(db, true, NO_LIVE, null);
   // Fail closed: no move, one error.
   assert.deepEqual([result.moved, result.errors.length, calls.rpc.length], [0, 1, 0]);
 });
@@ -309,7 +309,7 @@ test("Review #3: an email outside the first id chunk is still replayed, oldest f
   // Both stored.
   const { db, calls } = fakeDb({ apps: { data: rows, error: null }, emails });
   // Switch on.
-  const result = await replayStoredMoves(db, true, NO_LIVE);
+  const result = await replayStoredMoves(db, true, NO_LIVE, null);
   // Both moved: an email outside the first chunk is not lost.
   assert.deepEqual(result, { moved: 2, errors: [] });
   // Oldest first, the order the employer sent them.
@@ -334,7 +334,7 @@ test("links a stored unmatched email once its company's row enters a tracked sta
   // The live Bjak state.
   const { db, calls } = fakeDb({ apps: { data: [BJAK_ROW], error: null }, approvals: { data: [BJAK_APPROVED], error: null }, emails: unmatchedOnly });
   // Switch on.
-  const result = await replayStoredMoves(db, true, NO_LIVE);
+  const result = await replayStoredMoves(db, true, NO_LIVE, null);
   // Nothing moved, nothing wrong.
   assert.deepEqual(result, { moved: 0, errors: [] });
   // Exactly one write: the link, guarded so a row matched meanwhile is never re-pointed.
@@ -358,7 +358,7 @@ test("a re-match re-runs the classifier on the re-linked email", async () => {
   // Only the unmatched read sees the stale row, as with Bjak above.
   const { db, calls } = fakeDb({ apps: { data: [HACKERRANK_ROW], error: null }, approvals: { data: [HACKERRANK_APPROVED], error: null }, emails: (filters) => ({ data: filters["is:matched_application_id"] === null ? [HACKERRANK_STALE] : [], error: null }) });
   // Switch on.
-  const result = await replayStoredMoves(db, true, NO_LIVE);
+  const result = await replayStoredMoves(db, true, NO_LIVE, null);
   // Linked cleanly.
   assert.deepEqual(result, { moved: 0, errors: [] });
   // The one write.
@@ -373,7 +373,7 @@ test("re-match: a link write that fails is a run error, never a crash", async ()
   // Same state; the UPDATE is refused.
   const { db } = fakeDb({ apps: { data: [BJAK_ROW], error: null }, approvals: { data: [BJAK_APPROVED], error: null }, emails: unmatchedOnly, updateError: { message: "permission denied" } });
   // Switch on.
-  const result = await replayStoredMoves(db, true, NO_LIVE);
+  const result = await replayStoredMoves(db, true, NO_LIVE, null);
   // Counted on the run row, naming the email and the reason.
   assert.deepEqual([result.moved, result.errors.length], [0, 1]);
   // Named.
@@ -388,7 +388,7 @@ test("replay: the applications read orders by created_at, then id as the unique 
   // One tracked row is enough to make the read run; nothing else is under test here.
   const { db, calls } = fakeDb({ apps: { data: [APPLIED], error: null } });
   // Switch on, so the sweep reads at all.
-  await replayStoredMoves(db, true, NO_LIVE);
+  await replayStoredMoves(db, true, NO_LIVE, null);
   // Every page of the applications read, in the order they were sent.
   const appReads = calls.queries.filter((q) => q.table === "applications");
   // Paged until empty: page 1 holds the row, page 2 proves the read is complete.
