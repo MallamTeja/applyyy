@@ -185,7 +185,12 @@
   /* Metadata footer showing provider message id and link info */
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  /* Actions grouped on the right (2026-11-12): space-between floated "Mark read" into the middle of a three-item row. */
+  justify-content: flex-end;
+  /* Room between the action buttons. */
+  gap: var(--gap-2);
+  /* A phone wraps the buttons under the state text instead of squeezing them. */
+  flex-wrap: wrap;
   font-size: var(--size-xs);
   color: var(--ink-muted);
   border-top: 1px solid var(--rule);
@@ -420,4 +425,288 @@
   color: var(--ink-muted);
   /* A little space above, none around. */
   margin: var(--gap-1) 0 0 0;
+}
+
+/* ---- INSIGHTS PANEL (Teja, 2026-11-12 12:41: "more anyticks, numbers abt my mails ... more good uiux") ----------
+   Semantic tokens only (docs/ui/theming-convention.md): no colour under a [data-theme] selector. --accent is the app's
+   one data colour (the Skill gap bars use it too); --traced / --fabricated colour the good / bad outcome figures. */
+.email-insights {
+  /* A card like the stat cards, so the panel reads as part of the dashboard. */
+  background: var(--sheet);
+  /* The hairline every card here uses. */
+  border: 1px solid var(--rule);
+  /* The sheet radius. */
+  border-radius: var(--radius-sheet);
+  /* Inner room. */
+  padding: var(--gap-3) var(--gap-4);
+  /* Space before the toolbar below. */
+  margin-bottom: var(--gap-4);
+}
+
+/* The toggle row: the title, then what the numbers cover. */
+.email-insights__summary {
+  /* Title and note on one baseline, wrapping on a phone. */
+  display: flex;
+  /* Wraps instead of overflowing. */
+  flex-wrap: wrap;
+  /* Baseline-aligned text. */
+  align-items: baseline;
+  /* Gap between title and note. */
+  gap: var(--gap-2);
+  /* It is a control. */
+  cursor: pointer;
+}
+
+/* The panel's name. */
+.email-insights__title {
+  /* A section heading's weight. */
+  font-weight: 700;
+  /* Base size. */
+  font-size: var(--size-base);
+  /* Primary text. */
+  color: var(--text-primary);
+}
+
+/* "152 emails since 9 Sept 2026". */
+.email-insights__note {
+  /* Secondary. */
+  font-size: var(--size-xs);
+  /* Muted. */
+  color: var(--text-muted);
+}
+
+/* The six headline figures: a responsive grid, 2 per row on a phone. */
+.email-insights__figures {
+  /* Grid of equal tiles. */
+  display: grid;
+  /* As many 120px+ tiles as fit. */
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  /* Tile gap. */
+  gap: var(--gap-2);
+  /* Below the summary. */
+  margin: var(--gap-3) 0;
+}
+
+/* One figure tile. */
+.email-insights__figure {
+  /* The recessed surface, so tiles sit inside the card. */
+  background: var(--panel);
+  /* Small radius. */
+  border-radius: var(--radius-control);
+  /* Inner room. */
+  padding: var(--gap-2) var(--gap-3);
+}
+
+/* The figure's name. */
+.email-insights__figure-label {
+  /* Small, muted, the stat-card label voice. */
+  font-size: var(--size-2xs);
+  /* Muted. */
+  color: var(--text-muted);
+  /* Same as the stat cards. */
+  text-transform: uppercase;
+  /* Readable caps. */
+  letter-spacing: 0.04em;
+}
+
+/* The figure's value. */
+.email-insights__figure-value {
+  /* <dd> indents by default. */
+  margin: 2px 0 0 0;
+  /* Large. */
+  font-size: var(--size-lg);
+  /* Bold. */
+  font-weight: 700;
+  /* Primary. */
+  color: var(--text-primary);
+}
+
+/* An interview or offer count above zero. */
+.email-insights__figure-value--good {
+  /* The success token. */
+  color: var(--traced);
+}
+
+/* A rejection count above zero. */
+.email-insights__figure-value--bad {
+  /* The danger token. */
+  color: var(--fabricated);
+}
+
+/* The three breakdown cards: side by side on a wide screen, stacked on a phone. */
+.email-insights__grid {
+  /* Grid. */
+  display: grid;
+  /* 260px+ columns, so a phone gets one. */
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  /* Card gap. */
+  gap: var(--gap-3);
+}
+
+/* One breakdown card. */
+.email-insights__card {
+  /* The hairline. */
+  border: 1px solid var(--rule);
+  /* Control radius. */
+  border-radius: var(--radius-control);
+  /* Inner room. */
+  padding: var(--gap-2) var(--gap-3);
+  /* Lets a long label shrink inside its grid track. */
+  min-width: 0;
+}
+
+/* The card's title. */
+.email-insights__card-title {
+  /* Small heading. */
+  font-size: var(--size-sm);
+  /* Semi-bold. */
+  font-weight: 600;
+  /* Secondary text. */
+  color: var(--text-secondary);
+  /* Tight. */
+  margin: 0 0 var(--gap-2) 0;
+}
+
+/* "No job emails yet." */
+.email-insights__empty {
+  /* Small. */
+  font-size: var(--size-xs);
+  /* Muted. */
+  color: var(--text-muted);
+  /* No paragraph margin. */
+  margin: 0;
+}
+
+/* The bar list. */
+.email-bars {
+  /* A plain list. */
+  list-style: none;
+  /* No indent. */
+  padding: 0;
+  /* No margin. */
+  margin: 0;
+  /* Rows stacked. */
+  display: flex;
+  /* Vertical. */
+  flex-direction: column;
+  /* Row gap. */
+  gap: 6px;
+}
+
+/* One bar row: label | track | count. */
+.email-bar {
+  /* Three columns: a label column, the flexible track, the count. */
+  display: grid;
+  /* Label up to 45% of the row, the track takes the rest, the count its own width. */
+  grid-template-columns: minmax(0, 45%) 1fr auto;
+  /* Centred vertically. */
+  align-items: center;
+  /* Column gap. */
+  gap: var(--gap-2);
+  /* Small text. */
+  font-size: var(--size-xs);
+}
+
+/* The label, clipped with an ellipsis (the full text is its title). */
+.email-bar__label {
+  /* Secondary text. */
+  color: var(--text-secondary);
+  /* One line. */
+  white-space: nowrap;
+  /* Clip. */
+  overflow: hidden;
+  /* With an ellipsis. */
+  text-overflow: ellipsis;
+}
+
+/* The track. */
+.email-bar__track {
+  /* The recessed surface. */
+  background: var(--panel);
+  /* A slim bar. */
+  height: 8px;
+  /* Rounded. */
+  border-radius: 4px;
+  /* The fill never pokes out. */
+  overflow: hidden;
+}
+
+/* The fill: width is set inline from the data. */
+.email-bar__fill {
+  /* Block so width applies. */
+  display: block;
+  /* Full track height. */
+  height: 100%;
+  /* The app's data colour. */
+  background: var(--accent);
+  /* Rounded like the track. */
+  border-radius: 4px;
+}
+
+/* The count, beside the bar. */
+.email-bar__count {
+  /* Primary text. */
+  color: var(--text-primary);
+  /* Bold. */
+  font-weight: 600;
+  /* Digits line up down the column. */
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- CARD UX (2026-11-12) -------------------------------------------------------------------------------- */
+
+/* The tracking state ("Tracked: Canonical", "Not tracked") stays left; the actions sit right. */
+.email-card__meta > :first-child {
+  /* Takes the free space, pushing the buttons to the right edge. */
+  margin-right: auto;
+}
+
+/* A long body excerpt, clamped to three lines until "Show more". */
+.email-card__snippet--clamped {
+  /* The standard line clamp (supported by every engine the app targets). */
+  display: -webkit-box;
+  /* Three lines. */
+  -webkit-line-clamp: 3;
+  /* The unprefixed property, for engines that have it. */
+  line-clamp: 3;
+  /* Vertical box. */
+  -webkit-box-orient: vertical;
+  /* Hide the rest. */
+  overflow: hidden;
+}
+
+/* "Show more" / "Show less": a text button, the link voice. */
+.email-card__more {
+  /* No button chrome. */
+  background: none;
+  /* No border. */
+  border: none;
+  /* Aligned with the text. */
+  padding: 0;
+  /* Small. */
+  font-size: var(--size-xs);
+  /* The interactive colour. */
+  color: var(--accent);
+  /* A control. */
+  cursor: pointer;
+  /* Space above. */
+  margin-top: 2px;
+}
+
+/* Keyboard focus is visible. */
+.email-card__more:focus-visible {
+  /* The accent ring. */
+  outline: 2px solid var(--accent);
+  /* Off the text. */
+  outline-offset: 2px;
+}
+
+/* The owner's own mail: a neutral badge, never a status colour. */
+.email-badge--owner {
+  /* The recessed surface. */
+  background: var(--panel);
+  /* Secondary text. */
+  color: var(--text-secondary);
+  /* The hairline. */
+  border: 1px solid var(--rule);
 }

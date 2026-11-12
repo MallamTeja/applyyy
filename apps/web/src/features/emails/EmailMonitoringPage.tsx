@@ -62,6 +62,8 @@ import {
   CLASS_FILTER_OPTIONS,
   companySlugOf,
   filtersToParams,
+  // IST received-time wording for each card (2026-11-12).
+  formatReceivedAt,
   isTrackable,
   parseEmailFilters,
   parseLinkCandidates,
@@ -73,6 +75,12 @@ import {
 
 // The page's styles.
 import './EmailMonitoringPage.css';
+// The signed-in user, whose address marks owner-sent mail (2026-11-12).
+import { useAuth } from '../../data/useAuth.ts';
+// The Insights panel and its pure figures (Teja, 2026-11-12 12:41: "more anyticks, numbers abt my mails").
+import { EmailInsights } from './EmailInsights.tsx';
+// The figures, the owner-sent test and the employer name, all unit-tested in test/emailStats.test.ts.
+import { computeEmailStats, isOwnerSent } from './emailStats.ts';
 
 // ISO timestamp shape as PostgREST writes timestamptz; Date.parse alone would accept '-5'.
 const ISO_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
@@ -165,9 +173,20 @@ export function EmailRow(props: {
   readonly onCancelTrack: () => void;
   // The confirmed call; only InlineConfirm's Confirm reaches it.
   readonly onTrack: () => void;
+  // True when the owner sent this mail (a reply or forward): badged "Sent by you", never offered to Applied (2026-11-12).
+  readonly ownerSent?: boolean;
+  // The tracked application's company, when looked up; the card names it instead of a bare id (2026-11-12).
+  readonly trackedCompany?: string | null;
 }): ReactElement {
   // Destructured for readability.
   const { event, locked, note, draft, links } = props;
+  // The body excerpt starts clamped to three lines; "Show more" opens it (2026-11-12: full 4 KB bodies made the
+  // list a wall of text). UI-only state, so the component still renders statically from props.
+  const [expanded, setExpanded] = useState<boolean>(false);
+  // Long enough to need the toggle: a short excerpt is shown whole with no button.
+  const longSnippet = event.snippet.trim().length > 280;
+  // When received, in IST wording ("12 Nov 2026, 1:19 am"), the format the other pages use.
+  const receivedAt = formatReceivedAt(event.received_at);
   // The Gmail permalink, built from the stored id (encoded: it is untrusted text).
   const gmailHref = `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(event.provider_message_id)}`;
   // Unread in the app.
@@ -191,10 +210,16 @@ export function EmailRow(props: {
           <a href={gmailHref} target="_blank" rel="noopener noreferrer" className="email-card__gmail-button" title="Open email thread in Gmail">
             Open in Gmail<NewTabCue />
           </a>
-          {/* THE FIX: the stored class through the closed label map, never a hard-coded kind. */}
-          <span className={`email-badge email-badge--${classBadgeTone(event.classification)}`}>{classLabel(event.classification)}</span>
-          {/* Local time. */}
-          <span className="email-card__time">{new Date(event.received_at).toLocaleString()}</span>
+          {/* Owner mail says so; anything else shows its stored class through the closed label map. */}
+          {props.ownerSent === true ? (
+            /* The owner's own reply or forward, never an employer's answer. */
+            <span className="email-badge email-badge--owner">Sent by you</span>
+          ) : (
+            /* THE FIX: the stored class through the closed label map, never a hard-coded kind. */
+            <span className={`email-badge email-badge--${classBadgeTone(event.classification)}`}>{classLabel(event.classification)}</span>
+          )}
+          {/* When, as a machine-readable <time> with en-IN wording. */}
+          <time className="email-card__time" dateTime={event.received_at}>{receivedAt}</time>
         </div>
       </div>
 
@@ -206,15 +231,33 @@ export function EmailRow(props: {
           {event.subject.trim() !== '' ? event.subject : '(subject not kept)'}
         </a>
       </h2>
-      {/* The body excerpt, when kept. */}
-      {event.snippet.trim() !== '' ? <p className="email-card__snippet">{event.snippet}</p> : null}
+      {/* The body excerpt, when kept: clamped to three lines until opened. */}
+      {event.snippet.trim() !== '' ? (
+        /* The text and its toggle together. */
+        <div className="email-card__body">
+          {/* The clamp class is dropped once opened. */}
+          <p className={longSnippet && !expanded ? 'email-card__snippet email-card__snippet--clamped' : 'email-card__snippet'} id={`email-snippet-${event.id}`}>{event.snippet}</p>
+          {/* Only a long excerpt gets the toggle; aria-expanded tells a screen reader its state. */}
+          {longSnippet ? (
+            /* type=button: never a form submit. */
+            <button type="button" className="email-card__more" aria-expanded={expanded} aria-controls={`email-snippet-${event.id}`} onClick={() => setExpanded((v) => !v)}>
+              {expanded ? 'Show less' : 'Show more'}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* Tracking state and the row's actions. */}
       <div className="email-card__meta">
         {/* Linked or not, in words. */}
         {event.matched_application_id !== null ? (
-          /* The application's short id. */
-          <span className="email-card__tracked">Tracked: application <code className="identifier">{event.matched_application_id.slice(0, 8)}</code></span>
+          /* The company when known, else the application's short id (the lookup failed or is still loading). */
+          <span className="email-card__tracked">
+            {props.trackedCompany ? <>Tracked: {props.trackedCompany}</> : <>Tracked: application <code className="identifier">{event.matched_application_id.slice(0, 8)}</code></>}
+          </span>
+        ) : props.ownerSent === true ? (
+          /* The owner's own mail is not something to track. */
+          <span>Your reply</span>
         ) : (
           /* The "Not tracked" state. */
           <span>Not tracked</span>
@@ -227,7 +270,7 @@ export function EmailRow(props: {
           </button>
         ) : null}
         {/* Add to Applied: only on unmatched mail about an application, and only while no form or candidate list is open. */}
-        {isTrackable(event) && draft === null && links === null ? (
+        {isTrackable(event) && props.ownerSent !== true && draft === null && links === null ? (
           /* Opens the form; writes nothing. */
           <button type="button" className="email-card__action" disabled={locked} aria-label={`Add to Applied: ${name}`} onClick={props.onOpenTrack}>
             Add to Applied
@@ -527,6 +570,49 @@ export function EmailMonitoringPage(): ReactElement {
     // Shown, then counted.
     return { jobMail: jobMail.length, unreadShown: unreadCount(shown), notTracked: jobMail.filter((e) => e.matched_application_id === null).length };
   }, [events, filters, shown]);
+  /* The signed-in user's address: owner-sent mail is recognised by it (the intake's owner_sent signal is not stored). */
+  const ownerEmail = useAuth().user?.email ?? '';
+  /* Each tracked email's application company, by application id: the Insights employer list and each card's
+     "Tracked: <Company>" read it. Looked up for the linked ids only; a failed read leaves the map empty (cards then
+     fall back to the short id, as before), never an error banner over the list. */
+  const [companyByApplication, setCompanyByApplication] = useState<ReadonlyMap<string, string>>(new Map());
+  // The linked ids, as one stable key so the lookup reruns only when the set changes.
+  const linkedKey = useMemo(() => [...new Set(events.flatMap((e) => (e.matched_application_id === null ? [] : [e.matched_application_id])))].sort().join(','), [events]);
+  useEffect(() => {
+    // No client or nothing linked: nothing to look up.
+    if (supabase === null || linkedKey === '') return;
+    // Ignores an answer that arrives after a newer lookup started or the page left.
+    let live = true;
+    // The applications' companies, under RLS; at most the 200 loaded emails' links.
+    void supabase.from('applications').select('id, jobs!inner(company_name)').in('id', linkedKey.split(',')).then(({ data, error: readError }) => {
+      // Stale or failed: keep what is shown.
+      if (!live || readError !== null || !Array.isArray(data)) return;
+      // Shape-checked row by row: a row without a string id and company is skipped, never guessed.
+      const map = new Map<string, string>();
+      for (const row of data as unknown[]) {
+        // Loose read, then checks.
+        const r = row as { id?: unknown; jobs?: unknown } | null;
+        // The join is an object, or a one-element array in the to-many shape.
+        const job = (Array.isArray(r?.jobs) ? r.jobs[0] : r?.jobs) as { company_name?: unknown } | null | undefined;
+        // Both strings, or skipped.
+        if (typeof r?.id === 'string' && typeof job?.company_name === 'string' && job.company_name.trim() !== '') map.set(r.id, job.company_name.trim());
+      }
+      // Shown.
+      setCompanyByApplication(map);
+    });
+    // Cleanup marks the answer stale.
+    return () => { live = false; };
+  }, [linkedKey]);
+  /* The Insights figures over every loaded email (not the filtered view): the panel describes the inbox, the list
+     below is what the filters keep. Eight IST weeks of trend, six top employers. */
+  const stats = useMemo(() => computeEmailStats(events, { ownerEmail, now: new Date(), companyByApplication, weeks: 8, topCompanies: 6 }), [events, ownerEmail, companyByApplication]);
+  /* What the figures cover, said in the panel: the page loads the newest 200 emails. */
+  // The earliest parseable received time, not the last row: the list order is the query's, never assumed here.
+  const oldestMs = Math.min(...events.map((e) => Date.parse(e.received_at)).filter((t) => !Number.isNaN(t)));
+  // Infinity when nothing parsed (or no rows): no date claimed.
+  const oldestLoaded = Number.isFinite(oldestMs) ? new Date(oldestMs).toISOString() : null;
+  /* "Since 9 Sept 2026", or nothing yet. */
+  const windowNote = oldestLoaded === null ? 'No emails loaded yet' : `${events.length} emails since ${new Date(oldestLoaded).toLocaleDateString('en-IN', { dateStyle: 'medium' })}`;
   /* "Last checked": the later of this visit's sync and the tracker's own newest run. */
   const lastCheckedMs = lastSyncedAt === null ? trackerRunMs : trackerRunMs === null ? lastSyncedAt : Math.max(lastSyncedAt, trackerRunMs);
 
@@ -711,6 +797,9 @@ export function EmailMonitoringPage(): ReactElement {
         </div>
       </div>
 
+      {/* Insights (2026-11-12): what the inbox says, by type, employer and week; collapsible. */}
+      <EmailInsights stats={stats} windowNote={windowNote} />
+
       {/* Search and the one sync control. */}
       <div className="email-monitor__toolbar">
         <input
@@ -821,6 +910,10 @@ export function EmailMonitoringPage(): ReactElement {
             <EmailRow
               key={event.id}
               event={event}
+              /* Owner mail is badged and never offered to Applied (2026-11-12). */
+              ownerSent={isOwnerSent(event.from_address, ownerEmail)}
+              /* The tracked application's company, or null until looked up. */
+              trackedCompany={event.matched_application_id === null ? null : companyByApplication.get(event.matched_application_id) ?? null}
               locked={busy.has(event.id)}
               note={notes[event.id] ?? null}
               draft={drafts[event.id] ?? null}

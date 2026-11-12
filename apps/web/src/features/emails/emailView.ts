@@ -199,6 +199,18 @@ export function applyEmailFilters(events: readonly EmailEventRow[], filters: Ema
     : time(b) - time(a));
 }
 
+/* A card's received time in IST, en-IN wording ("12 Nov 2026, 1:19 am"), the format Applied and Manual apply use.
+   Pinned to Asia/Kolkata (2026-11-12): the bare toLocaleString() printed the US "11/12/2026, 1:19:14 AM", and
+   whatever zone the browser had. An unparseable time reads as said, never as 1970. */
+export function formatReceivedAt(iso: string): string {
+  // Parsed once.
+  const at = Date.parse(iso);
+  // Not a time: said, not guessed.
+  if (Number.isNaN(at)) return 'Time unknown';
+  // Day, short month, year, then the clock, in IST.
+  return new Date(at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata' });
+}
+
 /* How many of these are unread in the app. */
 export function unreadCount(events: readonly EmailEventRow[]): number {
   // read_at is the app's own mark; Gmail's read state is never read or written.
