@@ -56,8 +56,11 @@ describe('masterAsResume carries cert and achievement links', () => {
   it('renders that link as a clickable anchor in the preview HTML', () => {
     // The full preview path: map, then the shared renderer.
     const html = renderResumeHtml(masterAsResume(storedMaster() as never, 9));
-    // Clickable, labelled.
-    assert.ok(html.includes('<a href="https://www.credly.com/badges/example">Credential</a>'));
+    // Clickable: since 2026-11-12 a cert's LONE link is its title anchor ("Name (Issuer)"),
+    // not a separate "Credential" line (Teja: "compress this, create more space").
+    assert.ok(html.includes('<a href="https://www.credly.com/badges/example">Machine Learning (IBM SkillsBuild)</a>'));
+    // And the separate link label no longer prints: that line is the space bought.
+    assert.equal(html.includes('>Credential</a>'), false);
   });
 
   it('maps an absent links key to [] on a v8-shaped cert and achievement', () => {

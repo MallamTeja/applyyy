@@ -285,6 +285,36 @@ body {
   /* Supporting detail; 9pt still extracts cleanly from Chromium's text layer. */
   font-size: 9pt;
 }
+
+/* COMPACT SPLIT (Teja, 2026-11-12: "compress this, create more space"). Inside the
+   achievements | certifications row an entry is one or two short lines, so the 2.8mm gap
+   sized for multi-bullet experience entries was most of each entry's height (5 certs =
+   5 gaps). page-fit.ts closes resume__entry with 1.2mm inside the split to match. */
+.resume__split .resume__entry {
+  /* Enough to separate two entries by eye; less than one 9pt line. */
+  margin-bottom: 1.2mm;
+}
+
+/* A title that is itself the entry's single credential/profile link (2026-11-12): the
+   same blue + underline as every other resume link, so it still reads as clickable. */
+.resume__entry-title a {
+  /* The shared link blue (see .resume__entry-subtitle a). */
+  color: #1155cc;
+  /* Underline survives a greyscale print. */
+  text-decoration: underline;
+}
+
+/* An achievement printed run-in, "Label: bullet text", one line (2026-11-12). */
+.resume__runin {
+  /* The secondary-text size of the split row's details (page-fit STYLE.runin). */
+  font-size: 9pt;
+}
+
+/* The run-in label: bold so the eye still finds each achievement's name. */
+.resume__runin-label {
+  /* Same weight as the entry titles it replaces. */
+  font-weight: 700;
+}
 </style>
 </head>
 <body>

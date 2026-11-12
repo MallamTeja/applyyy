@@ -34,6 +34,8 @@ import type { MasterLink, ResolvedResume } from '@applyy/shared-types';
 import { renderResumeHtml, ResumeRenderError, RESUME_STYLESHEET } from '../src/index.ts';
 // The section 11 worked example plus a hostile variant.
 import { zomatoBackendIntern, injectionAttempt } from './fixtures/zomato-backend-intern.ts';
+// The dumb extractor the ATS suite uses, so the run-in line is checked as a parser reads it.
+import { naiveTextExtract } from './naive-text-extract.ts';
 
 /** Absolute path to the committed golden render, resolved relative to this file. */
 const GOLDEN_PATH = fileURLToPath(new URL('./fixtures/zomato-backend-intern.golden.html', import.meta.url));
@@ -587,25 +589,32 @@ describe('renderUndatedEntry — certification and achievement links (2026-11-01
   // (a) THE FEATURE. A credential URL on a cert must reach the PDF as a real
   // anchor, labelled, under THAT cert. Before this change the renderer had no
   // links field to read, so this fails on the missing <a>, not on a typo.
-  it('renders a cert credential link as a labelled <a href> under that cert', () => {
+  // SINCE 2026-11-12 (Teja: "compress this, create more space") a SINGLE link makes the
+  // cert's own title the anchor, and its separate "Credential" line is gone. The href must
+  // still reach the PDF, on THAT cert's title, or the compression lost the credential.
+  it('renders a lone cert credential link as the cert title anchor, with no link line', () => {
     const html = renderResumeHtml(withEntryLinks({
       cert: [{ id: 'lnk_meta', label: 'Credential', url: 'https://coursera.org/verify/ABC123' }],
     }));
-    // The anchor sits inside cert_meta_backend's own entry.
+    // The cert's entry, alone.
+    const cert = entryHtml(html, 'cert_meta_backend');
+    // The title (label plus inline issuer) is wrapped in the credential href.
     assert.ok(
-      entryHtml(html, 'cert_meta_backend').includes('<a href="https://coursera.org/verify/ABC123">Credential</a>'),
-      'the credential link did not render as an anchor under its cert',
+      cert.includes('<h3 class="resume__entry-title"><a href="https://coursera.org/verify/ABC123">Meta Back-End Developer Professional Certificate (Coursera)</a></h3>'),
+      'the lone credential link did not become the cert title anchor',
     );
+    // The old own-line link is gone: that line is the space this change buys.
+    assert.equal(cert.includes('resume__entry-subtitle'), false, 'a lone link still printed its own line');
   });
 
   // Achievements share the renderer but are a separate section and a separate
   // field read; a renderer wired for certs alone passes the test above.
-  it('renders an achievement link under that achievement', () => {
+  it('renders a lone achievement link as that achievement title anchor', () => {
     const html = renderResumeHtml(withEntryLinks({
       achievement: [{ id: 'lnk_lc', label: 'LeetCode profile', url: 'https://leetcode.com/example' }],
     }));
-    // Under ach_sih, not anywhere in the document.
-    assert.ok(entryHtml(html, 'ach_sih').includes('<a href="https://leetcode.com/example">LeetCode profile</a>'));
+    // Under ach_sih, not anywhere in the document: its title carries the href (2026-11-12).
+    assert.ok(entryHtml(html, 'ach_sih').includes('<a href="https://leetcode.com/example">Winner — Smart India Hackathon 2025</a>'));
   });
 
   // Two links on one entry use the same REAL-CHARACTER separator as project
@@ -629,8 +638,8 @@ describe('renderUndatedEntry — certification and achievement links (2026-11-01
     const html = renderResumeHtml(withEntryLinks({
       cert: [{ id: 'lnk_bad', label: 'Credential', url: 'javascript:alert(1)' }],
     }));
-    // Collapsed href, label still shown.
-    assert.ok(entryHtml(html, 'cert_meta_backend').includes('<a href="#">Credential</a>'));
+    // Collapsed href on the title anchor (a lone link rides on the title since 2026-11-12).
+    assert.ok(entryHtml(html, 'cert_meta_backend').includes('<a href="#">Meta Back-End Developer Professional Certificate (Coursera)</a>'));
     // And the payload is nowhere in the document.
     assert.equal(html.includes('javascript:'), false);
   });
@@ -653,6 +662,66 @@ describe('renderUndatedEntry — certification and achievement links (2026-11-01
   // Absent and [] are one meaning (no links), so they must be one output.
   it('renders links: [] byte-identically to an absent links key', () => {
     assert.equal(renderResumeHtml(withEntryLinks({ cert: [], achievement: [] })), renderResumeHtml(zomatoBackendIntern));
+  });
+});
+
+// THE RUN-IN ACHIEVEMENT (Teja, 2026-11-12: "compress this, create more space for resumes
+// that are going to be tailored from now"). Teja's live achievements are all this shape: no
+// description, exactly one bullet. The fixture's two achievements are NOT (one has a
+// description, one has no bullets), so without this block the run-in path ran in no test.
+describe('renderAchievement — run-in "Label: text" for a one-bullet, no-description achievement', () => {
+  // Teja's v41 LeetCode achievement, the shape every one of his three live entries has.
+  const runIn = (links?: readonly MasterLink[]): ResolvedResume => {
+    // Untyped clone so the test can reshape ach_sih in place.
+    const clone = JSON.parse(JSON.stringify(zomatoBackendIntern)) as Record<string, any>;
+    // No description: the run-in condition.
+    clone['achievements'][0]['description'] = null;
+    // Exactly one bullet, Teja's real wording.
+    clone['achievements'][0]['bullets'] = [{ ref: 'bullet_ach_leetcode', text: 'Solved 200+ LeetCode problems covering data structures and algorithms.', master_text: 'Solved 200+ LeetCode problems covering data structures and algorithms.' }];
+    // Label too, so the expected line is Teja's.
+    clone['achievements'][0]['label'] = 'LeetCode';
+    // Optional profile link.
+    if (links !== undefined) clone['achievements'][0]['links'] = links;
+    // Back to the contract type.
+    return clone as unknown as ResolvedResume;
+  };
+
+  // The markup: one run-in div, the bullet ref kept for the approval diff view.
+  // RED-ON-REVERT: with renderAchievement back to renderUndatedEntry this is an <h3> + <ul>.
+  it('prints label and bullet as ONE run-in line, keeping the bullet data-ref', () => {
+    const html = renderResumeHtml(runIn());
+    // Exactly the run-in shape.
+    assert.ok(
+      html.includes('<div class="resume__runin"><strong class="resume__runin-label">LeetCode</strong>: <span data-ref="bullet_ach_leetcode">Solved 200+ LeetCode problems covering data structures and algorithms.</span></div>'),
+      'the one-bullet achievement did not render run-in',
+    );
+    // And no title line or bullet list for it: those two lines are the space this buys.
+    assert.equal(html.includes('<li class="resume__bullet" data-ref="bullet_ach_leetcode">'), false, 'the run-in bullet also printed as a list item');
+  });
+
+  // What a parser reads: one intact "Label: text" line, the same deal certs got on 2026-11-10.
+  it('extracts as the single line "Label: text"', () => {
+    const lines = naiveTextExtract(renderResumeHtml(runIn()));
+    // The exact line, so a dropped colon or a broken line fails here.
+    assert.ok(lines.includes('LeetCode: Solved 200+ LeetCode problems covering data structures and algorithms.'), 'the run-in line did not extract intact');
+  });
+
+  // A lone profile link rides on the bold label, so the href survives and no link line prints.
+  it('links the label when the achievement has one link', () => {
+    const html = renderResumeHtml(runIn([{ id: 'link_leetcode', label: 'LeetCode profile', url: 'https://leetcode.com/tejamallam' }]));
+    // The label is the anchor.
+    assert.ok(html.includes('<strong class="resume__runin-label"><a href="https://leetcode.com/tejamallam">LeetCode</a></strong>: '), 'the profile link is not on the run-in label');
+    // The link's own label never prints: no separate line.
+    assert.equal(html.includes('>LeetCode profile<'), false, 'the lone link still printed its own label');
+  });
+
+  // Not the run-in shape (the fixture's ach_sih has a description): the full layout stays.
+  it('keeps the two-part layout for an achievement with a description', () => {
+    const html = renderResumeHtml(zomatoBackendIntern);
+    // Non-vacuity: the fixture entry really has a description.
+    assert.notEqual(zomatoBackendIntern.achievements[0]?.description, null, 'fixture lost its description; test is vacuous');
+    // Its title is still an h3.
+    assert.ok(html.includes('<h3 class="resume__entry-title">Winner — Smart India Hackathon 2025</h3>'), 'a described achievement lost its title line');
   });
 });
 

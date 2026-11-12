@@ -255,6 +255,9 @@ const STYLE = {
   splitTitle: { size: 9.5, bold: true },
   // .resume__split .resume__entry-detail / -subtitle: their descriptions and links, 9pt (2026-11-11).
   splitDetail: { size: 9, bold: false },
+  // .resume__runin: a run-in achievement "Label: text" at 9pt (2026-11-12). Modelled ALL-BOLD
+  // because the label is bold and the text is not: the wider table over-counts, never under.
+  runin: { size: 9, bold: true },
 } as const satisfies Record<string, TextStyle>;
 
 /** A text box with no indent and no extra height. */
@@ -291,7 +294,8 @@ export function flowOf(articleHtml: string, inSplit = false): readonly FlowItem[
       // .resume__section: margin-bottom 4mm.
       if (open === 'resume__section') flow.push({ kind: 'margin', mm: 4 });
       // .resume__entry: margin-bottom 2.8mm.
-      else if (open === 'resume__entry') flow.push({ kind: 'margin', mm: 2.8 });
+      // Inside the split row it is 1.2mm since 2026-11-12 (print-styles .resume__split .resume__entry).
+      else if (open === 'resume__entry') flow.push({ kind: 'margin', mm: inSplit ? 1.2 : 2.8 });
       // Everything else closes without a margin.
       continue;
     }
@@ -363,6 +367,8 @@ export function flowOf(articleHtml: string, inSplit = false): readonly FlowItem[
     if (cls === 'resume__entry-subtitle') { flow.push({ kind: 'margin', mm: 0.4 }, text(t, inSplit ? STYLE.splitDetail : STYLE.subtitle)); continue; }
     // A grade or description line: 0.6mm above.
     if (cls === 'resume__entry-detail') { flow.push({ kind: 'margin', mm: 0.6 }, text(t, inSplit ? STYLE.splitDetail : STYLE.detail)); continue; }
+    // A run-in achievement line (2026-11-12): one 9pt text box, no margins of its own.
+    if (cls === 'resume__runin') { flow.push(text(t, STYLE.runin)); continue; }
     // A skills line, then 1mm.
     if (cls === 'resume__skill-group') { flow.push(text(t, STYLE.skillGroup), { kind: 'margin', mm: 1 }); continue; }
     // The summary is a <p>: the browser's default 1em margins above and below.

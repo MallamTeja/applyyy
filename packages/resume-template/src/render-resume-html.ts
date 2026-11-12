@@ -307,8 +307,21 @@ function renderUndatedEntry(entry: ResolvedAchievement | ResolvedCertification):
   // structure is identical to experience, projects and education: a stylesheet
   // rule or a diff-view selector written against one entry kind then holds for
   // all five.
+  // ONE LINK = A LINKED TITLE (Teja, 2026-11-12: "compress this, create more space"). A
+  // single credential or profile link used to print its own line ("Machine Learning
+  // credential") under the title, and with >= 5 certs on every resume those lines were the
+  // tallest part of the split row. The title itself now carries the href and prints blue,
+  // so the line is gone and the URL still reaches the PDF link annotation. Two or more
+  // links keep the separate link line: one title cannot be two anchors.
+  const links = entry.links ?? [];
+  // The lone link, or undefined when there are zero or several.
+  const single = links.length === 1 ? links[0] : undefined;
+  // The label text, escaped once here, wrapped in its anchor when there is exactly one link.
+  const titleHtml = single === undefined
+    ? escapeHtml(entry.label)
+    : `<a href="${safeHref(single.url)}">${escapeHtml(entry.label)}</a>`;
   const head = `<div class="resume__entry-head">
-<h3 class="resume__entry-title">${escapeHtml(entry.label)}</h3>
+<h3 class="resume__entry-title">${titleHtml}</h3>
 </div>`;
   // `description` follows renderEducation's grade_display pattern exactly: its
   // own detail line when present, and NOTHING at all when null or empty.
@@ -325,7 +338,8 @@ function renderUndatedEntry(entry: ResolvedAchievement | ResolvedCertification):
   // applications.tailored_profile before this date has no `links` key here, and
   // the approval queue renders those snapshots - `.map` on the raw field would
   // repeat the 2026-10-24 crash in a new field. Absent and [] print nothing.
-  const linksHtml = renderLinkLine(entry.links ?? []);
+  // A single link already rides on the title above, so only 2+ links print a line here.
+  const linksHtml = single === undefined ? renderLinkLine(links) : '';
   // data-ref anchors the entry to its master node so the approval diff view can
   // highlight this exact line, the same as every other entry kind. It is an
   // attribute, so a text extractor never sees it on the PDF.
@@ -343,7 +357,30 @@ ${renderBullets(entry.bullets)}
  * a seam that does not exist yet is a seam nobody adds under pressure later.
  */
 function renderAchievement(entry: ResolvedAchievement): string {
-  return renderUndatedEntry(entry);
+  // RUN-IN (Teja, 2026-11-12: "compress this, create more space for resumes tailored from
+  // now"): an achievement with no description and exactly one bullet prints as ONE line,
+  // "Label: bullet text", instead of a bold title line plus a bulleted line. In the half-width
+  // split column that cut Teja's three achievements from 213.9pt to ~140pt (page-fit model),
+  // room the fit ladder used to buy by trimming a real experience bullet (row 7dac59a5,
+  // bullet_aczen_fintech). Any other shape (a description, 0 or 2+ bullets, 2+ links)
+  // keeps the full layout, because a run-in line has room for one sentence only.
+  const bullet = entry.bullets.length === 1 ? entry.bullets[0] : undefined;
+  // The links, `?? []` for snapshots frozen before links existed (see renderUndatedEntry).
+  const links = entry.links ?? [];
+  // Not a run-in shape: render the ordinary two-part entry.
+  if (bullet === undefined || optionalText(entry.description) !== null || links.length > 1) {
+    return renderUndatedEntry(entry);
+  }
+  // The label, linked when it has its one profile link (same rule as renderUndatedEntry).
+  const label = links.length === 1
+    ? `<a href="${safeHref(links[0]!.url)}">${escapeHtml(entry.label)}</a>`
+    : escapeHtml(entry.label);
+  // A div, not a <p>: page-fit reads every <p> as the summary. The label is bold inline
+  // text and the colon is a real character, so an extractor reads "Label: text" as one
+  // line (inline elements never break). The bullet keeps its data-ref for the diff view.
+  return `<div class="resume__entry" data-ref="${escapeHtml(entry.ref)}">
+<div class="resume__runin"><strong class="resume__runin-label">${label}</strong>: <span data-ref="${escapeHtml(bullet.ref)}">${escapeHtml(bullet.text)}</span></div>
+</div>`;
 }
 
 /** Render one certification. Same shape and same seam reasoning as renderAchievement. */

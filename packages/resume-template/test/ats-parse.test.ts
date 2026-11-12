@@ -364,9 +364,21 @@ test('ATS parse — the achievements | certifications split reads left column fi
     const at = splitLines.indexOf(line);
     assert.ok(at !== -1 && at < certHeading, `"${line}" is not read before the Certifications heading`);
   }
-  // Each cert link label lands on its own line, after the right column's heading.
+  // Each cert title lands on its own line after the right column's heading. Since 2026-11-12 a
+  // lone credential link IS the title anchor (Teja: "compress this"), so the title line carries
+  // the href and the link label no longer prints: assert both halves of that.
+  for (const cert of resume.certifications) {
+    // The printed title: "Name (Issuer)" when there is an issuer, the bare name otherwise.
+    const title = cert.description === null ? cert.label : `${cert.label} (${cert.description})`;
+    const at = splitLines.indexOf(title);
+    assert.ok(at > certHeading, `the cert title "${title}" is not its own line under Certifications`);
+  }
+  // The lone link labels are gone from the text a parser reads: that line was the space bought.
   for (const label of ['Meta credential', 'NPTEL credential']) {
-    const at = splitLines.indexOf(label);
-    assert.ok(at > certHeading, `the link label "${label}" is not its own line under Certifications`);
+    assert.equal(splitLines.includes(label), false, `the lone link label "${label}" still prints its own line`);
+  }
+  // And each href survives in the markup, so the PDF keeps the clickable credential.
+  for (const url of ['https://example.com/c1', 'https://example.com/c2']) {
+    assert.ok(html.includes(`<a href="${url}">`), `the credential href ${url} was lost`);
   }
 });
