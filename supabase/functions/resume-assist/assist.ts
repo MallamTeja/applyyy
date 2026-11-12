@@ -859,6 +859,89 @@ function groupNamedIn(instruction: string, categories: readonly string[]): strin
   return named.length === 1 ? named[0] : undefined;
 }
 
+/* Words too common to name a group on their own: "add more skills and tools" must not name every group with "and". */
+const GROUP_FILLER_WORDS = new Set(["and", "the", "for", "with", "skill", "skills", "group", "groups", "other"]);
+// A group never grows past this by a top-up (Teja, 2026-11-11: a skill group holds 4-6 skills), unless the owner says "all".
+const TOP_UP_GROUP_SIZE = 6;
+
+/* THE TOP-UP (2026-11-12, live Harvey row fcf3a2dd): "devops and clousde too, hld lld too" got ONE op, Docker, while the
+   master held seven more DevOps & Cloud skills and "System Design (LLD/HLD)". The prompt already says "fill the group";
+   a prompt is not a control (CLAUDE.md §6), so on a turn whose answer ALREADY adds a skill (the owner asked to add,
+   and the model agreed), the server adds what the owner's words asked for and the model left out:
+     1. every group the instruction names, by any one of its name's words (3+ letters, not filler; exact, no typo
+        forgiveness, because a top-up auto-applies and "system" one edit from "systems" would fill a backend group): "devops" names "DevOps & Cloud" though "clousde" breaks the whole name. Filled with its master
+        skills not on the resume, the job's missing keywords first, then master order, until the group holds 6 (every
+        one when the owner says "all"). A second spelling of a skill already there (azure / Microsoft Azure) is skipped;
+     2. every master skill the instruction names, in full or by a short form in its parentheses ("hld" names
+        "System Design (LLD/HLD)").
+   Master skills only, in the master's spelling and group, so nothing is invented and the browser auto-applies them.
+   Only the instruction is read, never earlier turns: a skill the owner declined before is not re-added. Never past MAX_OPS. */
+function topUpNamedSkills(kept: readonly AssistOp[], request: AssistRequest, printed: ReadonlyMap<string, string>, claimed: Set<string>): AssistOp[] {
+  // No skill added this turn: not an add request (a removal, a question), so nothing is topped up.
+  if (!kept.some((op) => op.op === "add_skill")) return [];
+  // The instruction's words, normalised like group names ("&" is "and").
+  const said = groupWords(request.instruction).trim().split(" ").filter((word) => word !== "");
+  // True when the owner said exactly this word.
+  const saidWord = (word: string): boolean => said.includes(word);
+  // "all" lifts the group cap, as the prompt's fill rule says.
+  const limit = said.includes("all") ? Number.POSITIVE_INFINITY : TOP_UP_GROUP_SIZE;
+  // The JD's missing keywords by key, so the job-relevant skills go first.
+  const missing = new Set(request.job.missing.map((keyword) => skillKey(keyword)));
+  // A skill's vocabulary term, or its key: two spellings of one skill share it.
+  const termOf = (name: string): string => canonicalSkillTerm(name) ?? skillKey(name);
+  // Terms already on the resume or in this answer, so a second spelling is never added.
+  const terms = new Set([...printed.values(), ...kept.flatMap((op) => (op.op === "add_skill" ? [op.name] : []))].map(termOf));
+  // Skills per group (by key): printed ones plus this answer's adds.
+  const sizes = new Map<string, number>();
+  // Counted from the resume's own groups, when the browser sent them.
+  for (const skill of request.printedSkills ?? []) sizes.set(skillKey(skill.category), (sizes.get(skillKey(skill.category)) ?? 0) + 1);
+  // And this answer's adds.
+  for (const op of kept) if (op.op === "add_skill") sizes.set(skillKey(op.category), (sizes.get(skillKey(op.category)) ?? 0) + 1);
+  // The ops this pass adds, in order.
+  const added: AssistOp[] = [];
+  // Adds one master skill unless the cap, a printed or claimed name, or a twin spelling stops it; true when added.
+  const add = (skill: PrintedSkill): boolean => {
+    // The cap counts every kept op.
+    if (kept.length + added.length >= MAX_OPS) return false;
+    // The claim key parseAssistOps uses, so nothing is proposed twice.
+    const key = `skill:${skillKey(skill.name)}`;
+    // Printed, already proposed, or another spelling of one that is: skipped.
+    if (printed.has(skillKey(skill.name)) || claimed.has(key) || terms.has(termOf(skill.name))) return false;
+    // Claimed, so parseAssistOps's one-op-per-target rule holds for the top-up too.
+    claimed.add(key);
+    // Its term taken, so a twin spelling later in the pool is skipped.
+    terms.add(termOf(skill.name));
+    // Its group one bigger, for the size cap.
+    sizes.set(skillKey(skill.category), (sizes.get(skillKey(skill.category)) ?? 0) + 1);
+    // Kept, in the master's spelling and group, so the browser finds its node and auto-applies it.
+    added.push({ op: "add_skill", name: skill.name, category: skill.category });
+    // Added.
+    return true;
+  };
+  // 1. Groups the owner named: a group is named when one of its distinctive words was said.
+  for (const category of request.categories) {
+    // The group's own words, minus filler and short ones ("cs", "ai" name a group only by the whole name below).
+    const words = groupWords(category).trim().split(" ").filter((word) => word.length >= 3 && !GROUP_FILLER_WORDS.has(word));
+    // Named by one of those words, or by the whole name (how "AI" or "Tools" is named).
+    if (!words.some(saidWord) && !groupWords(request.instruction).includes(groupWords(category))) continue;
+    // Its master skills not on the resume, job-relevant first, master order otherwise (sort is stable).
+    const pool = request.availableSkills.filter((skill) => skillKey(skill.category) === skillKey(category));
+    // Missing keywords first.
+    const ranked = [...pool].sort((a, b) => Number(missing.has(skillKey(b.name))) - Number(missing.has(skillKey(a.name))));
+    // Added while the group is under its size.
+    for (const skill of ranked) if ((sizes.get(skillKey(category)) ?? 0) < limit) add(skill);
+  }
+  // 2. Master skills named in full, or by a short form in their parentheses.
+  for (const skill of request.availableSkills) {
+    // The short forms: "(LLD/HLD)" -> lld, hld; 3+ characters, so "(C)" names nothing by accident.
+    const shortForms = (/\(([^)]*)\)/.exec(skill.name)?.[1] ?? "").toLowerCase().split(/[^a-z0-9+#]+/).filter((form) => form.length >= 3);
+    // Named by the instruction alone (history is left out: see above).
+    if (shortForms.some((form) => said.includes(form)) || ownerNamed(skill.name, { ...request, history: [] })) add(skill);
+  }
+  // The ops to append.
+  return added;
+}
+
 /* The owner's master skill a requested name means (2026-11-07), or undefined. The same name in any case
    ("aws" is "AWS"), or another spelling of the same vocabulary term ("Azure" is "Microsoft Azure",
    "Postgres" is "PostgreSQL"), by the vocabulary's own patterns (canonicalSkillTerm), so there is no
@@ -1580,6 +1663,8 @@ export function parseAssistOps(
     // Kept.
     ops.push(result);
   }
+  // What the owner asked for and the model left out, from the master (2026-11-12, topUpNamedSkills says why).
+  ops.push(...topUpNamedSkills(ops, request, printed, claimed));
   // The note is display text, never a made-up success: claim sentences dropped, and an all-failed answer
   // led by what happened (honestNote). A note with nothing to read gets a one-line count (honestNote).
   const note = honestNote(parsed.note, ops, rejected);

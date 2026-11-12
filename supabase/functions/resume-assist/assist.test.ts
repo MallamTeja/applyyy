@@ -1474,3 +1474,65 @@ test("the system text: titles are a set_role op, skills are not entries, moves c
   // "do it" is the previous request, never a reorder.
   assert.match(prompt.systemInstruction, /repeats the owner's previous request from CHAT SO FAR: make those ops now; it is never a reorder request./);
 });
+
+/* LIVE 2026-11-12, Harvey row fcf3a2dd: "devops and clousde too, hld lld too" came back with ONE op, Docker, though the
+   master holds seven more DevOps & Cloud skills and "System Design (LLD/HLD)". The model's restraint is not a control
+   (CLAUDE.md §6): the server tops up, on a turn that already adds skills, every group the owner's words name (one word of
+   its name is enough, said exactly) to 6 skills, JD-relevant first, and adds a master skill the owner
+   named by a short form in its parentheses ("hld" for "System Design (LLD/HLD)"). Master skills only: nothing invented.
+   RED-ON-REVERT: without topUpNamedSkills, test 1 gets only Docker. */
+// Master v41's two groups from the live row, in master order, with its duplicate Azure spellings.
+const V41_AVAILABLE = [
+  { name: "AWS", category: "DevOps & Cloud" },
+  { name: "azure", category: "DevOps & Cloud" },
+  { name: "CI/CD & GitHub Actions", category: "DevOps & Cloud" },
+  { name: "Docker", category: "DevOps & Cloud" },
+  { name: "Google Cloud Platform", category: "DevOps & Cloud" },
+  { name: "Kubernetes", category: "DevOps & Cloud" },
+  { name: "Microsoft Azure", category: "DevOps & Cloud" },
+  { name: "Monitoring", category: "DevOps & Cloud" },
+  { name: "Computer Networks", category: "CS Fundamentals" },
+  { name: "DSA", category: "CS Fundamentals" },
+  { name: "OOP", category: "CS Fundamentals" },
+  { name: "Operating Systems", category: "CS Fundamentals" },
+  { name: "System Design (LLD/HLD)", category: "CS Fundamentals" },
+];
+// The row's printed skills: none of either group.
+const V41_PRINTED = [{ name: "Python", category: "Languages" }, { name: "Git", category: "Tools" }];
+
+// The live row's request, with this turn's instruction and the job's missing keywords.
+function v41Request(instruction: string, missing: string[] = []): AssistRequest {
+  // Through the real validator.
+  const parsed = parseAssistRequest(body({ instruction, job: { title: "Software Engineer", company: "Harvey", missing }, skills: "Python, Git", printedSkills: V41_PRINTED, availableSkills: V41_AVAILABLE, categories: ["Languages", "Tools", "DevOps & Cloud", "CS Fundamentals"] }));
+  // Valid fixture.
+  if (!parsed.ok) throw new Error(parsed.message);
+  // The request.
+  return parsed.request;
+}
+
+// The kept add_skill names, in order, for one model answer.
+function addedNames(ops: unknown[], req: AssistRequest): string[] {
+  // The real parser.
+  const parsed = parseAssistOps(JSON.stringify({ ops, note: "" }), req);
+  // A refused answer is a broken fixture.
+  assert.ok(parsed.ok);
+  // Each kept add_skill's name.
+  return parsed.ops.flatMap((op) => (op.op === "add_skill" ? [op.name] : []));
+}
+
+test("top-up 1 (live fcf3a2dd): 'devops and clousde too, hld lld too' + only Docker fills DevOps & Cloud to 6, JD first, and adds System Design", () => {
+  // The live answer: Docker alone. Kubernetes and Monitoring are the job's missing keywords.
+  const names = addedNames([{ op: "add_skill", name: "Docker", category: "DevOps & Cloud" }], v41Request("devops and clousde too, hld lld too", ["Kubernetes", "Monitoring"]));
+  // Docker first (the model's own), then the JD-named ones, then master order up to 6 in the group; one Azure, never both spellings.
+  assert.deepEqual(names, ["Docker", "Kubernetes", "Monitoring", "AWS", "azure", "CI/CD & GitHub Actions", "System Design (LLD/HLD)"]);
+});
+
+test("top-up 2: a skill named alone tops up nothing ('add docker' names no group)", () => {
+  // The owner asked for one skill and got it.
+  assert.deepEqual(addedNames([{ op: "add_skill", name: "Docker", category: "DevOps & Cloud" }], v41Request("add docker")), ["Docker"]);
+});
+
+test("top-up 3: a turn that adds no skill is never topped up ('remove devops stuff')", () => {
+  // No add_skill in the answer: a removal or a question is not an add request, whatever group it names.
+  assert.deepEqual(addedNames([], v41Request("remove devops stuff, and is hld needed?")), []);
+});
