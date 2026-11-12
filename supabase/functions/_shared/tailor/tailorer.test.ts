@@ -20,7 +20,9 @@ import { test } from "node:test";
 // Strict, so a missing key never compares equal to a key holding `undefined`.
 import assert from "node:assert/strict";
 // Extension-suffixed specifier so this runs under Deno and `node --test` alike.
-import { createTailorer, shapeSkillGroups, TAILOR_REQUIRED_ARRAY_KEYS } from "./tailorer.ts";
+import { createTailorer, shapeSkillGroups, SKILLS_PER_GROUP_CAP, skillTwinKey, TAILOR_REQUIRED_ARRAY_KEYS } from "./tailorer.ts";
+// The one-line width model the shaper fills with (2026-11-12), so a test checks the same line the PDF prints.
+import { skillGroupFitsOneLine } from "../../../../packages/resume-template/src/index.ts";
 // The live HTML posting excerpt (row 76280e87), shared with the postingText suite.
 import { CIRCUITHUB_HTML } from "./posting-html.fixture.ts";
 // The schema Gemini is actually sent, and the section tuple its enum is built from —
@@ -906,8 +908,9 @@ test("AI group (2026-11-10): R4 control, a master with no AI category gets no AI
   assert.deepEqual(shaped.profile.skills.map((s) => s.ref), ["lang-java", "lang-python", "lang-ts", "lang-sql", "fw-spring", "fw-react", "fw-express", "fw-fastapi", "db-pg", "db-mysql", "db-redis", "db-mongo", "dev-docker", "dev-aws", "dev-k8s", "dev-gha", "test-junit", "test-jest", "test-pw", "test-vitest"]);
 });
 
-// R5 KEEPS PICKS: the floor is a minimum. Seven model AI picks all survive, even against seven stronger groups.
-test("AI group (2026-11-10): R5 seven model-picked AI skills all stay, the floor is a minimum", () => {
+// R5 KEEPS PICKS, UP TO THE LINE (2026-11-12): model picks win the line's seats over unpicked skills, but the line is
+// ONE printed line (Teja 13:57), so seven long AI picks keep only those that fit; the rest are reported, never silent.
+test("AI group (2026-11-12): R5 seven model-picked AI skills fill the one line first; the ones past it are reported dropped", () => {
   // The full v32 AI group.
   const master = aiMaster(AI_SKILL_NAMES_V32);
   // The model's seven AI picks, by v32 position.
@@ -916,10 +919,14 @@ test("AI group (2026-11-10): R5 seven model-picked AI skills all stay, the floor
   const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "lang-java" }, ...aiPicks.map((ref) => ({ ref }))] }, master, SEVEN_GROUP_JD);
   // The AI refs on the page.
   const ai = aiRefsOf(shaped.profile.skills, master);
-  // Every pick kept, none trimmed to the floor of 5.
-  for (const ref of aiPicks) assert.ok(ai.includes(ref), `model AI pick ${ref} was not kept; AI group: ${JSON.stringify(ai)}`);
-  // And none of them reported as dropped.
-  assert.deepEqual(shaped.dropped.filter((ref) => aiPicks.includes(ref)), [], "model AI picks were reported dropped");
+  // The AI line holds the floor of 5 at least.
+  assert.ok(ai.length >= 5, `AI group under its floor: ${JSON.stringify(ai)}`);
+  // Every seat went to a model pick: a pick always outranks an unpicked skill the posting never names.
+  for (const ref of ai) assert.ok(aiPicks.includes(ref), `unpicked ${ref} took a seat ahead of a model pick`);
+  // It is ONE line, by the same model the PDF is fitted with.
+  assert.ok(skillGroupFitsOneLine("AI", ai.map((ref) => master.skills.find((s) => s.id === ref)!.name)), "the AI group wraps");
+  // Every pick that lost its seat is reported dropped, none silently.
+  assert.deepEqual(shaped.dropped.filter((ref) => aiPicks.includes(ref)), aiPicks.filter((ref) => !ai.includes(ref)), "a pick past the line was not reported");
 });
 
 // Review finding 2 (2026-11-10): a generic posting term inside an AI skill's name is word overlap, not relevance.
@@ -944,6 +951,84 @@ test("AI group (2026-11-10): R7 five unnamed model AI picks still let the JD-nam
   const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "lang-java" }, ...picks] }, master, "You will build RAG systems on Postgres.");
   // The AI group in page order.
   const ai = aiRefsOf(shaped.profile.skills, master);
-  // RAG Pipelines is in and leads; the five picks stay (six in all).
-  assert.deepEqual(ai, [aiId("RAG Pipelines"), ...firstEight.slice(0, 5).map(aiId)]);
+  // RAG Pipelines is in and leads (since 2026-11-12 the picks follow it only as far as the ONE line reaches).
+  assert.equal(ai[0], aiId("RAG Pipelines"), `the JD-named RAG Pipelines does not lead: ${JSON.stringify(ai)}`);
+  // The picks follow in their master order, a prefix of the five, so the line is the best seats, not a random subset.
+  assert.deepEqual(ai.slice(1), firstEight.slice(0, ai.length - 1).map(aiId).filter((ref) => ai.includes(ref)));
+  // Still the floor of 5, and still one line.
+  assert.ok(ai.length >= 5 && skillGroupFitsOneLine("AI", ai.map((ref) => master.skills.find((s) => s.id === ref)!.name)), `AI line wrong: ${JSON.stringify(ai)}`);
+});
+
+// ---- ONE GROUP = ONE FULL LINE (Teja, 2026-11-12 13:57 IST) ---------------------------------------------------
+// "every resume need atleast 5+ skill groups with each having up to 7 skills ... the skill section need to be in 1 line
+// but full in that 1 line". These pin it with the live v41 Testing & Quality group (9 skills, some long).
+
+// Live v41 Testing & Quality, master order (real names: the long ones are what make a line wrap).
+const TESTING_V41 = ["Code review", "JUnit", "pytest", "Testing", "Debugging & Troubleshooting", "Integration Testing", "API Testing", "Unit Testing", "Playwright Testing"];
+// A master with that group first plus the AI fixture group, so the floors still apply.
+const lineMaster = (): MasterProfile => ({ ...MASTER, skills: [...TESTING_V41.map((name, i) => ({ id: `tq-${i}`, name, category: "Testing & Quality" })), ...NON_AI_SKILLS.filter((s) => s.category !== "Testing & Quality"), ...AI_SKILL_NAMES_V32.map((name) => ({ id: aiId(name), name, category: "AI" }))] });
+// The page's groups: category -> names, in page order.
+const lineGroupsOf = (skills: readonly { readonly ref: string }[], master: MasterProfile): Map<string, string[]> => {
+  // Insertion order is page order.
+  const out = new Map<string, string[]>();
+  // Every resolvable ref, into its group.
+  for (const { ref } of skills) { const s = master.skills.find((m) => m.id === ref); if (s) out.set(s.category, [...(out.get(s.category) ?? []), s.name]); }
+  // The groups.
+  return out;
+};
+
+// L1 THE RULE. RED-ON-REVERT: the 11-11 shaper kept every model pick, so 9 picked Testing skills printed 9 (two lines).
+test("skills line (2026-11-12): L1 a model that picks all 9 Testing skills gets ONE line of at most 7, filled, never a wrap", () => {
+  // The master above.
+  const master = lineMaster();
+  // The model picks every Testing skill, on a posting that names testing.
+  const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: TESTING_V41.map((_, i) => ({ ref: `tq-${i}` })) }, master, "QA engineer: JUnit, pytest, integration testing and API testing.");
+  // The page's groups.
+  const groups = lineGroupsOf(shaped.profile.skills, master);
+  // Non-vacuity: the Testing group is on the page.
+  const testing = groups.get("Testing & Quality");
+  assert.ok(testing !== undefined && testing.length > 0, "the Testing group is missing; the case under test is absent");
+  // Every group on the page: one line, at most 7.
+  for (const [category, names] of groups) {
+    // At most the cap.
+    assert.ok(names.length <= SKILLS_PER_GROUP_CAP, `${category} holds ${names.length} > ${SKILLS_PER_GROUP_CAP}`);
+    // One printed line at every typography rung.
+    assert.ok(skillGroupFitsOneLine(category, names), `${category} wraps: ${names.join(", ")}`);
+  }
+  // FULL: no unseated Testing skill would still fit on the line (unless the cap is reached).
+  const unseated = TESTING_V41.filter((n) => !testing.includes(n));
+  // The line is at the cap, or nothing left fits.
+  assert.ok(testing.length === SKILLS_PER_GROUP_CAP || unseated.every((n) => !skillGroupFitsOneLine("Testing & Quality", [...testing, n])), `the Testing line has room left: ${testing.join(", ")}`);
+  // And the posting-named skills hold the first seats.
+  assert.deepEqual(testing.slice(0, 4), ["JUnit", "pytest", "Integration Testing", "API Testing"]);
+});
+
+// L2 THE CAP: a group of nine very short names fits nine on a line, but shows seven.
+test("skills line (2026-11-12): L2 nine short skills that would all fit one line still stop at the cap of 7", () => {
+  // Nine short Languages names (they would fit one line together).
+  const short = ["C", "R", "Go", "SQL", "Java", "HTML", "CSS", "Rust", "Bash"];
+  // Non-vacuity: all nine really fit one line, so only the cap can stop them.
+  assert.ok(skillGroupFitsOneLine("Languages", short), "nine short names wrap; the cap is not what is under test");
+  // A master of that group plus the AI fixture.
+  const master: MasterProfile = { ...MASTER, skills: [...short.map((name, i) => ({ id: `ln-${i}`, name, category: "Languages" })), ...AI_SKILL_NAMES_V32.map((name) => ({ id: aiId(name), name, category: "AI" }))] };
+  // The model picks all nine.
+  const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: short.map((_, i) => ({ ref: `ln-${i}` })) }, master, "Systems engineer: C, Go, SQL.");
+  // Exactly the cap.
+  assert.equal(lineGroupsOf(shaped.profile.skills, master).get("Languages")?.length, SKILLS_PER_GROUP_CAP);
+});
+
+// L3 TWINS: v41 holds "Express.js" and "express js"; a filled line must not print both.
+test("skills line (2026-11-12): L3 two spellings of one skill take one seat, the better-ranked spelling", () => {
+  // The twin key itself, on the live v41 pairs.
+  assert.equal(skillTwinKey("Express.js"), skillTwinKey("express js"));
+  // And the vendor-prefixed pair.
+  assert.equal(skillTwinKey("Microsoft Azure"), skillTwinKey("azure"));
+  // Non-vacuity of the key: distinct skills keep distinct keys.
+  assert.notEqual(skillTwinKey("Node.js"), skillTwinKey("Express.js"));
+  // A Frameworks group carrying both spellings.
+  const master: MasterProfile = { ...MASTER, skills: [{ id: "fw-a", name: "Express.js", category: "Frameworks" }, { id: "fw-b", name: "express js", category: "Frameworks" }, { id: "fw-c", name: "FastAPI", category: "Frameworks" }, ...AI_SKILL_NAMES_V32.map((name) => ({ id: aiId(name), name, category: "AI" }))] };
+  // The model picks both.
+  const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "fw-a" }, { ref: "fw-b" }] }, master, "Node backend with Express.js.");
+  // Only the JD's own spelling prints.
+  assert.deepEqual(lineGroupsOf(shaped.profile.skills, master).get("Frameworks"), ["Express.js", "FastAPI"]);
 });

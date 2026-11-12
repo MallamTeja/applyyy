@@ -55,6 +55,8 @@ import { ALLOWED_RHETORICAL_WORDS } from "../_shared/audit/detector.ts";
 import { TAILOR_SECTION_KINDS } from "../_shared/tailor/prompt.ts";
 // One technology's spellings, read from the JD vocabulary's own patterns, to find the master's skill (2026-11-07).
 import { canonicalSkillTerm } from "../_shared/tailor/jd-keywords.ts";
+// The one-skill-group-one-line width model (2026-11-12), the same one the tailor fills groups with.
+import { skillGroupFitsOneLine } from "../../../packages/resume-template/src/index.ts";
 
 // At most this many ops per answer. A bigger rewrite is a re-tailor, not an assist, and the cap
 // also bounds the output the model is asked to produce.
@@ -861,8 +863,10 @@ function groupNamedIn(instruction: string, categories: readonly string[]): strin
 
 /* Words too common to name a group on their own: "add more skills and tools" must not name every group with "and". */
 const GROUP_FILLER_WORDS = new Set(["and", "the", "for", "with", "skill", "skills", "group", "groups", "other"]);
-// A group never grows past this by a top-up (Teja, 2026-11-11: a skill group holds 4-6 skills), unless the owner says "all".
-const TOP_UP_GROUP_SIZE = 6;
+/* A group never grows past this by a top-up, unless the owner says "all". 7 since 2026-11-12 13:57 IST (Teja: "each having
+   up to 7 skills ... in 1 line but full in that 1 line"; was 6, the 11-11 "4-6 skills"). The line itself is the second
+   limit: a top-up never makes a group wrap (skillGroupFitsOneLine, the tailor's own width model). */
+const TOP_UP_GROUP_SIZE = 7;
 
 /* THE TOP-UP (2026-11-12, live Harvey row fcf3a2dd): "devops and clousde too, hld lld too" got ONE op, Docker, while the
    master held seven more DevOps & Cloud skills and "System Design (LLD/HLD)". The prompt already says "fill the group";
@@ -883,20 +887,32 @@ function topUpNamedSkills(kept: readonly AssistOp[], request: AssistRequest, pri
   const said = groupWords(request.instruction).trim().split(" ").filter((word) => word !== "");
   // True when the owner said exactly this word.
   const saidWord = (word: string): boolean => said.includes(word);
-  // "all" lifts the group cap, as the prompt's fill rule says.
-  const limit = said.includes("all") ? Number.POSITIVE_INFINITY : TOP_UP_GROUP_SIZE;
+  // "all" lifts the group cap AND the one-line rule, as the prompt's fill rule says: the owner dictated it outright.
+  const all = said.includes("all");
   // The JD's missing keywords by key, so the job-relevant skills go first.
   const missing = new Set(request.job.missing.map((keyword) => skillKey(keyword)));
   // A skill's vocabulary term, or its key: two spellings of one skill share it.
   const termOf = (name: string): string => canonicalSkillTerm(name) ?? skillKey(name);
   // Terms already on the resume or in this answer, so a second spelling is never added.
   const terms = new Set([...printed.values(), ...kept.flatMap((op) => (op.op === "add_skill" ? [op.name] : []))].map(termOf));
-  // Skills per group (by key): printed ones plus this answer's adds.
-  const sizes = new Map<string, number>();
-  // Counted from the resume's own groups, when the browser sent them.
-  for (const skill of request.printedSkills ?? []) sizes.set(skillKey(skill.category), (sizes.get(skillKey(skill.category)) ?? 0) + 1);
+  // Each group's printed line (by key): the resume's own skills plus this answer's adds, in page order. Names, not a
+  // count, since 2026-11-12: whether one more fits depends on how long the line already is.
+  const lines = new Map<string, string[]>();
+  // Appends one name to its group's line.
+  const onLine = (category: string, name: string): void => { lines.set(skillKey(category), [...(lines.get(skillKey(category)) ?? []), name]); };
+  // From the resume's own groups, when the browser sent them.
+  for (const skill of request.printedSkills ?? []) onLine(skill.category, skill.name);
   // And this answer's adds.
-  for (const op of kept) if (op.op === "add_skill") sizes.set(skillKey(op.category), (sizes.get(skillKey(op.category)) ?? 0) + 1);
+  for (const op of kept) if (op.op === "add_skill") onLine(op.category, op.name);
+  // True when the group can take this name: under the cap and still ONE printed line with it (or the owner said "all").
+  const roomFor = (category: string, name: string): boolean => {
+    // The owner's "all" wins over both limits.
+    if (all) return true;
+    // The line as it stands.
+    const names = lines.get(skillKey(category)) ?? [];
+    // Under the cap, and one line with the new name at every typography rung.
+    return names.length < TOP_UP_GROUP_SIZE && skillGroupFitsOneLine(category, [...names, name]);
+  };
   // The ops this pass adds, in order.
   const added: AssistOp[] = [];
   // Adds one master skill unless the cap, a printed or claimed name, or a twin spelling stops it; true when added.
@@ -911,8 +927,8 @@ function topUpNamedSkills(kept: readonly AssistOp[], request: AssistRequest, pri
     claimed.add(key);
     // Its term taken, so a twin spelling later in the pool is skipped.
     terms.add(termOf(skill.name));
-    // Its group one bigger, for the size cap.
-    sizes.set(skillKey(skill.category), (sizes.get(skillKey(skill.category)) ?? 0) + 1);
+    // On its group's line, so the next top-up measures the longer line.
+    onLine(skill.category, skill.name);
     // Kept, in the master's spelling and group, so the browser finds its node and auto-applies it.
     added.push({ op: "add_skill", name: skill.name, category: skill.category });
     // Added.
@@ -928,8 +944,8 @@ function topUpNamedSkills(kept: readonly AssistOp[], request: AssistRequest, pri
     const pool = request.availableSkills.filter((skill) => skillKey(skill.category) === skillKey(category));
     // Missing keywords first.
     const ranked = [...pool].sort((a, b) => Number(missing.has(skillKey(b.name))) - Number(missing.has(skillKey(a.name))));
-    // Added while the group is under its size.
-    for (const skill of ranked) if ((sizes.get(skillKey(category)) ?? 0) < limit) add(skill);
+    // Added while the line has room: a long name that would wrap is skipped and a shorter later one may still fit.
+    for (const skill of ranked) if (roomFor(category, skill.name)) add(skill);
   }
   // 2. Master skills named in full, or by a short form in their parentheses.
   for (const skill of request.availableSkills) {

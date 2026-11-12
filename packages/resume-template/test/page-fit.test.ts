@@ -13,6 +13,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ResolvedResume } from '@applyy/shared-types';
 import { articleOf, fitsOnePage, flowOf, renderResumeHtml, stepStylesheet, TYPOGRAPHY_LADDER } from '../src/index.ts';
+// The one-skill-group-one-line helpers (2026-11-12).
+import { fillSkillLine, skillGroupFitsOneLine, skillGroupLineCount } from '../src/index.ts';
 import { flowHeight } from '../src/page-fit.ts';
 import { zomatoBackendIntern } from './fixtures/zomato-backend-intern.ts';
 
@@ -221,4 +223,41 @@ test('SPLIT: the nested <div>s inside the split are not mis-parsed: one columns 
   assert.equal(block.columns.length, 2);
   // Every entry head is in its column: 3 left, 2 right.
   assert.deepEqual(block.columns.map((col) => col.filter((i) => i.kind === 'head').length), [3, 2]);
+});
+
+
+// ---- ONE SKILL GROUP = ONE LINE (Teja, 2026-11-12 13:57) ----------------------------------------------------
+// The shared width model the tailor and resume-assist fill groups with. Chromium-checked the same day on all 11
+// live v41 groups at rungs 0 and 5: every filled group printed on one line, and one more name wrapped (or the cap hit).
+
+// Live v41 Testing & Quality, master order.
+const TESTING = ['Code review', 'JUnit', 'pytest', 'Testing', 'Debugging & Troubleshooting', 'Integration Testing', 'API Testing', 'Unit Testing', 'Playwright Testing'];
+
+test('skill line: a short group is one line, the whole 9-name Testing group is two', () => {
+  // Three names: one line at every rung.
+  assert.equal(skillGroupFitsOneLine('Languages', ['Python', 'SQL', 'Java']), true);
+  // All nine Testing names: more than one line at the default rung.
+  assert.ok(skillGroupLineCount('Testing & Quality', TESTING, 0) >= 2, 'nine Testing names modelled as one line');
+  // And so not one line.
+  assert.equal(skillGroupFitsOneLine('Testing & Quality', TESTING), false);
+});
+
+test('skill line: fillSkillLine keeps rank order, skips a name that would wrap, takes a later one that fits, stops at the cap', () => {
+  // The filled Testing line.
+  const line = fillSkillLine('Testing & Quality', TESTING, 7);
+  // One line, under the cap.
+  assert.ok(skillGroupFitsOneLine('Testing & Quality', line) && line.length <= 7, `bad line: ${line.join(', ')}`);
+  // A subsequence of the ranked input: the order is the caller's relevance order, untouched.
+  assert.deepEqual(line, TESTING.filter((n) => line.includes(n)));
+  // FULL: nothing left out would still fit.
+  assert.ok(TESTING.filter((n) => !line.includes(n)).every((n) => !skillGroupFitsOneLine('Testing & Quality', [...line, n])), 'room left on the line');
+  // The cap: nine one-letter names fit a line but stop at 7.
+  assert.equal(fillSkillLine('Languages', ['C', 'R', 'D', 'F', 'J', 'K', 'Q', 'V', 'Z'], 7).length, 7);
+});
+
+test('skill line: the label is measured bold, so a long label leaves less room than a short one', () => {
+  // The same names under a short and a long label.
+  const names = TESTING.slice(0, 5);
+  // The long label never seats more than the short one.
+  assert.ok(fillSkillLine('Testing, Quality Assurance & Reliability Engineering', names, 7).length <= fillSkillLine('QA', names, 7).length);
 });

@@ -33,7 +33,9 @@ import { buildBulletRewritePrompt, buildTailorPrompt, type TailorPrompt } from "
 // The honesty gate. The ONLY constructor of a `ResolvedResume`, per its own header.
 import { validateTailoredProfile, type TailorViolation } from "./validator.ts";
 // The posting's skill terms, deterministic and vocabulary-gated, for selected_jd_keywords.
-import { AI_VOCABULARY_TERMS, extractJdKeywords, keywordAppearsIn } from "./jd-keywords.ts";
+import { AI_VOCABULARY_TERMS, canonicalSkillTerm, extractJdKeywords, keywordAppearsIn } from "./jd-keywords.ts";
+// The one-skill-group-one-line width model (2026-11-12), shared with the page fit and resume-assist.
+import { fillSkillLine } from "../../../../packages/resume-template/src/index.ts";
 // Stored postings may be raw HTML; every reader here sees the text (N1, 2026-11-07).
 import { postingText } from "./posting-text.ts";
 // The one-page rule: the same pure trimmer the web runs live after every edit.
@@ -196,18 +198,27 @@ export function dedupeRepeatedRefs(tailored: TailoredProfile): { readonly profil
  * the validator, so the stored tailor_refs re-validates to exactly the stored resume (rebuildOriginal in
  * web tailoredEdits.ts depends on that). Every ref added or dropped is reported, never silent. Exported
  * for the test. */
-export const SKILLS_PER_GROUP_FLOOR = 4;
-/* Teja, 2026-11-11 19:30 IST: "every resume need to have at least 5 skill groups with each one having 4+ skills for
-   some and 6 for some". So: at least 5 groups (was "aim for 3-5"), at most 6, every group at least 4, and the most
-   job-relevant groups at least 6. All capped at what the master holds: the master is the only honest source. */
-// The richer floor for the most job-relevant groups ("6 for some").
-export const SKILLS_TOP_GROUP_FLOOR = 6;
-// How many of the leading (most relevant) groups get SKILLS_TOP_GROUP_FLOOR.
-export const SKILLS_TOP_GROUPS = 2;
+/* SUPERSEDED 2026-11-12 13:57 IST (Teja: "each having up to 7 skills ... in 1 line but full in that 1 line"): the 11-11
+   floors (every group >= 4, the leading two >= 6) are gone. A group now holds what fills ONE printed line, up to this cap.
+   Step 3 above reads "filled to one line" from here on. The 11-11 group counts below stand. */
+export const SKILLS_PER_GROUP_CAP = 7;
 // The most groups one resume shows: one past the minimum, so "at least 5" can be 6 when the posting touches 6.
 export const SKILLS_MAX_GROUPS = 6;
 // The fewest groups every resume shows (was 3 until 2026-11-11); topped up from the master's groups when needed.
 export const SKILLS_MIN_GROUPS = 5;
+
+/* The key two spellings of one skill share ("Express.js" / "express js", "Microsoft Azure" / "azure"): the canonical
+   vocabulary term when the one vocabulary knows the name, else the name; either way lowercased with the "Microsoft "
+   vendor prefix, spaces, dots, hyphens and a trailing "js" stripped. The SAME normalising runs on both branches, so a
+   known spelling ("Express.js" -> term "express") and an unknown one ("express js") still meet. Exported for the test. */
+export function skillTwinKey(name: string): string {
+  // The shared canonical term when known (the same one resume-assist dedupes twin spellings with), else the name.
+  const base = canonicalSkillTerm(name) ?? name;
+  // The spelling with its noise removed.
+  const key = base.toLowerCase().replace(/^microsoft\s+/, "").replace(/[\s.\-]/g, "").replace(/js$/, "");
+  // A name that is ONLY noise ("JS") keeps its own lowercase spelling, never the empty key every such name would share.
+  return key === "" ? name.toLowerCase() : key;
+}
 
 // Decides the skills section; returns the profile plus the refs it added and dropped, in order.
 export function shapeSkillGroups(tailored: TailoredProfile, master: MasterProfile, jobDescription: string): { readonly profile: TailoredProfile; readonly added: readonly string[]; readonly dropped: readonly string[] } {
@@ -252,36 +263,52 @@ export function shapeSkillGroups(tailored: TailoredProfile, master: MasterProfil
   // The model's picks that survive: in a shown group, or unresolved (left for the validator to refuse).
   const kept = tailored.skills.filter(({ ref }) => { const skill = byId.get(ref); return skill === undefined || shown.has(skill.category); });
   // The model's resolvable picks in a dropped group, reported.
-  const dropped = tailored.skills.filter(({ ref }) => !kept.some((k) => k.ref === ref)).map(({ ref }) => ref);
-  // Every ref already on the resume, so no top-up repeats one (the validator refuses duplicates).
-  const present = new Set(kept.map(({ ref }) => ref));
-  // The refs added, group by group in shown order.
-  const added: string[] = [];
-  // Each shown group, filled to its floor; the index says whether it is one of the leading (most relevant) groups.
-  for (const [position, category] of [...shown].entries()) {
-    // How many the group holds already.
-    const count = kept.filter(({ ref }) => byId.get(ref)?.category === category).length;
-    // Its master skills not yet on the resume, in master order.
-    const candidates = master.skills.filter((s) => s.category === category && !present.has(s.id));
-    // This group's floor: 5 for the AI group (step 5), the shared per-group floor for every other.
-    // The leading SKILLS_TOP_GROUPS groups take the richer floor ("6 for some", 2026-11-11); the AI group never drops below its 5.
-    const floor = Math.max(position < SKILLS_TOP_GROUPS ? SKILLS_TOP_GROUP_FLOOR : SKILLS_PER_GROUP_FLOOR, category === aiCategory ? PAGE_FIT_FLOORS.minAiSkills : 0);
-    // The floor, capped at what the master holds for this group, minus what is there.
-    const fill = Math.min(floor, count + candidates.length) - count;
-    // The AI group also takes EVERY AI skill the posting names, past the floor: "the most relevant AI skills to that
-    // job" must not lose to five model picks the posting never mentions (review finding 2b, 2026-11-10).
-    const namedAi = category === aiCategory ? candidates.filter(named).length : 0;
-    // The larger of the two; the sort below puts posting-named first, so the slice takes every named one.
-    const need = Math.max(fill, namedAi);
-    // Posting-named first; stable sort keeps master order among equals.
-    const ranked = candidates.sort((a, b) => Number(named(b)) - Number(named(a)));
-    // The top `need` (none when the group is already at the floor).
-    for (const skill of ranked.slice(0, Math.max(0, need))) added.push(skill.id);
-  }
+  // Mutable: a pick that loses its line seat below is reported here too.
+  const dropped: string[] = tailored.skills.filter(({ ref }) => !kept.some((k) => k.ref === ref)).map(({ ref }) => ref);
   // Each master skill's position, the tie-break inside a group after "the posting names it".
   const masterIndex = new Map(master.skills.map((skill, index) => [skill.id, index]));
-  // The kept picks and the top-ups as one pool of entries; a kept entry keeps its own object.
-  const pool = [...kept, ...added.map((ref) => ({ ref }))];
+  // The model's resolvable picks, by ref: a seat tie-break after "the posting names it".
+  const picked = new Set(kept.map(({ ref }) => ref));
+  /* ONE GROUP = ONE FULL LINE (Teja, 2026-11-12 13:57: "every resume need atleast 5+ skill groups with each having up
+     to 7 skills ... the skill section need to be in 1 line but full in that 1 line"). Replaces the 11-11 floors (>= 4
+     each, the leading two >= 6). Each shown group takes its master skills ranked posting-named first, then the model's
+     picks, then master order, and keeps every one that still fits on ONE printed line, at most SKILLS_PER_GROUP_CAP.
+     "Fits" is fillSkillLine, the same width model the page fit uses (packages/resume-template), so the tailor, the trim
+     and resume-assist can never disagree about a line. A group smaller than its line shows all it has: the master is the
+     only honest source. */
+  const chosen: string[] = [];
+  // Each shown group, in page order.
+  for (const category of shown) {
+    // The group's master skills, best seat first; the sort is stable, so master order breaks the last tie.
+    const ranked = master.skills.filter((s) => s.category === category).sort((a, b) =>
+      Number(named(b)) - Number(named(a)) || Number(picked.has(b.id)) - Number(picked.has(a.id)) || (masterIndex.get(a.id) ?? 0) - (masterIndex.get(b.id) ?? 0));
+    // TWINS: the master holds "Express.js" and "express js", "Microsoft Azure" and "azure" (v41, 2026-11-12). A filled line
+    // would print both, so only the best-ranked spelling of one canonical term takes a seat.
+    const terms = new Set<string>();
+    // One spelling per term, in rank order.
+    const unique = ranked.filter((skill) => { const term = skillTwinKey(skill.name); if (terms.has(term)) return false; terms.add(term); return true; });
+    // The line, filled in rank order.
+    let names = fillSkillLine(category, unique.map((s) => s.name), SKILLS_PER_GROUP_CAP);
+    // STEP 5 STILL HOLDS: the AI group keeps >= PAGE_FIT_FLOORS.minAiSkills (capped at the master's size). AI names run
+    // long ("Prompt Injection Protection"), so when the ranked fill seats fewer, the line is topped up with the SHORTEST
+    // remaining AI skills: five short real skills beat four long ones, and both are the owner's own master content.
+    const aiFloor = category === aiCategory ? Math.min(PAGE_FIT_FLOORS.minAiSkills, unique.length) : 0;
+    // Under the floor: refill, keeping the seated names first and trying the rest shortest-first.
+    if (names.length < aiFloor) {
+      // The unseated names, shortest first (stable, so rank breaks a length tie).
+      const rest = unique.map((s) => s.name).filter((n) => !names.includes(n)).sort((a, b) => a.length - b.length);
+      // The same line rule; the seated names already fit, so they stay.
+      names = fillSkillLine(category, [...names, ...rest], SKILLS_PER_GROUP_CAP);
+    }
+    // Back to refs, by this group's own names (unique after the twin filter, so a name names one skill).
+    for (const name of names) chosen.push(unique.find((s) => s.name === name)!.id);
+  }
+  // The refs added: on the line, not a model pick.
+  const added = chosen.filter((ref) => !picked.has(ref));
+  // A model pick in a shown group that lost its seat (the line, the cap of 7, or a twin) is reported as dropped too.
+  dropped.push(...kept.filter(({ ref }) => byId.has(ref) && !chosen.includes(ref)).map(({ ref }) => ref));
+  // The seated entries; a kept entry keeps its own object.
+  const pool = chosen.map((ref) => kept.find((k) => k.ref === ref) ?? { ref });
   // RANKED BY THE JD (Teja, 2026-11-07, review RED 1 + the group-order yellow). The renderer groups by
   // category and orders groups by first appearance, so the order emitted here IS the page order:
   // groups in shown order (relevance first), and inside each group the skills the posting names first,

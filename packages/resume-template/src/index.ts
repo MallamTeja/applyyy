@@ -27,6 +27,10 @@ export { renderResumeHtml, ResumeRenderError, fitsOnePage } from './render-resum
 // The typography ladder, exported so the calibration test can render and measure every rung.
 export { TYPOGRAPHY_LADDER, stepStylesheet, flowOf, flowFits, articleOf, pickStepIndex } from './page-fit.ts';
 
+// The one-skill-group-one-line width model (Teja, 2026-11-12): the tailor, the page trimmer and
+// resume-assist all ask these, so "one line" means one thing everywhere.
+export { skillGroupLineCount, skillGroupFitsOneLine, fillSkillLine } from './page-fit.ts';
+
 // Exported so the React preview can prove it uses the identical stylesheet
 // rather than an approximation. renderResumeHtml already inlines it; this is for
 // tooling such as the diff view, not for normal rendering.

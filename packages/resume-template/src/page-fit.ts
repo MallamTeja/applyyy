@@ -141,7 +141,8 @@ interface TextStyle {
 /** One item of the vertical flow: a box of text, or a margin that collapses with its neighbours. */
 type FlowItem =
   // Text set at a width; its height depends on the step.
-  | { readonly kind: 'text'; readonly text: string; readonly style: TextStyle; readonly indentMm: number; readonly extraPt: number; readonly extraMm: number }
+  // `boldWords`: how many leading words are set bold inside an otherwise regular line (a skill label).
+  | { readonly kind: 'text'; readonly text: string; readonly style: TextStyle; readonly indentMm: number; readonly extraPt: number; readonly extraMm: number; readonly boldWords?: number }
   // The flex entry head: a title and a no-wrap date on one row.
   | { readonly kind: 'head'; readonly title: string; readonly dates: string; readonly titleStyle: TextStyle }
   // A vertical margin in mm at gapScale 1 (scaled by the step), or in em of the summary <p>'s own font.
@@ -188,7 +189,7 @@ function runWidth(text: string, style: TextStyle, size: number): number {
  * Chromium may also break after a hyphen or slash; ignoring those break chances can only
  * add lines, which is the safe direction.
  */
-function lineCount(text: string, style: TextStyle, size: number, width: number): number {
+function lineCount(text: string, style: TextStyle, size: number, width: number, boldWords = 0): number {
   // Uppercase before measuring, exactly as text-transform does before layout.
   const shown = style.uppercase ? text.toUpperCase() : text;
   // Collapsed whitespace, as HTML renders it.
@@ -197,14 +198,16 @@ function lineCount(text: string, style: TextStyle, size: number, width: number):
   if (words.length === 0) return 0;
   // One space's advance.
   const space = runWidth(' ', style, size);
+  // The bold twin of the style, for a bold run-in prefix (a skill group's label, 2026-11-12).
+  const boldStyle: TextStyle = { ...style, bold: true };
   // Lines so far, and the width used on the current one.
   let lines = 1;
   // Width already on the current line.
   let used = 0;
   // Greedy: each word goes on the current line if it fits, else starts a new one.
-  for (const word of words) {
-    // This word's advance.
-    const w = runWidth(word, style, size);
+  for (const [index, word] of words.entries()) {
+    // This word's advance: the first `boldWords` words are set bold (the <span> label), the rest as styled.
+    const w = runWidth(word, index < boldWords ? boldStyle : style, size);
     // First word on a line needs no leading space.
     const need = used === 0 ? w : used + space + w;
     // Fits: extend the line.
@@ -247,8 +250,11 @@ const STYLE = {
   subtitle: { size: 10, bold: false },
   // .resume__entry-detail: 10pt.
   detail: { size: 10, bold: false },
-  // .resume__skill-group: body size, label bold. Modelled all-bold: the wider table covers the label.
-  skillGroup: { size: 10.5, bold: true, breakAnywhere: true },
+  // .resume__skill-group: body size, regular, with the bold label measured bold word by word
+  // (FlowItem.boldWords) since 2026-11-12. It was modelled all-bold, which over-counted every
+  // skill by ~8% and so could not tell a group that fills ONE line from one that wraps
+  // (Teja 13:57: "the skill section need to be in 1 line but full in that 1 line").
+  skillGroup: { size: 10.5, bold: false, breakAnywhere: true },
   // .resume__summary: 9.5pt since 2026-11-11 (Teja: secondary text shrinks so skills and bullets get the room).
   summary: { size: 9.5, bold: false },
   // .resume__split .resume__entry-title: achievement/certification names, 9.5pt bold (2026-11-11).
@@ -369,8 +375,17 @@ export function flowOf(articleHtml: string, inSplit = false): readonly FlowItem[
     if (cls === 'resume__entry-detail') { flow.push({ kind: 'margin', mm: 0.6 }, text(t, inSplit ? STYLE.splitDetail : STYLE.detail)); continue; }
     // A run-in achievement line (2026-11-12): one 9pt text box, no margins of its own.
     if (cls === 'resume__runin') { flow.push(text(t, STYLE.runin)); continue; }
-    // A skills line, then 1mm.
-    if (cls === 'resume__skill-group') { flow.push(text(t, STYLE.skillGroup), { kind: 'margin', mm: 1 }); continue; }
+    // A skills line, then 1mm. Its label's words are measured bold, the skills regular, as printed.
+    if (cls === 'resume__skill-group') {
+      // The label's printed text, from its own span (the renderer always emits one).
+      const label = textOf(/<span class="resume__skill-label">([\s\S]*?)<\/span>/.exec(inner)?.[1] ?? '');
+      // Its word count: those words lead the line.
+      const boldWords = label.split(/\s+/).filter((w) => w !== '').length;
+      // The line, then its margin.
+      // Built as the text box literal: text() returns the whole FlowItem union, which has no boldWords on its other kinds.
+      flow.push({ kind: 'text', text: t, style: STYLE.skillGroup, indentMm: 0, extraPt: 0, extraMm: 0, boldWords }, { kind: 'margin', mm: 1 });
+      continue;
+    }
     // The summary is a <p>: the browser's default 1em margins above and below.
     // Its text is the 9.5pt summary style; the em margins are measured against that same size in flowHeight.
     if (name === 'p') { flow.push({ kind: 'margin', mm: 0, bodyEm: 1 }, text(t, STYLE.summary), { kind: 'margin', mm: 0, bodyEm: 1 }); continue; }
@@ -433,7 +448,8 @@ export function flowHeight(flow: readonly FlowItem[], step: TypographyStep, widt
     // Its line-height (the name keeps its own).
     const lh = item.style.lineHeight ?? step.lineHeight;
     // Lines at its width.
-    const lines = lineCount(item.text, item.style, size, width - item.indentMm * MM);
+    // boldWords: a skill group's label words measured bold (0 for every other box).
+    const lines = lineCount(item.text, item.style, size, width - item.indentMm * MM, item.boldWords ?? 0);
     // Lines × line box, plus any padding and rule (padding scales with the gaps).
     height += lines * size * lh + item.extraPt + item.extraMm * MM * step.gapScale;
   }
@@ -493,6 +509,67 @@ body { font-size: ${pt(10.5)}; line-height: ${s.lineHeight}; }
 .resume__split .resume__entry-detail, .resume__split .resume__entry-subtitle { font-size: ${pt(9)}; }
 ${s.paragraphEm === 1 ? '' : `.resume__summary { margin: ${s.paragraphEm}em 0; }
 `}`;
+}
+
+/*
+ * ONE SKILL GROUP = ONE FULL LINE (Teja, 2026-11-12 13:57: "every resume need atleast 5+ skill
+ * groups with each having up to 7 skills ... the skill section need to be in 1 line but full in
+ * that 1 line"). The ONE width model the tailor, the page trimmer and resume-assist all ask, so
+ * the three can never disagree about what "one line" means. It measures exactly what
+ * renderSkills prints ("Category: a, b, c", label bold, skills regular) with the same width
+ * tables flowHeight uses.
+ */
+
+// Headroom on the one-line test: the tables are per-glyph maxima over Georgia and Times, so the
+// real line is never longer than modelled; 2% more covers Chromium's sub-point layout rounding.
+const SKILL_LINE_SAFETY = 0.98;
+
+/** The printed text of one skill group, exactly as renderSkills joins it. */
+function skillGroupText(category: string, names: readonly string[]): string {
+  // Label, colon, one space, then the names comma-separated: render-resume-html.ts renderSkills.
+  return `${category}: ${names.join(', ')}`;
+}
+
+/** Lines one skill group occupies at one typography rung (0 = the default, widest-font rung). */
+export function skillGroupLineCount(category: string, names: readonly string[], stepIndex = 0): number {
+  // The rung; an out-of-range index is a caller bug, so fail loudly rather than guess a rung.
+  const step = TYPOGRAPHY_LADDER[stepIndex];
+  if (step === undefined) throw new Error(`skillGroupLineCount: no typography rung ${stepIndex}`);
+  // The label's word count ("DevOps & Cloud:" is 3): those words are set bold.
+  const labelWords = `${category}:`.split(/\s+/).filter((w) => w !== '').length;
+  // The full text column at this rung, less the headroom.
+  const width = (A4_WIDTH_PT - 2 * step.pageMarginMm * MM) * SKILL_LINE_SAFETY;
+  // Lines at this rung's font size.
+  return lineCount(skillGroupText(category, names), STYLE.skillGroup, STYLE.skillGroup.size * step.fontScale, width, labelWords);
+}
+
+/**
+ * True when the group prints on exactly one line at EVERY rung. Rung 0 (14mm margins, 10.5pt)
+ * is the narrowest line, so in practice it decides; checking all six costs nothing and does not
+ * depend on the ladder keeping that order.
+ */
+export function skillGroupFitsOneLine(category: string, names: readonly string[]): boolean {
+  // Every rung prints it on one line.
+  return TYPOGRAPHY_LADDER.every((_, index) => skillGroupLineCount(category, names, index) === 1);
+}
+
+/**
+ * Fill one group's line: take `ranked` in order (most JD-relevant first), keep each name that
+ * still fits on the one line, skip one that would wrap (a shorter later name may still fit), stop
+ * at `cap`. Returns the names kept, in ranked order. Pure: the caller owns relevance and the cap.
+ */
+export function fillSkillLine(category: string, ranked: readonly string[], cap: number): string[] {
+  // The names on the line so far.
+  const kept: string[] = [];
+  // In relevance order.
+  for (const name of ranked) {
+    // Full: nothing more is taken, however short.
+    if (kept.length >= cap) break;
+    // Taken only if the line, with it, is still one line at every rung.
+    if (skillGroupFitsOneLine(category, [...kept, name])) kept.push(name);
+  }
+  // The filled line.
+  return kept;
 }
 
 /** The <article> of a rendered document: the part that is laid out on the page. */

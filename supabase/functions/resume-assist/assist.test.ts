@@ -18,6 +18,8 @@ import {
 } from "./assist.ts";
 // Types only, for the fake Gemini call.
 import type { GeminiCallOutcome, GeminiResponseBody, GenerateGeminiOptions } from "../_shared/gemini/client.ts";
+// The one-line width model the top-up fills with (2026-11-12), so the test checks the line the PDF prints.
+import { skillGroupFitsOneLine } from "../../../packages/resume-template/src/index.ts";
 
 // A valid request body, as the browser would send it.
 function body(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -1525,6 +1527,32 @@ test("top-up 1 (live fcf3a2dd): 'devops and clousde too, hld lld too' + only Doc
   const names = addedNames([{ op: "add_skill", name: "Docker", category: "DevOps & Cloud" }], v41Request("devops and clousde too, hld lld too", ["Kubernetes", "Monitoring"]));
   // Docker first (the model's own), then the JD-named ones, then master order up to 6 in the group; one Azure, never both spellings.
   assert.deepEqual(names, ["Docker", "Kubernetes", "Monitoring", "AWS", "azure", "CI/CD & GitHub Actions", "System Design (LLD/HLD)"]);
+});
+
+/* ONE LINE (Teja, 2026-11-12 13:57: "each having up to 7 skills ... in 1 line but full in that 1 line"). A top-up fills the
+   group's printed line and stops where one more name would wrap, never at a fixed count. RED-ON-REVERT: the old fixed
+   cap of 6 adds the six long names below, which print on two lines. */
+test("top-up 4 (2026-11-12): a named group is topped up to ONE full line, never a wrap; 'all' still lifts both limits", () => {
+  // Long real-world DevOps names: six of them do not fit one line.
+  const long = ["Google Cloud Platform", "CI/CD & GitHub Actions", "Infrastructure as Code", "Microsoft Azure", "Kubernetes", "Monitoring", "Terraform"];
+  // Non-vacuity: Docker plus the first five of them (six, the old cap) really wraps, so only the line rule can stop it.
+  assert.equal(skillGroupFitsOneLine("DevOps & Cloud", ["Docker", ...long.slice(0, 5)]), false, "six fit one line; the line rule is not under test");
+  // The request, those names available.
+  const parsed = parseAssistRequest(body({ instruction: "devops too", job: { title: "Platform Engineer", company: "Example", missing: [] }, skills: "Python", printedSkills: [{ name: "Python", category: "Languages" }], availableSkills: [{ name: "Docker", category: "DevOps & Cloud" }, ...long.map((name) => ({ name, category: "DevOps & Cloud" }))], categories: ["Languages", "DevOps & Cloud"] }));
+  // Valid fixture.
+  if (!parsed.ok) throw new Error(parsed.message);
+  // The model added Docker; the server tops up the rest of the line.
+  const names = addedNames([{ op: "add_skill", name: "Docker", category: "DevOps & Cloud" }], parsed.request);
+  // ONE line, by the tailor's own width model.
+  assert.ok(skillGroupFitsOneLine("DevOps & Cloud", names), `the topped-up group wraps: ${names.join(", ")}`);
+  // FULL: no unseated name would still fit (or the cap of 7 is reached).
+  assert.ok(names.length === 7 || long.filter((n) => !names.includes(n)).every((n) => !skillGroupFitsOneLine("DevOps & Cloud", [...names, n])), `room left on the line: ${names.join(", ")}`);
+  // "all": the owner dictated every skill of the group, so neither limit applies (all 8, two lines and all).
+  const all = parseAssistRequest(body({ instruction: "add all devops", job: { title: "Platform Engineer", company: "Example", missing: [] }, skills: "Python", printedSkills: [{ name: "Python", category: "Languages" }], availableSkills: [{ name: "Docker", category: "DevOps & Cloud" }, ...long.map((name) => ({ name, category: "DevOps & Cloud" }))], categories: ["Languages", "DevOps & Cloud"] }));
+  // Valid fixture.
+  if (!all.ok) throw new Error(all.message);
+  // Every one of the eight.
+  assert.equal(addedNames([{ op: "add_skill", name: "Docker", category: "DevOps & Cloud" }], all.request).length, 8);
 });
 
 test("top-up 2: a skill named alone tops up nothing ('add docker' names no group)", () => {
