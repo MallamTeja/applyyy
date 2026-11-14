@@ -51,7 +51,11 @@ import type { FilterRuleRow, JobInsert, JobRow } from "../contracts/shared-types
 // inserted status outside discovered/passed_filters/dropped_filter. That checks an
 // allowlist, not edges, and this union is still the narrower control for THIS module,
 // since it also excludes 'discovered'. Keep both.
-export type ScreenedInsertStatus = "passed_filters" | "dropped_filter";
+// UPDATED 2026-11-12: 'discovered' joins, for HELD rows only (a blank description the gate could not reject, Teja
+// via the orchestrator, plan B). It is still upstream of the approval gate and inside the insert guard's allowlist, so
+// the hole described above stays closed. Every reader of this union must now say what it does with a held row:
+// the scouts insert it as is; the screener (screener/queue.ts) leaves the row where it is.
+export type ScreenedInsertStatus = "passed_filters" | "dropped_filter" | "discovered";
 
 // One `applications` row, born already carrying its verdict.
 export interface ScreenedApplicationInsert {
@@ -113,6 +117,12 @@ export interface ScreenedBatchPlan {
   // look identical from outside. These are what make the difference observable.
   readonly passedCount: number;
   readonly droppedCount: number;
+  // HELD (2026-11-12): jobs with no description to judge and no title rule against them, born at 'discovered' and
+  // re-judged by the screener once a scout poll stores their text. Their own list and count, so a held row is never
+  // reported as a pass or a drop. Additive: a caller that ignores them still inserts the rows correctly.
+  readonly held: readonly string[];
+  // The held list's length, beside the other two counters.
+  readonly heldCount: number;
 }
 
 // Adapt a row the Scout or Screener runner reads into the narrow shape the cascade reads.
@@ -201,6 +211,8 @@ export function planScreenedApplications(
   // A Set, because nine rules over fifty jobs would otherwise repeat the same
   // "title_blocklist has no blocked_titles configured" fifty times and bury the signal.
   const warnings = new Set<string>();
+  // The held jobs' ids, in batch order.
+  const held: string[] = [];
 
   // One pass over the batch; the cascade short-circuits internally on the first drop.
   for (const entry of entries) {
@@ -214,6 +226,27 @@ export function planScreenedApplications(
     // verdict, since the warning is the only signal that the gate had no config to judge by.
     if ("warning" in techVerdict) warnings.add(techVerdict.warning);
 
+    // THE HOLD (2026-11-12, Teja via the orchestrator, plan B). No description means nothing after the title can be
+    // judged, and "matched nothing configured" on a title alone is missing data, not a verdict (CLAUDE.md section 6;
+    // live: 668 Workday rows dropped tech_gate_unclassified in 3 days with an empty body). So a blank description
+    // whose title the gate passed OR could not classify is held: born at 'discovered', re-judged by the screener once
+    // a scout poll stores the text. A title the gate REJECTS (an exclusion, a title rule) still drops below by its own
+    // code, because that verdict is about the title, which is there to judge. Never passed: the 2026-11-04 evidence
+    // (459 blank Workday rows passed, 391 then failed at the matcher) is why stage 0a exists. The blank test is the
+    // same shape check stage 0a used: only a string with non-whitespace text counts.
+    const blank = typeof entry.row.description_raw !== "string" || entry.row.description_raw.trim().length === 0;
+    // Passed, or dropped only for matching nothing configured.
+    const undecided = !techVerdict.drop || techVerdict.code === "tech_gate_unclassified";
+    // Both: held, with no drop reason; never in the drop log.
+    if (blank && undecided) {
+      // The one non-screened status the insert guard allows.
+      inserts.push({ job_id: entry.jobId, status: "discovered", drop_reason: null });
+      // Named for the run summary.
+      held.push(entry.jobId);
+      // Nothing after the hold runs.
+      continue;
+    }
+
     // A stage-0 rejection short-circuits the cascade entirely.
     if (techVerdict.drop) {
       // `drop_reason` NAMES THE STAGE rather than one of the nine rules. Stage 0 is
@@ -226,7 +259,10 @@ export function planScreenedApplications(
       continue;
     }
 
-    // STAGE 0a: no description, no verdict. Every stage after this one reads the JD: the
+    // STAGE 0a: no description, no verdict. Since 2026-11-12 this is UNREACHABLE for a blank description: the hold
+    // above takes every blank row the tech gate did not reject. Kept as the shape guard it always was (a future edit
+    // to the hold must not let a blank JD reach the stages below), not as a live drop path.
+    // Every stage after this one reads the JD: the
     // work-auth gate's text signals, the experience parser in toScreenableJob, and then the
     // matcher, which fails a blank JD as `missing_description` anyway. Judged on nothing, those
     // stages PASS, so a blank JD became "screened clean" (2026-11-04: 459 Workday rows passed,
@@ -297,9 +333,12 @@ export function planScreenedApplications(
     inserts,
     dropped,
     warnings: [...warnings],
-    // Derived rather than counted separately, so the two can never disagree with the
-    // rows actually planned.
-    passedCount: inserts.length - dropped.length,
+    // Derived rather than counted separately, so the counts can never disagree with the
+    // rows actually planned. Held rows are neither passes nor drops (2026-11-12).
+    passedCount: inserts.length - dropped.length - held.length,
     droppedCount: dropped.length,
+    // The held list and its count.
+    held,
+    heldCount: held.length,
   };
 }

@@ -45,9 +45,10 @@ describe("scout-ats: Workday detail read wiring", () => {
     assert.ok(known < fill && fill < upsert, `order wrong: newRows@${known}, fill@${fill}, upsert@${upsert}`);
   });
 
-  it("reads only postings the title-only tech gate keeps", () => {
-    // The title-only verdict (description null), negated: a dropped title is never read.
-    assert.match(source, /passesTitleGate: \(title\) => !screenTechRole\(title, null, [\w.]+\)\.drop/);
+  it("reads every posting the title-only tech gate does not definitely drop", () => {
+    // The title-only verdict (description null) through the one shared rule (2026-11-12): an unclassified
+    // title is read too, since its keywords may sit in the body; a definite drop is never read.
+    assert.match(source, /worthReading: \(title\) => worthDetailRead\(screenTechRole\(title, null, [\w.]+\)\)/);
   });
 
   it("starts the read budget at handler entry, before the screen context loads", () => {

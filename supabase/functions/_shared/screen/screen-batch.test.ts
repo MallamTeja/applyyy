@@ -319,8 +319,9 @@ test("a technical posting passes the gate and is still screened by the cascade",
 // into the drop_reason column and the run summary's ruleType.
 test("an unclassified posting under a configured gate is born dropped as tech_gate_unclassified", () => {
   const planned = planScreenedApplications(
-    // Matches none of TECH_PREFS' titles or keywords, and none of its exclusions.
-    [{ jobId: "job-8", row: { ...BASE_ROW, title: "Site Reliability Specialist", description_raw: null } }],
+    // Matches none of TECH_PREFS' titles or keywords, and none of its exclusions. It HAS a description: since
+    // 2026-11-12 an unclassified title with NO description is held instead (the hold tests below).
+    [{ jobId: "job-8", row: { ...BASE_ROW, title: "Site Reliability Specialist", description_raw: "Keep our on-call rota healthy." } }],
     // No cascade rules, so stage 0 is the only thing that can drop it.
     [],
     BASE_CONTEXT,
@@ -485,7 +486,10 @@ test("work auth: an unset list passes a US on-site posting and warns", () => {
 // screener passed 459 of them, judging the experience and JD-text work-auth stages on nothing,
 // and the matcher then failed 391 as `missing_description`. That was a wasted queue slot each,
 // and a sweep log that never said so. A job with no text to judge is now refused at birth.
-test("a job with no description is born dropped_filter missing_description, never passed_filters", () => {
+// FLIPPED 2026-11-12 (Teja via the orchestrator, plan B): "no text" is not an answer, so it is no longer a drop either
+// (CLAUDE.md section 6). The row is HELD: born at `discovered`, and the screener re-judges it once a scout poll has
+// stored its text. Still never passed_filters, which was the 11-05 point.
+test("a job with no description is born HELD at discovered, never passed_filters and never dropped", () => {
   const planned = planScreenedApplications(
     // A technical title, so the tech gate passes it and only the description can decide.
     [{ jobId: "wd-1", row: { ...BASE_ROW, title: "Software Engineer", description_raw: null } }],
@@ -495,12 +499,14 @@ test("a job with no description is born dropped_filter missing_description, neve
     // A configured gate, so "passed the tech gate" is a real verdict and not an open gate.
     TECH_PREFS,
   );
-  // Born dropped, under its own code.
-  assert.deepEqual(planned.inserts, [{ job_id: "wd-1", status: "dropped_filter", drop_reason: "missing_description" }]);
-  // The run summary names the same code, so the scout's log can count it.
-  assert.equal(planned.dropped[0]!.ruleType, "missing_description");
-  // Counters agree with the rows.
-  assert.equal(planned.passedCount, 0);
+  // Born held: the one non-screened status the insert guard allows, with no drop reason.
+  assert.deepEqual(planned.inserts, [{ job_id: "wd-1", status: "discovered", drop_reason: null }]);
+  // Named in the plan, so the run summary can count it.
+  assert.deepEqual(planned.held, ["wd-1"]);
+  // Not a drop: nothing for the drop log.
+  assert.equal(planned.dropped.length, 0);
+  // Counters agree with the rows: held is its own count, never a pass.
+  assert.deepEqual([planned.passedCount, planned.droppedCount, planned.heldCount], [0, 0, 1]);
 });
 
 // The shape that passes is a non-empty string after trimming. A lenient truthiness read would
@@ -517,8 +523,8 @@ test("an empty, whitespace-only or absent description is blank too", () => {
   ];
   // One batch, so a per-entry bug cannot hide behind a single-entry test.
   const planned = planScreenedApplications(blanks.map((row, i) => ({ jobId: `blank-${i}`, row })), [], BASE_CONTEXT, OPEN_PREFS);
-  // Every one dropped for the description.
-  assert.deepEqual(planned.inserts.map((row) => row.drop_reason), ["missing_description", "missing_description", "missing_description"]);
+  // Every one held for the description (FLIPPED 2026-11-12, see above).
+  assert.deepEqual(planned.inserts.map((row) => row.status), ["discovered", "discovered", "discovered"]);
 });
 
 // Order matters for two reasons. The tech gate is cheaper, and its code keeps the dashboard's
@@ -567,4 +573,43 @@ test("T12: an ATS board row sharing company and title with an applied ATS job is
   );
   // Passed the cascade: no drop reason at all.
   assert.deepEqual([planned.inserts[0]!.status, planned.inserts[0]!.drop_reason ?? null], ["passed_filters", null]);
+});
+
+// --- held: no description, not judgeable yet (2026-11-12) ---------------------------------------------------
+// Teja via the orchestrator (17:30 IST, plan B): 668 Workday rows in 3 days had an EMPTY description and were dropped
+// as tech_gate_unclassified. Missing data must not become an answer (CLAUDE.md section 6), so a blank description
+// with a title the gate passes OR cannot classify is HELD. A title the gate clearly rejects still drops by its own code.
+
+test("held: a blank description with an UNCLASSIFIED title is held, not dropped as tech_gate_unclassified", () => {
+  // The live shape: a title matching nothing configured, no description.
+  const planned = planScreenedApplications([{ jobId: "wd-u", row: { ...BASE_ROW, title: "Site Reliability Specialist", description_raw: null } }], [], BASE_CONTEXT, TECH_PREFS);
+  // Held, with no reason.
+  assert.deepEqual(planned.inserts, [{ job_id: "wd-u", status: "discovered", drop_reason: null }]);
+  // Counted as held.
+  assert.equal(planned.heldCount, 1);
+});
+
+test("held: a blank description with a title a TITLE RULE rejects still drops by that rule's code", () => {
+  // A seniority title (Rule 1): the gate's verdict is about the title, which is there to judge.
+  const planned = planScreenedApplications([{ jobId: "wd-s", row: { ...BASE_ROW, title: "AVP Software Engineer", description_raw: null } }], [], BASE_CONTEXT, TECH_PREFS);
+  // Dropped by the rule, not held.
+  assert.deepEqual(planned.inserts, [{ job_id: "wd-s", status: "dropped_filter", drop_reason: "title_seniority" }]);
+  // Nothing held.
+  assert.equal(planned.heldCount, 0);
+});
+
+test("held: a mixed batch counts passed, dropped and held apart, and they sum to the rows", () => {
+  // One of each: a pass (text present), an exclusion drop, a hold.
+  const planned = planScreenedApplications([
+    // A recognised title with text.
+    { jobId: "p", row: { ...BASE_ROW, fingerprint: "fp-p", title: "Software Engineer", description_raw: "Build React apps." } },
+    // An excluded title.
+    { jobId: "d", row: { ...BASE_ROW, fingerprint: "fp-d", title: "Enterprise Sales Executive", description_raw: null } },
+    // A recognised title without text.
+    { jobId: "h", row: { ...BASE_ROW, fingerprint: "fp-h", title: "Software Engineer", description_raw: "  " } },
+  ], [], BASE_CONTEXT, TECH_PREFS);
+  // Each counted once.
+  assert.deepEqual([planned.passedCount, planned.droppedCount, planned.heldCount], [1, 1, 1]);
+  // And the held list names the held job only.
+  assert.deepEqual(planned.held, ["h"]);
 });

@@ -30,7 +30,7 @@ import { readBoardPages, robotsGatedGet } from '../scout/board-pages.ts';
 // Disappearance marking with the edge's own planner (2026-11-05): this cron scout never marked any.
 import { applyBoardLiveness, readLivenessSnapshot } from '../scout/liveness-marking.ts';
 // The Workday detail read (2026-11-05): one run per scout run, so its read cap spans every board.
-import { newWorkdayDetailRun, WORKDAY_DETAIL_CAP, type WorkdayDetailRun } from '../../../supabase/functions/_shared/scout/workday-detail.ts';
+import { newWorkdayDetailRun, WORKDAY_DETAIL_CAP, worthDetailRead, type WorkdayDetailRun } from '../../../supabase/functions/_shared/scout/workday-detail.ts';
 // The title-only verdict decides which Workday postings are worth a detail read.
 import { screenTechRole } from '../../../supabase/functions/_shared/screen/tech-gate.ts';
 // The shared countdown, so this run's budget is measured the way the matcher's is.
@@ -267,7 +267,7 @@ async function main(): Promise<void> {
       // The board poll's robots gate ('scouting' policy), returning the raw Response.
       get: (url) => robotsGatedGet(url),
       // Title only (description null): the description is what this read is for.
-      passesTitleGate: (title) => !screenTechRole(title, null, screenContext.value.preferences).drop,
+      worthReading: (title) => worthDetailRead(screenTechRole(title, null, screenContext.value.preferences)),
       // The run's 12-min countdown; reads stop with 20 s left (WORKDAY_DETAIL_MIN_REMAINING_MS).
       deadline,
       // A real pause between reads.

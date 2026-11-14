@@ -5,7 +5,9 @@ import { test } from "node:test";
 // Strict, so a missing field never quietly compares equal to null.
 import assert from "node:assert/strict";
 // The unit under test and its run state.
-import { fillWorkdayDescriptions, newWorkdayDetailRun, WORKDAY_DETAIL_PAUSE_MS, type WorkdayDetailDeps } from "./workday-detail.ts";
+import { fillWorkdayDescriptions, newWorkdayDetailRun, WORKDAY_DETAIL_PAUSE_MS, worthDetailRead, type WorkdayDetailDeps } from "./workday-detail.ts";
+// The real stage-0 gate, so the read decision is tested against the verdicts production produces.
+import { screenTechRole, type TechGatePreferences } from "../screen/tech-gate.ts";
 // The real robots-gated GET scout-ats uses, for the robots test.
 import { fetchBoard } from "../../scout-ats/poll-fetch.ts";
 // Row shape from the schema owner.
@@ -60,7 +62,7 @@ function deps(answer: () => Response | null, overrides: Partial<WorkdayDetailDep
     // Records the URL and answers.
     get: async (url) => { urls.push(url); return answer(); },
     // A technical title passes; anything with "Sales" is dropped, like the real gate's exclusions.
-    passesTitleGate: (title) => !/sales/i.test(title),
+    worthReading: (title) => !/sales/i.test(title),
     // Plenty of time unless a test says otherwise.
     deadline: { remainingMs: () => 600_000 },
     // Recorded, not slept, so the test is instant.
@@ -286,4 +288,35 @@ test("a single-site listing keeps its own location; only 'N Locations' is replac
   await fillWorkdayDescriptions([row], newWorkdayDetailRun(d, 5));
   // Untouched: the list's own prose is already a place.
   assert.equal(row.location_raw, "Pune, India");
+});
+
+// THE 668 (2026-11-12). Live: every one of the 668 Workday rows dropped as tech_gate_unclassified in 3 days
+// had an empty description, because the read was spent only on titles the title-only gate PASSED. A
+// title-only "unclassified" is not an answer: the configured keywords are matched against the description
+// head too, which the gate had not seen. These preferences mirror the live shape (titles, keywords, exclusions).
+const LIVE_LIKE: TechGatePreferences = { titles: ["Software Engineer", "Intern"], keywords: ["python", "selenium"], excludedKeywords: ["senior"] };
+
+test("worthDetailRead reads a title the gate cannot classify alone, and skips a definite drop", () => {
+  // "SDET" matches no configured title: unclassified on the title alone, so the body must be read.
+  assert.equal(worthDetailRead(screenTechRole("SDET", null, LIVE_LIKE)), true);
+  // A title the gate passes on its own is still read (the old behaviour).
+  assert.equal(worthDetailRead(screenTechRole("Software Engineer", null, LIVE_LIKE)), true);
+  // An excluded term is a definite drop: no read is spent on it.
+  assert.equal(worthDetailRead(screenTechRole("Senior Software Engineer", null, LIVE_LIKE)), false);
+});
+
+test("an unclassified-by-title Workday posting gets its body read, and the screener then keeps it", async () => {
+  // The live miss: a Concentrix SDET in Hyderabad, unclassifiable by title.
+  const row = workdayRow("SDET");
+  // The detail answers with a body that names a configured keyword.
+  const d = deps(() => new Response(detailBody("<p>Automate tests with Selenium and Python.</p>"), { status: 200 }), {
+    // The production predicate over the real gate, exactly as both scouts wire it.
+    worthReading: (title) => worthDetailRead(screenTechRole(title, null, LIVE_LIKE)),
+  });
+  // Fill.
+  await fillWorkdayDescriptions([row], newWorkdayDetailRun(d, 5));
+  // The body was read.
+  assert.match(row.description_raw ?? "", /Selenium/);
+  // And the screener, now seeing text, keeps the posting instead of dropping it unclassified.
+  assert.equal(screenTechRole(row.title, row.description_raw, LIVE_LIKE).drop, false);
 });

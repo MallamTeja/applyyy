@@ -51,7 +51,7 @@ import { addInsertedApplications, newApplicationsReport, newApplicationTally } f
 import type { AtsProvider, JobInsert } from "../_shared/contracts/shared-types.ts";
 // The Workday detail read (2026-11-05): the list endpoint carries no description, so new
 // title-passing Workday rows get theirs from the detail endpoint before they are stored.
-import { fillWorkdayDescriptions, newWorkdayDetailRun, WORKDAY_DETAIL_CAP, type WorkdayDetailRun } from "../_shared/scout/workday-detail.ts";
+import { fillWorkdayDescriptions, newWorkdayDetailRun, WORKDAY_DETAIL_CAP, worthDetailRead, type WorkdayDetailRun } from "../_shared/scout/workday-detail.ts";
 // Queue liveness (2026-11-07): a queue row that left its board is confirmed closed on the same poll,
 // so Teja never approves or applies to a dead posting (the 14-day backlog wait does not apply to it).
 import { checkPosting, postingCheckUrl, queueApplicationIds, queueCandidates, QUEUE_LIVENESS_CAP, type QueueSnapshotJob } from "../_shared/scout/queue-liveness.ts";
@@ -343,7 +343,7 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
       // The same robots-gated GET the board poll uses ('scouting' policy).
       get: (detailUrl) => fetchBoard(detailUrl),
       // Title only (description null): the description is what this read is for.
-      passesTitleGate: (title) => !screenTechRole(title, null, screenContext.value.preferences).drop,
+      worthReading: (title) => worthDetailRead(screenTechRole(title, null, screenContext.value.preferences)),
       // The handler-entry countdown.
       deadline,
       // A real pause between reads; tests inject their own in workday-detail.test.ts.

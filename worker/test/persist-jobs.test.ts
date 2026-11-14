@@ -127,7 +127,7 @@ describe('persistJobBatch: Workday detail read', () => {
         return new Response(JSON.stringify({ jobPostingInfo: { jobDescription: '<p>Build services in Go.</p>' } }));
       },
       // Title gate out of scope here.
-      passesTitleGate: () => true,
+      worthReading: () => true,
       // Always plenty of time left.
       deadline: { remainingMs: () => 60_000 } as never,
       // Tests never sleep.

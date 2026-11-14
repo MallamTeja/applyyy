@@ -93,7 +93,7 @@ const run = newWorkdayDetailRun({
   // scout-ats's GET, sharing one robots cache across the run.
   get: (url) => fetchBoard(url),
   // These rows reached passed_filters, so the title gate already passed them.
-  passesTitleGate: () => true,
+  worthReading: () => true,
   // An hour is far more than 391 reads at 500 ms apart need; it only bounds a hung run.
   deadline: createDeadline({ budgetMs: 3_600_000 }),
   // A real pause between reads.

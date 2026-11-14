@@ -22,6 +22,8 @@ import { parseWorkdayDescription, parseWorkdayLocations, WORKDAY_LOCATION_COUNT,
 import type { Deadline } from "../agent/deadline.ts";
 // Row shape from the schema owner.
 import type { JobInsert } from "../contracts/shared-types.ts";
+// The stage-0 verdict the read decision is made from (type only; tech-gate.ts stays the gate's owner).
+import type { TechGateVerdict } from "../screen/tech-gate.ts";
 
 // ponytail: a fixed per-run cap and a fixed pause, not a per-host rate limiter. Ceiling: a
 // posting past the cap is saved with no description, the screener drops it as
@@ -45,9 +47,9 @@ export interface WorkdayDetailDeps {
   // One robots-gated GET. It may throw (robots refusal, HTTP error, network); a throw counts as
   // "no description", never as a failed board.
   readonly get: (url: string) => Promise<Response | null>;
-  // The title-only tech gate verdict: true means the posting survives it. A title the gate
-  // drops is never read, which is what keeps the reads to a fraction of a board.
-  readonly passesTitleGate: (title: string) => boolean;
+  // Whether this title is worth a detail read: both scouts pass worthDetailRead over the title-only
+  // verdict. False only for a DEFINITE drop, which is what keeps the reads to a fraction of a board.
+  readonly worthReading: (title: string) => boolean;
   // The scout's own budget: reads stop when too little is left.
   readonly deadline: Deadline;
   // The pause between reads; injected so tests do not sleep.
@@ -72,6 +74,18 @@ export function newWorkdayDetailRun(deps: WorkdayDetailDeps, cap: number): Workd
   return { ...deps, left: cap, fetched: 0, filled: 0, skipped: 0 };
 }
 
+// WHICH TITLES ARE READ (2026-11-12). Every title-only verdict except a DEFINITE drop. Before this, only
+// titles the gate PASSED were read, and a title-only "tech_gate_unclassified" counted as a drop. It is not
+// one: the configured keywords are also matched against the description head (tech-gate.ts haystack), which a
+// title-only call has not seen. Live, all 668 Workday rows dropped unclassified in 3 days had an empty body
+// (Concentrix SDET, Northern Trust "Associate - Software Eng", a Cigna intern). Every other drop code is
+// decided by the title alone (an excluded term, seniority, PhD-only, non-software, a campus programme), so a
+// read could not change it and is not spent. Exported so both scouts call the one rule.
+export function worthDetailRead(verdict: TechGateVerdict): boolean {
+  // A pass is read, as before; only "unclassified" among the drops still depends on the body.
+  return !verdict.drop || verdict.code === "tech_gate_unclassified";
+}
+
 // Fill `description_raw` in place on every new Workday row that has no text, passes the title
 // gate and still fits the run's cap and deadline. Every other row is left exactly as it was.
 export async function fillWorkdayDescriptions(rows: readonly JobInsert[], run: WorkdayDetailRun): Promise<void> {
@@ -81,8 +95,8 @@ export async function fillWorkdayDescriptions(rows: readonly JobInsert[], run: W
     if (row.ats_provider !== "workday") continue;
     // A row that already has text (a pasted link, a re-run) is never read again.
     if (typeof row.description_raw === "string" && row.description_raw.trim().length > 0) continue;
-    // A title the gate drops is never read; the screener drops it as tech_gate.
-    if (!run.passesTitleGate(row.title)) continue;
+    // A title definitely dropped is never read; the screener drops it with that same code.
+    if (!run.worthReading(row.title)) continue;
     // The detail URL, or null for a link of any other shape; null is never guessed at.
     const url = workdayDetailUrl(row.apply_url);
     // An unbuildable URL is no read.

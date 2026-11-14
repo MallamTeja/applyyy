@@ -226,6 +226,9 @@ export interface RemoteRunResult {
   // Screener verdicts (planned, in a dry run).
   readonly passed: number;
   readonly dropped: number;
+  // Held (2026-11-12): no description to judge yet, queued at 'discovered' for the screener to judge once text arrives.
+  // Its own count, so a held row is never reported as a pass or a drop.
+  readonly held: number;
   // Applications actually created (always 0 in a dry run).
   readonly applications: number;
   // New postings queued at dropped_filter because an ATS twin exists (planned, in a dry run) (T12).
@@ -274,7 +277,7 @@ export async function runRemoteScout(deps: RemoteRunDeps): Promise<RemoteRunResu
   };
 
   // The base result, filled in as the run proceeds.
-  const result = { failedFeeds: [] as RemoteFeed[], fetched: 0, refused: 0, prepared: 0, passed: 0, dropped: 0, applications: 0, twinDrops: 0, swept: 0, errors };
+  const result = { failedFeeds: [] as RemoteFeed[], fetched: 0, refused: 0, prepared: 0, passed: 0, dropped: 0, held: 0, applications: 0, twinDrops: 0, swept: 0, errors };
 
   // KILL SWITCH, read the way scout.ts reads it: maybeSingle so a missing row is "off"
   // (fail closed), and a read error is a failed run, never mistaken for "switch off".
@@ -455,11 +458,13 @@ export async function runRemoteScout(deps: RemoteRunDeps): Promise<RemoteRunResu
       // Planned verdicts, reported as such.
       result.passed = plan.passedCount;
       result.dropped = plan.droppedCount;
+      // Planned holds, beside the other two.
+      result.held = plan.heldCount;
       // Collected for the summary.
       for (const w of plan.warnings) warnings.add(w);
     }
     // The whole answer of a dry run.
-    log(`DRY RUN: ${result.prepared} postings would be written; screener would pass ${result.passed} and drop ${result.dropped}. Nothing was written.`);
+    log(`DRY RUN: ${result.prepared} postings would be written; screener would pass ${result.passed}, drop ${result.dropped} and hold ${result.held} (no description yet). Nothing was written.`);
     for (const w of warnings) log(`⚠️ screener warning: ${w}`);
     // No close: no run row was opened.
     return { ...result, status: 'dry_run' };
@@ -492,9 +497,11 @@ export async function runRemoteScout(deps: RemoteRunDeps): Promise<RemoteRunResu
       // Tallied for the run.
       result.passed += plan.passedCount;
       result.dropped += plan.droppedCount;
+      // Held rows (no description yet), inserted at 'discovered' by the plan itself.
+      result.held += plan.heldCount;
       // Collected for the run row.
       for (const w of plan.warnings) warnings.add(w);
-      // Rows at passed_filters / dropped_filter.
+      // Rows at passed_filters / dropped_filter, and held rows at discovered.
       inserts = plan.inserts;
     } else {
       // The honest fallback, identical to scout.ts.
@@ -541,7 +548,7 @@ export async function runRemoteScout(deps: RemoteRunDeps): Promise<RemoteRunResu
   // Every feed down is a failed run, not a quiet success with zero rows.
   const allFeedsDown = result.failedFeeds.length === feeds.length;
   // The summary the Actions log shows.
-  log(`fetched ${result.fetched}, refused ${result.refused}, kept ${result.prepared}; screener passed ${result.passed}, dropped ${result.dropped}; ${result.twinDrops} queued as ATS duplicates; ${result.swept} swept to dropped_duplicate; ${result.applications} new applications; ${errors.length} write error(s).`);
+  log(`fetched ${result.fetched}, refused ${result.refused}, kept ${result.prepared}; screener passed ${result.passed}, dropped ${result.dropped}, held ${result.held} (no description yet); ${result.twinDrops} queued as ATS duplicates; ${result.swept} swept to dropped_duplicate; ${result.applications} new applications; ${errors.length} write error(s).`);
   // HONEST CLOSE: any write error or a total feed outage makes the run 'failed'.
   const status = errors.length > 0 || allFeedsDown ? 'failed' : 'succeeded';
   // The detail names the cause; rule warnings ride along as on every screening run.

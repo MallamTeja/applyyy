@@ -30,6 +30,8 @@ import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 import { withRuleWarnings } from "../_shared/screen/run-summary.ts";
 // The shared `?application_id=` parser, so screener and normalizer refuse a bad id identically.
 import { parseApplicationIdParam } from "../_shared/http/application-id.ts";
+// The queue rules for held rows (2026-11-12): fetch only rows with text, and never write a held verdict.
+import { DEDUPED_QUEUE_SELECT, queueActionFor } from "./queue.ts";
 
 // Default batch processing size per run.
 const DEFAULT_BATCH_SIZE = 50;
@@ -150,8 +152,14 @@ Deno.serve(withErrorBoundary("screener", async (req: Request): Promise<Response>
   const batchSize = resolveBatchSize(url.searchParams.get("limit"));
   const { data: apps, error: appsError } = await db
     .from("applications")
-    .select("id, job_id, user_id, status, jobs ( id, fingerprint, title, company_name, company_slug, location_raw, locations, employment_type, min_experience_years, requires_advanced_degree, posted_at, posted_at_source, description_raw )")
+    // jobs!inner, so the text filter below removes a held row from the page (queue.ts says why).
+    .select(DEDUPED_QUEUE_SELECT)
     .eq("status", "deduped")
+    // Only rows whose job has text: not null and not empty (queue.ts says why; queue.test.ts pins these two calls).
+    // ponytail: whitespace-only text passes these filters but is blank to screen-batch, so such a row is fetched and
+    // held again each run; move to an RPC with btrim() if the System health hold count shows them piling up.
+    .not("jobs.description_raw", "is", null)
+    .neq("jobs.description_raw", "")
     // Narrow to the one requested row; the status filter stays, so a wrong-status id yields
     // zero rows (a no-op). An empty match object is a no-op when untargeted.
     .match(applicationId !== null ? { id: applicationId } : {})
@@ -214,16 +222,13 @@ Deno.serve(withErrorBoundary("screener", async (req: Request): Promise<Response>
 
     const insertResult = plan.inserts[0];
     if (!insertResult) continue;
+    // What to do with it: a held row (no description yet) stays at deduped, unwritten (queue.ts).
+    const action = queueActionFor(insertResult);
+    // Held: the row waits for its text; the queue filter keeps it off later pages until then.
+    if (action.kind === "hold") continue;
 
     // One write path for both verdicts: drop_reason first, status second, via the RPC.
-    const written = await persistScreenVerdict(
-      db,
-      app.id,
-      // Narrowed per branch so the union stays closed: a pass never carries a reason.
-      insertResult.status === "passed_filters"
-        ? { status: "passed_filters", reason: null }
-        : { status: "dropped_filter", reason: insertResult.drop_reason },
-    );
+    const written = await persistScreenVerdict(db, app.id, action.verdict);
 
     // A refused write leaves the row at `deduped` for the next run, and is counted.
     if (!written.ok) {
