@@ -119,7 +119,15 @@ test("nested job rows are flattened into fingerprint and company slug", async ()
             approved_at: "2026-09-15T00:00:00.000Z",
             applied_at: "2026-09-16T00:00:00.000Z",
             // company_name and title feed the cross-source set (T12, 2026-11-10), so the input carries them too.
-            jobs: { fingerprint: "fp-1", company_slug: "zomato", company_name: "Zomato", title: "Backend Engineer", ats_provider: "greenhouse" },
+            jobs: { fingerprint: "fp-1", company_slug: "zomato", company_name: "Zomato", title: "Backend Engineer", ats_provider: "greenhouse", ats_job_id: "5150422" },
+          },
+          // A queued row (2026-11-18): read for the same-ATS-id set, flagged not committed.
+          {
+            status: "awaiting_approval",
+            approved_at: null,
+            applied_at: null,
+            // No ats_job_id key at all: the adapter must turn the absence into null, never undefined.
+            jobs: { fingerprint: "fp-2", company_slug: "canonical", company_name: "Canonical", title: "Web Engineer", ats_provider: "greenhouse" },
           },
         ],
         error: null,
@@ -130,7 +138,10 @@ test("nested job rows are flattened into fingerprint and company slug", async ()
   assert.deepEqual((await queries.applicationHistory()).rows, [
     // applied_at wins over approved_at: submission is the later, precise commit event.
     // The job's company and title pass through unchanged (T12): the context folds them, the adapter does not.
-    { fingerprint: "fp-1", company_slug: "zomato", company_name: "Zomato", title: "Backend Engineer", ats_provider: "greenhouse", committed_at: "2026-09-16T00:00:00.000Z" },
+    // ats_job_id passes through; `applied` is a committed status (2026-11-18).
+    { fingerprint: "fp-1", company_slug: "zomato", company_name: "Zomato", title: "Backend Engineer", ats_provider: "greenhouse", ats_job_id: "5150422", committed: true, committed_at: "2026-09-16T00:00:00.000Z" },
+    // The queued row: committed false, absent id as null, no commit stamp.
+    { fingerprint: "fp-2", company_slug: "canonical", company_name: "Canonical", title: "Web Engineer", ats_provider: "greenhouse", ats_job_id: null, committed: false, committed_at: null },
   ]);
 });
 
@@ -161,4 +172,30 @@ test("a query error is carried through with its message and null rows", async ()
   const result = await queries.filterRules();
   assert.equal(result.rows, null);
   assert.equal(result.error, "permission denied");
+});
+
+// 2026-11-18, pending #5: the same-ATS-id set must not block a retitled copy whose earlier row never reached Teja.
+// dropped_filter is excluded server-side (the status list; pinned in application-history-status.test.ts). A `failed`
+// row that was never approved never reaches the loader, so its ATS id cannot block anything. An APPROVED-then-failed
+// row stays in the history on purpose: it may have been submitted (the fail-closed rule COMMITTED_STATUSES states).
+test("2026-11-18: a never-approved failed row carries no ATS id into the history; an approved-then-failed one does", async () => {
+  // Two failed rows on the same board: one failed in the pipeline, one after approval.
+  const queries = supabaseScreenQueries(
+    client({
+      applications: {
+        data: [
+          // Failed in the tailor, never approved (the Supabase Storage ATS copy's shape, e625b50f).
+          { status: "failed", approved_at: null, applied_at: null, jobs: { fingerprint: "fp-pipe", company_slug: "supabase", company_name: "Supabase", title: "SWE - Storage", ats_provider: "ashby", ats_job_id: "9f2ba0b2" } },
+          // Failed after approval (human_did_not_submit): may have been sent, so it stays.
+          { status: "failed", approved_at: "2026-11-12T07:08:00.000Z", applied_at: null, jobs: { fingerprint: "fp-sent", company_slug: "gitlab", company_name: "GitLab", title: "Fullstack Engineer", ats_provider: "greenhouse", ats_job_id: "8698330002" } },
+        ],
+        error: null,
+      },
+    }),
+    NOW,
+  );
+  // The ids that reached the history.
+  const ids = ((await queries.applicationHistory()).rows ?? []).map((row) => row.ats_job_id);
+  // Only the approved one.
+  assert.deepEqual(ids, ["8698330002"]);
 });

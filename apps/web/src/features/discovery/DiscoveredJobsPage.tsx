@@ -84,7 +84,7 @@ import type { PipelineStep } from '../pipeline/rowPipeline.ts';
 // The real invoke/read deps, or null on an unconfigured machine (the button then explains itself).
 import { liveRowPipelineDeps } from '../pipeline/rowPipelineDeps.ts';
 // The tested list logic: lanes, paging, sort, the date marker and the honest counter text.
-import { DISCOVERED_LIST_SELECT, LANES, searchLoadedDescriptions, SORT_OPTIONS, appendUnique, emptyListMessage, hasMoreRows, OPENING_LANE, isCurrentLane, keysetFilter, laneCountsFrom, laneTotalFrom, loadedOfText, pageLimit, postedDate, sortItems } from './discoveredList.ts';
+import { DISCOVERED_LIST_SELECT, LANES, searchLoadedDescriptions, SORT_OPTIONS, appendUnique, emptyListMessage, hasMoreRows, hasNoDescription, OPENING_LANE, isCurrentLane, keysetFilter, laneCountsFrom, laneTotalFrom, loadedOfText, pageLimit, postedDate, sortItems } from './discoveredList.ts';
 // Every status's count in one RPC (application_status_counts), reused rather than a new per-lane query.
 import { useApplicationCounts } from '../../data/useApplicationCounts.ts';
 // Type only: the job row as the narrowed select delivers it, derived from DISCOVERED_JOB_COLUMNS.
@@ -745,10 +745,15 @@ export function DiscoveredJobsPage(): ReactElement {
           </button>
           </>)}
 
+          {/* TOOLBAR BUTTONS (2026-11-18, Teja 21:58: "those buttons really looking very dirty styling"). The row used
+              .chip-btn, which only settings.css defines, and settings.css loads only on the Answer Bank chunk, so here
+              every button fell back to its inline style or the bare button rule: five looks. Now one ladder from
+              base.css (always loaded): Add a job by link is the primary, the scouts are secondary, Run pipeline is
+              secondary with a caution edge (it spends Gemini on many rows), and Rules is a ghost. */}
           <Link
             to="/filters"
-            className="chip-btn"
-            style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+            // A ghost: a navigation that must be reachable but must not compete with the actions.
+            className="button button--ghost discovery__toolbar-link"
             title="Configure filter rules and thresholds"
           >
             Rules
@@ -773,8 +778,8 @@ export function DiscoveredJobsPage(): ReactElement {
 
           <button
             type="button"
-            className="chip-btn"
-            style={{ fontWeight: 600, /* --accent is always defined; a hex fallback would only mask a typo'd token. */ color: 'var(--accent)', borderColor: 'var(--accent)' }}
+            // Secondary: a scan Teja can start, but not the page's main action.
+            className="button button--secondary"
             onClick={() => setDiscoveryModalMode('watchlist')}
             title="Scan Greenhouse, Lever, and Ashby boards on your Company Watchlist"
           >
@@ -783,8 +788,8 @@ export function DiscoveredJobsPage(): ReactElement {
 
           <button
             type="button"
-            className="chip-btn"
-            style={{ fontWeight: 600, /* --accent is always defined; a hex fallback would only mask a typo'd token. */ color: 'var(--accent)', borderColor: 'var(--accent)' }}
+            // Secondary, like the watchlist scan beside it.
+            className="button button--secondary"
             onClick={() => setDiscoveryModalMode('remote')}
             /* The feeds run daily on a schedule now; the button explains that rather than scanning. */
             title="Remote feeds are scouted automatically every day at 07:00 IST"
@@ -795,8 +800,8 @@ export function DiscoveredJobsPage(): ReactElement {
 
           <button
             type="button"
-            className="chip-btn"
-            style={{ fontWeight: 600, /* Success token themes via light-dark(); #10b981 was a single shade for both modes. */ color: 'var(--traced)', borderColor: 'var(--traced)' }}
+            // Secondary plus a caution edge: it spends Gemini on every eligible row (the modal asks for a typed confirm).
+            className="button button--secondary discovery__toolbar-caution"
             onClick={() => setPipelineModalOpen(true)}
             title="Run the deployed agent pipeline (Normalizer -> Screener -> Matcher -> Tailor -> Auditor) to tailor and queue jobs"
           >
@@ -976,8 +981,8 @@ export function DiscoveredJobsPage(): ReactElement {
           <button
             /* Not a submit: the page has no form around it. */
             type="button"
-            /* The page's existing small-button look. */
-            className="chip-btn"
+            /* The page's small secondary button (base.css; .chip-btn lives only in settings.css, unloaded here). */
+            className="button button--secondary button--small"
             /* Empties the strip; nothing is written anywhere. */
             onClick={() => setSendResults([])}
           >
@@ -1001,8 +1006,8 @@ export function DiscoveredJobsPage(): ReactElement {
               <button
                 /* Not a submit: the page has no form. */
                 type="button"
-                /* The strip's existing small-button look, as Clear results uses. */
-                className="chip-btn"
+                /* The strip's small secondary button, as Clear results uses. */
+                className="button button--secondary button--small"
                 /* Disabled while this row's undo runs, so a double click cannot send two. */
                 disabled={isRowInFlight(rejectNote.undo.applicationId)}
                 /* The promise is handled inside undoReject; nothing here awaits it. */
@@ -1032,8 +1037,8 @@ export function DiscoveredJobsPage(): ReactElement {
             <button
               /* Not a submit: the page has no form. */
               type="button"
-              /* The page's existing small-button look. */
-              className="chip-btn"
+              /* The page's small secondary button (base.css; .chip-btn lives only in settings.css, unloaded here). */
+              className="button button--secondary button--small"
               /* The same lane switch the buttons above use, so the reload and the ref stay in step. */
               onClick={() => switchLane('ready')}
             >
@@ -1093,6 +1098,12 @@ export function DiscoveredJobsPage(): ReactElement {
                     </span>
                   );
                 })()}
+                {hasNoDescription(job) && (
+                  /* 2026-11-18: no-JD jobs now land in Ready to tailor (Teja 21:46 IST); say so before a Send. */
+                  <span className="job-pill job-pill--no-description" title="The posting has no description yet: matching and tailoring will work from the title alone.">
+                    No description
+                  </span>
+                )}
                 {job.location_raw && (
                   <span className="job-pill" title={job.location_raw}>
                     {job.location_raw.length > 28 ? `${job.location_raw.slice(0, 26)}…` : job.location_raw}
@@ -1244,8 +1255,8 @@ export function DiscoveredJobsPage(): ReactElement {
           <button
             /* Not a submit: the page has no form. */
             type="button"
-            /* The page's existing small-button look. */
-            className="chip-btn"
+            /* The page's small secondary button (base.css; .chip-btn lives only in settings.css, unloaded here). */
+            className="button button--secondary button--small"
             /* One page at a time; a second click during the fetch would ask for the same range. */
             disabled={loadingMore}
             /* Goes through loadData so the sequence guard drops it if the lane changes meanwhile. */

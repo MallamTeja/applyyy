@@ -19,6 +19,8 @@ import { loadScreenContext, type ScreenQueries } from "./context.ts";
 import type { FilterRuleRow } from "../contracts/shared-types.ts";
 // The production twin key, so the expected set is computed the same way the loader computes it.
 import { crossSourceKey } from "../normalize/fingerprint.ts";
+// The same-ATS-id key builder (2026-11-18), imported from the rule so the test cannot fold ids differently.
+import { atsJobKeyOf } from "../filter/cascade.ts";
 
 // A fixed clock, so the context's `now` is assertable rather than flaky.
 const NOW = new Date("2026-09-17T12:00:00.000Z");
@@ -133,7 +135,41 @@ test("the screen context carries no per-company weekly count (the cap is retired
         "appliedFingerprints",
         "appliedCrossKeys",
         "appliedAggregatorCrossKeys",
+        // Joined 2026-11-18 (pending #5): the same-ATS-id set.
+        "appliedAtsJobKeys",
       ].sort());
+});
+
+// 2026-11-18, pending #5: the same-ATS-id set holds committed AND queued rows; the other sets stay committed-only.
+test("2026-11-18: the same-ATS-id set holds committed and awaiting_approval rows; a queued row adds no fingerprint", async () => {
+  // Canonical's applied copy, a queued posting, an id-less row, and an older row with no committed flag at all.
+  const result = await loadScreenContext(
+    queries({
+      applicationHistory: () =>
+        Promise.resolve({
+          rows: [
+            // Applied: both kinds of entry.
+            { fingerprint: "fp-applied", company_slug: "canonical", company_name: "Canonical", title: "Web Frontend Engineer", ats_provider: "greenhouse", ats_job_id: "5150422", committed: true, committed_at: null },
+            // Waiting for approval: only the ATS key.
+            { fingerprint: "fp-queued", company_slug: "acme", company_name: "Acme", title: "Backend", ats_provider: "lever", ats_job_id: "abc-1", committed: false, committed_at: null },
+            // No id: no ATS key, fingerprint still counted.
+            { fingerprint: "fp-noid", company_slug: "x", company_name: "X", title: "Y", ats_provider: "greenhouse", ats_job_id: null, committed: true, committed_at: null },
+            // The flag is missing (an old fixture or a partial row): counted as committed, fail closed.
+            { fingerprint: "fp-noflag", company_slug: "z", company_name: "Z", title: "W", committed_at: null },
+          ] as never,
+          error: null,
+        }),
+    }),
+    NOW,
+  );
+  // Loaded.
+  assert.equal(result.ok, true);
+  // Narrow the union.
+  if (!result.ok) return;
+  // Exactly the two ATS keys, built by the rule's own function.
+  assert.deepEqual([...result.value.context.appliedAtsJobKeys].sort(), [atsJobKeyOf("greenhouse", "5150422"), atsJobKeyOf("lever", "abc-1")].sort());
+  // The queued row is NOT in the fingerprint set; the missing-flag row IS.
+  assert.deepEqual([...result.value.context.appliedFingerprints].sort(), ["fp-applied", "fp-noflag", "fp-noid"]);
 });
 
 // --- the failures, which are the point --------------------------------------------

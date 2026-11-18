@@ -519,12 +519,13 @@ export function AddJobLinkPanel(props: {
   // The dialog stays mounted while closed, so a request (and its run watch) outlives a close.
   return (
     <>
-      {/* chip-btn, like the scout and run buttons beside it in the header row. */}
+      {/* The header row's PRIMARY (2026-11-18): a link Teja chose himself is the page's main way in. base.css .button,
+          like the scout and run buttons beside it (.chip-btn lived only in settings.css, unloaded on this page). */}
       <button
         // Not a submit: the page has no form.
         type="button"
-        // The header row's small-button look.
-        className="chip-btn"
+        // Filled primary: the one action the toolbar leads with.
+        className="button button--primary"
         // Read by the dialog's close handler.
         ref={triggerRef}
         // Tells assistive tech the button opens a dialog.

@@ -1,9 +1,10 @@
-// Tests for the screener's queue rules (2026-11-12, plan B: held rows).
+// Tests for the screener's queue rules.
 //
-// WHY THESE EXIST. A row with no description is HELD at `deduped` until a scout poll stores its text. The screener's
-// queue is oldest-first with a page limit and no cursor (screener/index.ts), so a held row it fetched would sort first
-// forever: past ~100 held rows, newer rows are never reached, and prescreen-drain.yml aborts red after 3 stalled pages.
-// So the queue must not FETCH a row whose job has no text, and a held verdict must never be written as a status.
+// HISTORY. 2026-11-12 (plan B) held a no-description row at `deduped` and filtered such rows out of the query.
+// 2026-11-18 (Teja 21:46 IST: "no jd jobs also need to be in ready to tailor") ended the hold: screen-batch.ts now
+// screens a blank row and passes it to passed_filters, so the query must FETCH it again. A filter left behind would
+// strand every blank deduped row at `deduped` forever, invisible on every lane. And the plain embed comes back, so a
+// row whose job is missing is fetched and failed as missing_job_record instead of hiding behind an inner join.
 import { test } from "node:test";
 // Strict equality.
 import assert from "node:assert/strict";
@@ -12,14 +13,14 @@ import { readFileSync } from "node:fs";
 // Units under test.
 import { DEDUPED_QUEUE_SELECT, queueActionFor } from "./queue.ts";
 
-test("queue: the deduped select INNER-joins the job, so a filter on the job removes the row itself", () => {
-  // Without !inner, PostgREST filters the embedded job to null and still returns the application row.
-  assert.match(DEDUPED_QUEUE_SELECT, /\bjobs!inner\s*\(/);
+test("queue: the deduped select embeds the job PLAINLY, so a row with no job is fetched and failed, never hidden", () => {
+  // A plain embed (no !inner, which would drop the application row when its job is missing).
+  assert.match(DEDUPED_QUEUE_SELECT, /\bjobs \(/);
   // And it still reads the description, which the planner needs.
   assert.match(DEDUPED_QUEUE_SELECT, /\bdescription_raw\b/);
 });
 
-test("queue: the screener's deduped query skips jobs with a null or empty description (held rows never block it)", () => {
+test("queue: the screener's deduped query fetches no-description rows too (2026-11-18: they are screened, not held)", () => {
   // The entry file, line endings normalised so the shape match is EOL-proof.
   const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8").replace(/\r\n/g, "\n");
   // The ONE query that reads the deduped queue: from its select to its order, as written.
@@ -28,14 +29,13 @@ test("queue: the screener's deduped query skips jobs with a null or empty descri
   assert.ok(query !== undefined, "the deduped query (select DEDUPED_QUEUE_SELECT ... order created_at) was not found in index.ts");
   // It reads the deduped status.
   assert.match(query, /\.eq\("status", "deduped"\)/);
-  // Not null, on the joined job's column.
-  assert.match(query, /\.not\("jobs\.description_raw", "is", null\)/);
-  // And not empty.
-  assert.match(query, /\.neq\("jobs\.description_raw", ""\)/);
+  // The whole filter chain, exactly: status, then the optional one-row match (comment lines allowed between). A
+  // description filter between them would strand blank rows at deduped, so the positive shape is pinned.
+  assert.match(query, /\.eq\("status", "deduped"\)\s*(?:\/\/[^\n]*\n\s*)*\.match\(/);
 });
 
-test("queue: a held verdict is never written; pass and drop map to their persisted verdicts", () => {
-  // Held: leave the row at deduped.
+test("queue: a 'discovered' plan (the scouts' unscreened fallback status) is never written; pass and drop map to their verdicts", () => {
+  // Not a screener verdict: leave the row at deduped.
   assert.deepEqual(queueActionFor({ job_id: "j", status: "discovered", drop_reason: null }), { kind: "hold" });
   // Passed.
   assert.deepEqual(queueActionFor({ job_id: "j", status: "passed_filters", drop_reason: null }), { kind: "persist", verdict: { status: "passed_filters", reason: null } });

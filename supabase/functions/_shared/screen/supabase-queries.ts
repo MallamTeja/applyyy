@@ -57,6 +57,15 @@ export const COMMITTED_STATUSES = [
   "failed",
 ] as const satisfies readonly ApplicationStatus[];
 
+// The status that means "in front of Teja, not yet acted on" (2026-11-18, pending #5). Read beside the committed ones
+// ONLY for the same-ATS-id set: a retitled copy arriving while the first copy waits for approval must not reach the queue
+// beside it. The fingerprint and cross-source sets keep reading COMMITTED rows only (the loader filters on `committed`),
+// so their meaning does not change. Same `satisfies` discipline: a retired status is a compile error.
+export const QUEUED_STATUSES = [
+  // Tailored, audited, waiting for Teja's approve or reject.
+  "awaiting_approval",
+] as const satisfies readonly ApplicationStatus[];
+
 // One postgrest response, as far as this module reads it. `count` is present only when
 // the read asked for `{ count: "exact" }`: the TOTAL matching rows on the server, which
 // can exceed `data.length` when max_rows cut the page. supabase-js sends null otherwise.
@@ -116,6 +125,8 @@ interface HistoryRow {
     readonly title: string | null;
     // 'other' marks an aggregator copy, which decides the aggregator set (fix round 1).
     readonly ats_provider: string | null;
+    // The posting's id on its board: with ats_provider, the same-ATS-id key (2026-11-18).
+    readonly ats_job_id: string | null;
   } | null;
 }
 
@@ -226,8 +237,10 @@ export function supabaseScreenQueries(client: { from(table: string): unknown }, 
           .from("applications")
           // company_name and title joined 2026-11-10 (T12): the location-free twin of an applied job. ats_provider
           // says whether that job was an aggregator copy, which a cross-source match requires on one side.
-          .select("status, approved_at, applied_at, jobs(fingerprint, company_slug, company_name, title, ats_provider)", { count: "exact" })
-          .in("status", COMMITTED_STATUSES),
+          // ats_job_id joined 2026-11-18: with ats_provider it keys the same-ATS-id set (a retitled copy of a posting).
+          .select("status, approved_at, applied_at, jobs(fingerprint, company_slug, company_name, title, ats_provider, ats_job_id)", { count: "exact" })
+          // awaiting_approval rides along for that set only (QUEUED_STATUSES); still server-side, still one counted page.
+          .in("status", [...COMMITTED_STATUSES, ...QUEUED_STATUSES]),
       ).then(
         (response) =>
           // A partial history is refused before any row is mapped: see `checkComplete`.
@@ -253,6 +266,11 @@ export function supabaseScreenQueries(client: { from(table: string): unknown }, 
                 title: row.jobs.title ?? null,
                 // Absent reads as null: not an aggregator copy, the direction that can only miss a twin.
                 ats_provider: row.jobs.ats_provider ?? null,
+                // Absent reads as null, which atsJobKeyOf refuses: the row adds no same-id entry.
+                ats_job_id: row.jobs.ats_job_id ?? null,
+                // True only for an exact committed status. A queued row (awaiting_approval) is false, so it feeds the
+                // same-id set and nothing else; an unexpected status is also false, the direction that adds the least.
+                committed: (COMMITTED_STATUSES as readonly string[]).includes(row.status),
                 // The coalesce lives HERE, beside the column names, so the loader's row
                 // type says only "when committed". Applied is the later, precise event;
                 // approved covers rows not yet submitted. `?? null` turns an absent

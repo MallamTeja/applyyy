@@ -37,6 +37,16 @@ export const LANES: Readonly<Record<Lane, LaneSpec>> = {
   ready: { status: 'passed_filters', steps: PASSED_FILTERS_STEPS, label: 'Ready to tailor' },
 };
 
+/* Whether a card's job has NO description (2026-11-18, Teja 21:46 IST: "no jd jobs also need to be in ready to
+ * tailor"). The screener now passes such rows into Ready to tailor instead of holding them, so the card must say so
+ * before Teja sends one through: the matcher and tailor have only the title to work from. Derived from the selected
+ * description_preview (the first 600 characters of description_raw), so no new column and no migration. Shape check,
+ * never truthiness (CLAUDE.md section 6): only a string with non-whitespace text is a description. */
+export function hasNoDescription(job: { readonly description_preview: string | null | undefined }): boolean {
+  // Null, absent, "" and whitespace-only all count as missing.
+  return typeof job.description_preview !== 'string' || job.description_preview.trim().length === 0;
+}
+
 // Rows per fetch. The same cap the page always had; Load more fetches the next page of this size.
 export const PAGE_SIZE = 300;
 
@@ -268,8 +278,9 @@ export function emptyListMessage(
     // dropped_filter, which no page lists (the "Filtered Out" tab is only this page's local preview).
     return lane === 'discovered'
       ? `Nothing is waiting to be screened: every discovered job has already been through the screener. Jobs it passed are in "${LANES.ready.label}"; jobs it dropped are stored as filtered and not listed here.`
-      // The ready lane empties when nothing has passed the screener, or every row was already sent on.
-      : 'Nothing is ready to tailor: no job is waiting after the screener right now. New ones arrive when the scout finds postings that pass it.';
+      // The ready lane empties when nothing has passed the screener, or Teja sent or rejected every row.
+      // Since 2026-11-18 nothing sends a scouted row on automatically, so an empty lane means the scout found nothing new.
+      : 'Nothing is ready to tailor: no job is waiting after the screener right now. New ones arrive when the scout finds postings that pass it, and wait here until you send one through.';
   }
   // Rows exist (or the count is unknown) and the Matched tab is empty: the local cascade is the cause.
   if (viewTab === 'matched') return 'No jobs match your active Tech constraint and Filter Cascade rules. Try adjusting your search or checking "Filtered Out" to inspect dropped postings.';

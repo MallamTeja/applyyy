@@ -33,8 +33,9 @@ on:
     # time" is the oldest-last_polled_at-first order plus the 12-min budget (scout.ts): each
     # run starts with the boards the previous run never reached. No per-run board cap on
     # purpose: a 1/10 slice would scan each board once a day, fewer than the ~2 a day before.
-    # The drain (postscreen-drain.yml) runs after every scout, so each run's passed_filters
-    # rows go on to matcher -> tailor -> auditor without a hand.
+    # Each run's passed_filters rows WAIT in the Ready to tailor lane for Teja (ruling 2026-11-18
+    # 21:45 IST); no workflow starts on a scout finishing. He sends a row through by hand, or
+    # dispatches postscreen-drain.yml for many at once.
     - cron: '17 0,2,5,7,10,12,14,17,19,22 * * *'
   workflow_dispatch:
     inputs:

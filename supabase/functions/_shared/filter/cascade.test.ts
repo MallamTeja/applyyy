@@ -10,7 +10,7 @@ import { test } from "node:test";
 // Strict, so a `false` verdict never quietly compares equal to `undefined`.
 import assert from "node:assert/strict";
 // Extension-suffixed specifier so this runs under Deno and `node --test` alike.
-import { screenJob, type ScreenableJob, type ScreenContext } from "./cascade.ts";
+import { atsJobKeyOf, screenJob, type ScreenableJob, type ScreenContext } from "./cascade.ts";
 // Row shapes from the schema owner.
 import type { FilterRuleRow, FilterRuleType, Json } from "../contracts/shared-types.ts";
 // The production twin key, so the tests build the cross-source set exactly as the loader does.
@@ -27,6 +27,8 @@ const BASE_JOB: ScreenableJob = {
   companyName: "Zomato",
   // An ATS row by default, so a test that needs an aggregator copy has to ask for one.
   isAggregatorCopy: false,
+  // No ATS id by default, so only a test about the same-id check sets one.
+  atsJobKey: null,
   locations: ["bangalore"],
   locationRaw: "Bengaluru, India",
   employmentType: "internship",
@@ -45,6 +47,8 @@ const BASE_CONTEXT: ScreenContext = {
   appliedCrossKeys: new Set(),
   // Nor an applied aggregator copy, so the ATS-side half of the check passes by default too.
   appliedAggregatorCrossKeys: new Set(),
+  // No ATS posting acted on, so the same-id check passes by default.
+  appliedAtsJobKeys: new Set(),
   blockedCompanySlugs: new Set(),
 };
 
@@ -484,4 +488,56 @@ test("a fully configured cascade admits a good job and rejects a Senior one", ()
   assert.equal(bad.passed, false);
   if (bad.passed) return;
   assert.equal(bad.ruleType, "title_blocklist");
+});
+
+// --- 2026-11-18, pending #5: one ATS posting edited on the board (same id, new title or location) -------------------
+// Canonical greenhouse 5150422, live: Teja applied as "Web Frontend Engineer - JS, CSS, React, Flutter" (8e9d58ce);
+// the board retitled it and the scout stored a second row, which reached awaiting_approval as "Web Engineer - JS, TS,
+// Flutter" (111d1ff4). Same location ("Home based - Worldwide"), new title, so a new fingerprint and a new application.
+
+// The applied copy's key, built the way the loader builds it.
+const CANONICAL_APPLIED = atsJobKeyOf("greenhouse", "5150422");
+
+test("2026-11-18 Canonical 5150422: a retitled copy of an applied posting is dropped by already_applied", () => {
+  // The retitled copy: its own fingerprint, a title the cross-source key cannot match, the same ATS id.
+  const result = screen([rule("already_applied", {})], { companyName: "Canonical", title: "Web Engineer - JS, TS, Flutter", locationRaw: "Home based - Worldwide", fingerprint: "fp-retitled", atsJobKey: atsJobKeyOf("greenhouse", "5150422") }, { appliedAtsJobKeys: new Set([CANONICAL_APPLIED!]) });
+  // Dropped.
+  assert.equal(result.passed, false);
+  // Narrow the union for the reason check.
+  if (result.passed) return;
+  // The reason names the id, so the event says which posting it repeats.
+  assert.equal(result.reason, 'already applied or awaiting approval for this ATS posting under another title or location (["greenhouse","5150422"])');
+});
+
+test("2026-11-18: a different ATS id at the same employer is NOT dropped (another posting)", () => {
+  // Same company, same board, another id.
+  const result = screen([rule("already_applied", {})], { companyName: "Canonical", title: "Web Engineer - JS, TS, Flutter", fingerprint: "fp-other", atsJobKey: atsJobKeyOf("greenhouse", "5150423") }, { appliedAtsJobKeys: new Set([CANONICAL_APPLIED!]) });
+  // Passed.
+  assert.equal(result.passed, true);
+});
+
+test("2026-11-18: the same id on ANOTHER provider is NOT dropped (ids are per board)", () => {
+  // A Lever posting that happens to carry the same digits.
+  const result = screen([rule("already_applied", {})], { fingerprint: "fp-lever", atsJobKey: atsJobKeyOf("lever", "5150422") }, { appliedAtsJobKeys: new Set([CANONICAL_APPLIED!]) });
+  // Passed.
+  assert.equal(result.passed, true);
+});
+
+test("2026-11-18: a job with no ATS id is never matched (a null key is no identity)", () => {
+  // An aggregator copy or pasted link: no id.
+  const result = screen([rule("already_applied", {})], { fingerprint: "fp-none", atsJobKey: null }, { appliedAtsJobKeys: new Set([CANONICAL_APPLIED!]) });
+  // Passed.
+  assert.equal(result.passed, true);
+});
+
+test("2026-11-18 atsJobKeyOf: refuses a missing, blank or aggregator side; trims; ignores provider case", () => {
+  // Each refusal returns null, never a degenerate key that would match other id-less rows.
+  for (const [provider, id] of [[null, "1"], ["greenhouse", null], [undefined, "1"], ["greenhouse", undefined], ["", "1"], ["greenhouse", "  "], ["other", "156940"]] as const) {
+    // Refused.
+    assert.equal(atsJobKeyOf(provider, id), null, `${String(provider)} / ${String(id)}`);
+  }
+  // Whitespace and provider case do not split one posting in two.
+  assert.equal(atsJobKeyOf(" Greenhouse ", " 5150422 "), atsJobKeyOf("greenhouse", "5150422"));
+  // A Workday path keeps its punctuation inside the key.
+  assert.equal(atsJobKeyOf("workday", "/job/IND-BLR/Lead_R0113279-1"), '["workday","/job/IND-BLR/Lead_R0113279-1"]');
 });

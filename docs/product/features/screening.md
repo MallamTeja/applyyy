@@ -23,7 +23,7 @@ gate that drops wins, and nothing after it runs.
 | Order | Gate | `drop_reason` it writes | Config lives in |
 |---|---|---|---|
 | 0 | Tech-role gate (title rules + your title/keyword lists) | `title_seniority`, `title_phd`, `title_non_software`, `tech_gate`, `campus_restricted`, `tech_gate_unclassified` | `search_preferences.titles`, `keywords`, `excluded_keywords` |
-| 0a | Missing description | `missing_description` | none (always on) |
+| ~~0a~~ | ~~Missing description~~ (removed 2026-11-18: a blank JD now goes through the gates below) | none since 2026-11-18 (`missing_description` was the old code) | none |
 | 0b | Work-authorisation / location gate | `work_auth` | `search_preferences.work_authorized_countries`, `remote_location_policy` |
 | 1+ | The filter cascade (9 rule types, run in `sort_order`) | the rule's own name, e.g. `experience_ceiling` | `filter_rules` rows (one per rule, `enabled` + `config`) |
 
@@ -76,6 +76,7 @@ explain why a job in `jobs` never reached the queue.
 | 2026-11-05 | Fix leaks in the gate, never with a score cutoff. | `docs/screener/2026-11-06-bulk-revive-needs-pregate-sweep.md` |
 | 2026-11-07 | Drop AVP/VP/Intermediate grades, PhD-only titles and non-software titles at the tech gate. | `tech-gate.ts` `titleRuleDrop` (`e780ede`) |
 | 2026-11-10 11:31 IST | Retire the job-age filter ("dont ever skip even though they are 1 mon 2 mont old") and the per-company weekly cap ("remove it"). Liveness (`disappeared_at`) still applies: gone is not old. | `cascade.ts` `retiredRule` (`8ba2b06`), migration `20261110120000` |
+| 2026-11-18 21:45 / 21:46 IST | Scouted rows that pass wait in Ready to tailor; only pasted links go straight to approval. "no jd jobs also need to be in ready to tailor": a blank JD is no longer dropped or held. | `screen-batch.ts` (stage 0a removed), `.github/workflows/postscreen-drain.yml` (no scout trigger) |
 
 Why so many rulings? Each one followed a real leak Teja found in his own queue. Examples: Axiad
 "AI-First Golang Developer" (JD: "6-8 years") reached manual apply on 2026-11-04 because the
@@ -111,15 +112,17 @@ closed union is a safety control: it makes it impossible for screening code to c
 The backlog of `discovered` / `deduped` rows can be drained by hand with
 `.github/workflows/prescreen-drain.yml` (normalizer, then screener; manual only).
 
+A row that passes **waits** at `passed_filters` (Ready to tailor). Nothing scores it on its own since
+2026-11-18 (Teja, 21:45 IST). Teja sends it on with "Send through pipeline" on its card, the
+Discovery "Run pipeline" button, or a manual dispatch of `postscreen-drain.yml`.
+
 ### 3.2 The flow for one job
 
 ```mermaid
 flowchart TD
   A[Job from a scout] --> T{Stage 0: tech gate}
   T -- drop --> D[(dropped_filter + drop_reason)]
-  T -- keep --> M{Stage 0a: description present?}
-  M -- blank --> D
-  M -- yes --> W{Stage 0b: work-auth gate}
+  T -- keep --> W{Stage 0b: work-auth gate}
   W -- drop --> D
   W -- keep --> C{Cascade: enabled filter_rules in sort_order}
   C -- first rule that drops --> D
@@ -129,7 +132,7 @@ flowchart TD
   PG -- keep --> G[Gemini scoring]
 ```
 
-Order is **cheapest test first**: a title string match, then a blank check, then a scan of the
+Order is **cheapest test first**: a title string match, then a scan of the
 whole description, then the rules that read numbers and dates. Each stage shrinks the input for the
 next.
 
@@ -160,17 +163,25 @@ are in your `excluded_keywords` list (next table). Teja added `II`/`III`/`IV` th
 If nothing matched:
 
 - you configured **no** titles and **no** keywords → keep, and warn (nothing to judge by);
-- you configured either list → drop as `tech_gate_unclassified`.
+- you configured either list → drop as `tech_gate_unclassified`, **unless the description is
+  blank** (since 2026-11-18). With no JD there is nothing to classify, so the row passes. A clear
+  title drop (`tech_gate`, `title_seniority` and the rest) still drops a blank row.
 
 A level-only title term (for example "Intern") counts only when the title also carries a technical
 word. "Intern, Company Secretary" is dropped and the reason names the level term.
 
-### 3.4 Stage 0a: missing description
+### 3.4 Stage 0a: missing description (removed 2026-11-18)
 
-A job whose `description_raw` is null, empty or whitespace is dropped as `missing_description`.
-Why: every later stage reads the JD. Judged on nothing, those stages would **pass**. On 2026-11-04,
-459 Workday rows passed this way and 391 later failed (`8ab943d`). The check is a shape check
-(a string with non-space text), never a truthiness check.
+**History.** From `8ab943d` a job whose `description_raw` was null, empty or whitespace dropped as
+`missing_description`. On 2026-11-04, 459 Workday rows had passed with no JD and 391 later failed.
+On 2026-11-12 (`cb774d83`) the drop became a hold at `discovered`, where no lane showed the rows.
+
+**Now (Teja, 2026-11-18 21:46 IST: "no jd jobs also need to be in ready to tailor").** A blank JD
+is neither dropped nor held. It goes through the title gate, the work-auth gate (title + location)
+and the cascade. If none rejects it, it is born at `passed_filters`. The Ready card shows a
+"No description" pill (`hasNoDescription` in `apps/web/src/features/discovery/discoveredList.ts`,
+read from `description_preview`). Blank is still a shape check (a string with non-space text),
+never a truthiness check.
 
 ### 3.5 Stage 0b: work-authorisation and location (`_shared/screen/work-auth-gate.ts`)
 
@@ -323,7 +334,8 @@ above (`f5b3914`).
   `_shared/screen/persist-verdict.ts`.
 - **Fail open on missing data, drop only on a positive signal.** Unknown location, unknown years,
   unset config: keep the job. A missing answer must never become a rejection (CLAUDE.md §6).
-- **But a blank description is a drop**, because every later gate would pass on nothing.
+- **A blank description is not a drop** (since 2026-11-18). It waits in Ready to tailor with a
+  "No description" pill, and Teja decides.
 - **`drop_reason` names the stage or rule, never prose.** Prose goes to the run summary
   (`DroppedJob.reason`). This lets the dashboard group drops by cause.
 - **Gates live outside the cascade enum.** The tech and work-auth gates read
@@ -334,9 +346,10 @@ above (`f5b3914`).
 - **Closed unions, not booleans:** `ScreenedInsertStatus`, `RemoteLocationPolicy`,
   `WorkAuthDropCode`, `ExperienceDropCode`. Required parameters, so no caller can skip a gate by
   leaving an argument out.
-- **Sweeps and drains are manual** (`pregate-sweep.yml`, `prescreen-drain.yml`,
-  `postscreen-drain.yml`: `workflow_dispatch` only). Live writes are run by the orchestrator on
-  Teja's yes.
+- **Sweeps and drains are manual** (`pregate-sweep.yml`, `prescreen-drain.yml`:
+  `workflow_dispatch` only). `postscreen-drain.yml` also has a daily cron, but since 2026-11-18 it
+  only re-gates the approval queue; the full drain is manual dispatch only. Live writes are run by
+  the orchestrator on Teja's yes.
 - **Bulk revive → pre-gate sweep**, same session.
 - **Fix a leak in the gate**, never with a score cutoff. The matcher's score floor (30) is a
   separate control (see [matching and scoring](matching-and-scoring.md)).
@@ -368,7 +381,7 @@ Measured 2026-11-08 by the read-only query in §3.6. Re-run it; do not trust the
    (`ab71b4f` now reads every site from the detail response).
 7. **Pay-band chip misses amount-first text** like "$125k (US)" (pending list P2 #8).
 8. **Stale comments.** `supabase/functions/screener/index.ts` says it runs "stage 0 (tech gate) and
-   the cascade"; it also runs the blank-description and work-auth stages through
+   the cascade"; it also runs the work-auth stage through
    `planScreenedApplications`. `matcher/tech-pregate.ts` keeps its old name though it runs three
    gates.
 

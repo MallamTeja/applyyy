@@ -1,4 +1,4 @@
-# Drains the post-screen queues (after every scout, daily, and on demand): pages the whole `passed_filters` queue through the
+# Drains the post-screen queues (ON DEMAND ONLY since 2026-11-18; the daily schedule runs the queue re-gate alone): pages the whole `passed_filters` queue through the
 # matcher (?limit=10), then the whole `scored` queue through the tailor (?limit=3), then the
 # whole `tailored` queue through the auditor (?limit=5), pausing between pages for Gemini's RPM. The sibling of prescreen-drain.yml,
 # which drains the two stages BEFORE this one (normalizer, screener).
@@ -11,31 +11,26 @@
 # Actions secrets. The matcher DROPS rows below the score threshold and drops are one-way, so
 # every abort below fails CLOSED: any response we cannot read exactly stops the run.
 #
-# AUTOMATIC (Teja ruling 2026-11-09 ~17:20 IST). This reverses the 2026-11-05 manual-only ruling, made
-# after 55 rows stalled 11-02 -> 11-09: every full manual drain in that window died in the matcher
-# stage, and no human re-ran one (docs/status/2026-11-09-pipeline-stall.md). Teja's standing rule
-# applies: per-row work is triggered by the system at the state change, plus a scheduled sweep.
-# So the drain runs (1) when a scout finishes, because scouts create the passed_filters rows,
-# (2) once a day as the sweep, and (3) on manual dispatch. The concurrency group below queues
-# overlapping runs instead of racing them. Stage isolation (below) stops one stage's backlog
-# from starving the later stages. apps/web/test/postscreenDrainTriggers.test.ts pins exactly
-# this trigger set. pregate-sweep and prescreen-drain are still manual.
+# MANUAL TAILORING (Teja ruling 2026-11-18 21:45 IST): "they don't need to directly reach approval, they need to go to
+# ready to tailor; only the jobs which I add through the Add job link button need to go directly to the approval queue."
+# This reverses the 2026-11-09 AUTOMATIC ruling (drain after every scout + a daily sweep). Scouted passes now WAIT at
+# passed_filters (the Ready to tailor lane) until Teja sends one through: per row with "Send through pipeline" on its
+# card, or many at once with a manual dispatch of this workflow. Pasted links do not need this file: job-link-intake
+# runs matcher -> tailor -> auditor itself, server-side (job-link-intake/index.ts startServerPipeline).
+# So the triggers are (1) manual dispatch: the full drain, as before; (2) the daily schedule: the approval-queue
+# re-gate ONLY (auditor ?mode=regate_queue, one request, no Gemini), then exit before the count gate, so a scheduled
+# run can never tail a single row. No workflow_run: nothing starts on a scout finishing.
+# apps/web/test/postscreenDrainTriggers.test.ts pins this trigger set AND that the scheduled run exits before any
+# stage call. The concurrency group below still queues overlapping runs. pregate-sweep and prescreen-drain are manual.
 name: applyy post-screen drain
 
 on:
-  # STATE-CHANGE TRIGGER: the scouts insert the passed_filters rows, so the drain starts when either
-  # one finishes. `workflows:` matches each workflow's `name:` exactly (scout.yml, scout-remote.yml).
-  workflow_run:
-    # The two scouts that insert at passed_filters.
-    workflows: ['applyy scout (ats discovery)', 'applyy scout (remote feeds)']
-    # After the scout finishes, never while it is still inserting. A failed scout may still have inserted rows.
-    types: [completed]
-  # SCHEDULED SWEEP: the safety net for a missed or failed trigger. Since 2026-11-12 scout.yml runs ten
-  # times a day, so this daily sweep only catches a trigger GitHub dropped. GitHub cron starts late; harmless here.
+  # DAILY RE-GATE ONLY (2026-11-18): the schedule runs the approval-queue re-gate and exits (REGATE_ONLY below), so
+  # today's work-auth gate still sweeps rows already waiting for Teja without tailoring anything. GitHub cron starts
+  # late; harmless here.
   schedule:
     - cron: '30 4 * * *'
-  # Manual runs: full drains, re-runs (from_stage) and rehearsals (dry_count_only). On the two automatic
-  # triggers `inputs.*` is empty, so FROM_STAGE '' runs the full drain and DRY_COUNT_ONLY '' is a real run.
+  # Manual runs: full drains, re-runs (from_stage) and rehearsals (dry_count_only). The only way this workflow tailors.
   workflow_dispatch:
     # The one input: rehearse without touching anything.
     inputs:
@@ -318,6 +313,16 @@ jobs:
           // Per-row failures are reported, never hidden; they do not stop the drain.
           for (const f of regate.failures) console.log(`::warning::regate_queue row ${f.id}: ${f.error}`);
 
+          // THE SCHEDULED RUN ENDS HERE (Teja 2026-11-18 21:45 IST): scouted passes wait in Ready to tailor for a
+          // human, so the daily schedule re-gates the queue and never reaches the count gate or any stage call.
+          // postscreenDrainTriggers.test.ts pins this exit's position: after the re-gate, before the first stage fetch.
+          if (process.env.REGATE_ONLY === 'true') {
+            // Says what the run did and did not do, so a green scheduled run is never read as a drain.
+            console.log('regate_only: scheduled run; re-gate done, no stage called (tailoring is manual since 2026-11-18).');
+            // Green: the re-gate was the whole job.
+            process.exit(0);
+          }
+
           // The count gate: one PostgREST HEAD with count=exact, under the app user's RLS, before
           // any agent runs. Kept after the 2026-11-05 manual-only ruling: a dispatch on an empty
           // queue should still call no agent, since that would only add agent_runs noise.
@@ -532,6 +537,8 @@ jobs:
         env:
           # The rehearsal flag, passed through env, never interpolated into the script.
           DRY_COUNT_ONLY: ${{ inputs.dry_count_only }}
+          # 'true' on the daily schedule only: the script exits right after the re-gate (2026-11-18). A dispatch is 'false'.
+          REGATE_ONLY: ${{ github.event_name == 'schedule' }}
           # The first stage, passed through env like every input; the script re-validates it.
           FROM_STAGE: ${{ inputs.from_stage }}
           # Public project URL, stored as a secret for parity with apply.yml.

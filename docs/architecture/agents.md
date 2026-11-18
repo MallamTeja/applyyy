@@ -22,9 +22,9 @@ only two agents could run) is in git history: `git show dc46979:docs/architectur
 | Scout-web (`scout_aggregator`) | `supabase/functions/scout-web/` | none (creates rows) | inserts at `discovered` | Gemini | on demand |
 | Normalizer (`normalizer`) | `supabase/functions/normalizer/` | `discovered` | `deduped` / `dropped_duplicate` / `failed` | none | `prescreen-drain.yml`; dashboard |
 | Screener (`screener`) | `supabase/functions/screener/` | `deduped` | `passed_filters` / `dropped_filter` / `failed` | none, on purpose | `prescreen-drain.yml`; dashboard |
-| Matcher (`matcher`) | `supabase/functions/matcher/` | `passed_filters` | `scored` / `dropped_filter` / `failed` | Gemini | `postscreen-drain.yml`, `run-one.yml`, `pregate-sweep.yml`, `job-link-intake` |
+| Matcher (`matcher`) | `supabase/functions/matcher/` | `passed_filters` | `scored` / `dropped_filter` / `failed` | Gemini | `postscreen-drain.yml` (manual dispatch only), `run-one.yml`, `pregate-sweep.yml`, `job-link-intake`; dashboard ("Send through pipeline", "Run pipeline"). Never after a scout: scouted rows wait at `passed_filters` (Teja, 2026-11-18) |
 | Tailor (`tailor`) | `supabase/functions/tailor/` | `scored` | `tailored` / `failed` | Gemini | same as Matcher (not `pregate-sweep.yml`) |
-| Auditor (`auditor`) | `supabase/functions/auditor/` | `tailored` (and stranded `audit_clean` / `audit_flagged`) | `audit_clean` / `audit_flagged` / `failed`, then `awaiting_approval` | none (deterministic) | same as Tailor |
+| Auditor (`auditor`) | `supabase/functions/auditor/` | `tailored` (and stranded `audit_clean` / `audit_flagged`) | `audit_clean` / `audit_flagged` / `failed`, then `awaiting_approval` | none (deterministic) | same as Tailor; plus the daily `postscreen-drain.yml` cron, which calls only `?mode=regate_queue` |
 | `human` | the dashboard (`apps/web/`) | `awaiting_approval` and others | `approved` and every other human edge | none | you |
 | Applier (`applier`) | `worker/src/` (Playwright) | `approved` | `applying`, then `applied` / `blocked_needs_human` / `failed` | none | `apply.yml` cron and `dispatch-apply` |
 | Tracker (`tracker`) | `supabase/functions/email-tracker-intake/` | `applying`, `applied` and later | `applied`, `employer_screening`, `oa_pending`, `interview`, `offer`, `rejected` | none (deterministic) | Gmail Apps Script push |
@@ -55,7 +55,8 @@ group by 1 order by 1;
 **No agent runs on a database scheduler.** `pg_cron` is not used. The only schedules
 are GitHub Actions crons. The pipeline agents (Normalizer to Auditor) run on demand:
 from the dashboard (`apps/web/src/data/pipelineRunner.ts`), from the drain workflows,
-from `run-one.yml` (one row), or from `job-link-intake` (one pasted link).
+from `run-one.yml` (one row), or from `job-link-intake` (one pasted link). The one
+scheduled pipeline call is the daily approval-queue re-gate (`auditor?mode=regate_queue`).
 
 ---
 

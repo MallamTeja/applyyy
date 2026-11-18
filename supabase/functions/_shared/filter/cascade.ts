@@ -46,6 +46,12 @@ export interface ScreenableJob {
   // (another country, another req), which the location-bearing fingerprint keeps apart on purpose. Required, so
   // a builder cannot forget it and silently widen the twin check.
   readonly isAggregatorCopy: boolean;
+  // The posting's identity ON ITS ATS, built only by atsJobKeyOf below (2026-11-18, pending #5). A board that retitles
+  // or relocates a posting keeps its id, but the fingerprint (company|title|location) changes, so the scout stores a
+  // second jobs row (Canonical greenhouse 5150422: applied as "Web Frontend Engineer - JS, CSS, React, Flutter", back in
+  // the approval queue as "Web Engineer - JS, TS, Flutter"). REQUIRED, never optional, so a builder cannot forget it and
+  // the check pass vacuously (CLAUDE.md section 6). Null when the row has no ATS id (an aggregator copy, a pasted link).
+  readonly atsJobKey: string | null;
   // Parsed locations, matched against the allowlist.
   readonly locations: readonly string[];
   // Kept because a board that gave no parsed locations may still have prose worth
@@ -84,6 +90,11 @@ export interface ScreenContext {
   // The subset of that history whose job was itself an aggregator copy. This is what lets an incoming ATS posting
   // match: only when the applied side was the aggregator copy, never ATS against ATS (review, fix round 1).
   readonly appliedAggregatorCrossKeys: ReadonlySet<string>;
+  // atsJobKeyOf(provider, ats_job_id) of every application Teja has acted on or is acting on: the committed statuses
+  // AND awaiting_approval (2026-11-18). Wider than the two sets above on purpose: a retitled copy arriving while the
+  // first copy waits in the queue would otherwise reach the queue beside it. Same ATS id is the same posting, whatever
+  // its title now says, so this one needs no aggregator side (the ids are per board, never shared by two roles).
+  readonly appliedAtsJobKeys: ReadonlySet<string>;
   // Company slugs currently blocked.
   readonly blockedCompanySlugs: ReadonlySet<string>;
   // (applicationsThisWeekByCompany was here, for the per-company weekly cap: removed 2026-11-10 with that rule, so no
@@ -284,12 +295,38 @@ export function twinOf(company: string | null | undefined, title: string | null 
   return twin.startsWith("|") || twin.endsWith("|") ? null : twin;
 }
 
+// The ATS identity of one job, or null when it has none. Shared by the history loader (screen/context.ts) and the
+// job builder (screen/screen-batch.ts), so both sides build the key one way and refuse the same inputs.
+//
+// NULL, NEVER A DEGENERATE KEY (CLAUDE.md section 6). A missing or blank id folded into "greenhouse:" would match every
+// other id-less greenhouse row and DROP real jobs. 'other' is refused too: an aggregator's own ids (when it has any) are
+// not ATS ids, and the aggregator lane is T12's crossSourceKey job. `typeof` also rejects the undefined that an optional
+// JobInsert field or a partial join row carries.
+// Company is NOT in the key: on 2026-11-18 no (provider, ats_job_id) group among 2966 live groups spanned two companies.
+export function atsJobKeyOf(provider: string | null | undefined, atsJobId: string | null | undefined): string | null {
+  // Not a string means the column was absent or null: no identity to match on.
+  if (typeof provider !== "string" || typeof atsJobId !== "string") return null;
+  // Trimmed, so " 5150422" and "5150422" are one posting, and whitespace alone is nothing.
+  const [p, id] = [provider.trim().toLowerCase(), atsJobId.trim()];
+  // A blank side, or the aggregator lane: no key.
+  if (p === "" || id === "" || p === "other") return null;
+  // JSON, not "p:id": a Workday id is a path with its own punctuation, and a JSON array cannot be ambiguous.
+  return JSON.stringify([p, id]);
+}
+
 // Already applied. A cheap pre-check ahead of the database constraint.
 function alreadyApplied(job: ScreenableJob, _config: Json, context: ScreenContext): RuleVerdict {
   // THE DATABASE IS THE REAL GUARANTEE — `UNIQUE(user_id, job_id)` is constraint #7 as
   // a constraint, and it is what survives a race between two runs. This check exists
   // only to avoid spending a Gemini call to discover something we already know.
   if (context.appliedFingerprints.has(job.fingerprint)) return { drop: true, reason: "already applied to this posting" };
+  // SAME ATS POSTING, EDITED (2026-11-18): the board kept the id and changed the title or location, so the fingerprint
+  // is new. Rows are NOT merged: a real role change under one id (Keyloop "Senior" to "Junior Boomi Developer") must
+  // still be screened when nothing was applied. Only a posting Teja already acted on is refused.
+  if (job.atsJobKey !== null && context.appliedAtsJobKeys.has(job.atsJobKey)) {
+    // Its own reason, naming the id, so the event says which earlier application this copy repeats.
+    return { drop: true, reason: `already applied or awaiting approval for this ATS posting under another title or location (${job.atsJobKey})` };
+  }
   // T12: the same posting under another fingerprint (aggregator vs ATS location). UNIQUE(user_id, job_id) cannot
   // catch this one, the two are different jobs rows, so this check is the only thing between Teja and a duplicate.
   const twin = twinOf(job.companyName, job.title);

@@ -70,6 +70,46 @@ function readCreatedAt(posting: Record<string, unknown>): number | null {
   return null;
 }
 
+// The whole posting text: intro, every `lists[]` section, then the closing text (2026-11-18).
+//
+// WHY. Lever splits a posting into `descriptionPlain` (intro prose), `lists[]` (sections such as
+// Responsibilities and Requirements, each `{ text: heading, content: <li> HTML }`) and `additional`
+// (closing text). Storing only the intro hid every requirement bullet from the screens: Netomi "Data
+// Engineer I" (2+ years), Keyloop "Cloud Engineer" (6+) and Egen "ML Platform Engineer" (5+) reached
+// Teja's approval queue because their years sat in `lists[]`. Each heading is kept on its own line so
+// the experience parser's section logic still sees "Requirements" and "Nice to have".
+function readFullDescription(posting: Record<string, unknown>): string | null {
+  // The pieces in reading order; empty ones are dropped below.
+  const parts: (string | null)[] = [];
+  // The intro. The plain form is Lever's own de-marked text, so it wins; stripHtml is harmless on it
+  // and does the work on the HTML fallback.
+  parts.push(stripHtml(readString(posting, "descriptionPlain", "description")));
+  // The sections. Absent or non-array is legal (older postings, the bare test fixture).
+  const lists = posting["lists"];
+  // Only an array holds sections.
+  if (Array.isArray(lists)) {
+    // One section at a time.
+    for (const section of lists) {
+      // Wire noise is skipped, never fatal to the board read (CLAUDE.md section 6: shape first).
+      if (!isRecord(section)) continue;
+      // The heading, e.g. "Requirements:".
+      const heading = readString(section, "text");
+      // The bullets, as HTML; stripHtml turns each </li> into a line break.
+      const body = stripHtml(readString(section, "content"));
+      // A section with neither a heading nor bullets adds nothing.
+      if (heading === null && body === null) continue;
+      // Heading on its own line, bullets below it.
+      parts.push([heading, body].filter((p): p is string => p !== null).join("\n"));
+    }
+  }
+  // The closing text, plain form preferred for the same reason as the intro.
+  parts.push(stripHtml(readString(posting, "additionalPlain", "additional")));
+  // Paragraph breaks between pieces, matching how stripHtml separates blocks.
+  const joined = parts.filter((p): p is string => p !== null).join("\n\n");
+  // Nothing anywhere is absence (null), never "", matching the nullable column.
+  return joined === "" ? null : joined;
+}
+
 // The adapter itself.
 export const leverAdapter: AtsAdapter = {
   // Which Playwright adapter submits here.
@@ -146,8 +186,9 @@ export const leverAdapter: AtsAdapter = {
         // Lever ships BOTH `descriptionPlain` and `description` (HTML). Preferring the
         // plain form is not merely convenient — it is the board's own de-marked text,
         // so it avoids our tag stripper guessing at structure Lever already resolved.
-        // `stripHtml` still runs on the fallback path.
-        descriptionRaw: stripHtml(readString(entry, "descriptionPlain", "description")),
+        // `stripHtml` still runs on the fallback path. Since 2026-11-18 the `lists[]` sections and the
+        // `additional` text follow the intro: the requirement bullets live there (readFullDescription).
+        descriptionRaw: readFullDescription(entry),
         applyUrl,
         // `commitment` is Lever's employment-type field ("Full-time", "Intern", …).
         // Falls back to the title when a board leaves it unset.

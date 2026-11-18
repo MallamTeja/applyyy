@@ -19,6 +19,8 @@
 
 // The cascade under wiring, plus the two interfaces it reads.
 import { screenJob, type ScreenableJob, type ScreenContext } from "../filter/cascade.ts";
+// The one builder of a posting's ATS identity key (2026-11-18, pending #5), so already_applied compares keys made the same way.
+import { atsJobKeyOf } from "../filter/cascade.ts";
 // Stage 0, which runs AHEAD of the cascade rather than as a tenth rule — Teja asked that
 // the cascade not change, and a title comparison is cheaper than any rule in it.
 import { screenTechRole, type TechGatePreferences } from "./tech-gate.ts";
@@ -117,9 +119,8 @@ export interface ScreenedBatchPlan {
   // look identical from outside. These are what make the difference observable.
   readonly passedCount: number;
   readonly droppedCount: number;
-  // HELD (2026-11-12): jobs with no description to judge and no title rule against them, born at 'discovered' and
-  // re-judged by the screener once a scout poll stores their text. Their own list and count, so a held row is never
-  // reported as a pass or a drop. Additive: a caller that ignores them still inserts the rows correctly.
+  // HELD: ALWAYS EMPTY since 2026-11-18 (a blank-description row is now born passed_filters, Teja 21:46 IST). Kept
+  // only for worker/src/scout/remote-run.ts, which still reads it; remove both together. Never counted as a pass.
   readonly held: readonly string[];
   // The held list's length, beside the other two counters.
   readonly heldCount: number;
@@ -151,6 +152,9 @@ export function toScreenableJob(row: JobInsert | JobRow): ScreenableJob {
     // The company as the source spelled it (T12, 2026-11-10): already_applied folds it with the title into the
     // cross-source set, so an aggregator copy of an applied ATS job is caught. Never the slug: slugs differ by source.
     companyName: row.company_name,
+    // The posting's id on its ATS (pending #5, 2026-11-18): already_applied blocks a RETITLED copy of an applied job,
+    // which the title-keyed checks miss (Canonical 5150422 reached the queue twice). Null when the board gives no id.
+    atsJobKey: atsJobKeyOf(row.ats_provider, row.ats_job_id),
     // 'other' is the aggregator lane (remote feeds). The twin check needs one aggregator side, so ATS-vs-ATS
     // same-title postings stay distinct (fix round 1). `ats_provider` is optional on JobInsert: absent = not a copy.
     isAggregatorCopy: row.ats_provider === "other",
@@ -211,7 +215,8 @@ export function planScreenedApplications(
   // A Set, because nine rules over fifty jobs would otherwise repeat the same
   // "title_blocklist has no blocked_titles configured" fifty times and bury the signal.
   const warnings = new Set<string>();
-  // The held jobs' ids, in batch order.
+  // No producer since 2026-11-18 (the hold is gone). Kept only because worker/src/scout/remote-run.ts still reads
+  // held/heldCount; delete both with that reader (outside this parcel).
   const held: string[] = [];
 
   // One pass over the batch; the cascade short-circuits internally on the first drop.
@@ -226,29 +231,21 @@ export function planScreenedApplications(
     // verdict, since the warning is the only signal that the gate had no config to judge by.
     if ("warning" in techVerdict) warnings.add(techVerdict.warning);
 
-    // THE HOLD (2026-11-12, Teja via the orchestrator, plan B). No description means nothing after the title can be
-    // judged, and "matched nothing configured" on a title alone is missing data, not a verdict (CLAUDE.md section 6;
-    // live: 668 Workday rows dropped tech_gate_unclassified in 3 days with an empty body). So a blank description
-    // whose title the gate passed OR could not classify is held: born at 'discovered', re-judged by the screener once
-    // a scout poll stores the text. A title the gate REJECTS (an exclusion, a title rule) still drops below by its own
-    // code, because that verdict is about the title, which is there to judge. Never passed: the 2026-11-04 evidence
-    // (459 blank Workday rows passed, 391 then failed at the matcher) is why stage 0a exists. The blank test is the
-    // same shape check stage 0a used: only a string with non-whitespace text counts.
+    // NO DESCRIPTION (2026-11-18, Teja 21:46 IST: "no jd jobs also need to be in ready to tailor"). Replaces the
+    // 2026-11-12 hold, which parked these rows at 'discovered' where no lane showed them. A blank row now goes through
+    // every screen that can judge it WITHOUT a JD (the title rules below, the work-auth gate on title + location, the
+    // cascade) and, if none rejects it, is born at passed_filters like any pass. Safe now and not on 11-05 because
+    // nothing auto-tailors a scouted row any more (Teja 21:45 IST): a blank row waits in the lane for Teja's click, and
+    // the card says "No description" (discoveredList.ts hasNoDescription). Only a string with non-whitespace text counts.
     const blank = typeof entry.row.description_raw !== "string" || entry.row.description_raw.trim().length === 0;
-    // Passed, or dropped only for matching nothing configured.
-    const undecided = !techVerdict.drop || techVerdict.code === "tech_gate_unclassified";
-    // Both: held, with no drop reason; never in the drop log.
-    if (blank && undecided) {
-      // The one non-screened status the insert guard allows.
-      inserts.push({ job_id: entry.jobId, status: "discovered", drop_reason: null });
-      // Named for the run summary.
-      held.push(entry.jobId);
-      // Nothing after the hold runs.
-      continue;
-    }
+    // "Matched nothing configured" on a title alone is missing data, not a verdict (CLAUDE.md section 6; live: 668
+    // Workday rows dropped tech_gate_unclassified in 3 days with an empty body), so for a blank JD it is no drop. A
+    // title the gate REJECTS (an exclusion, a title rule) still drops below by its own code: the title is there to judge.
+    const techDrop = techVerdict.drop && !(blank && techVerdict.code === "tech_gate_unclassified");
 
     // A stage-0 rejection short-circuits the cascade entirely.
-    if (techVerdict.drop) {
+    // techVerdict.drop repeated only so TypeScript narrows the verdict to its drop shape (code, reason) inside.
+    if (techDrop && techVerdict.drop) {
       // `drop_reason` NAMES THE STAGE rather than one of the nine rules. Stage 0 is
       // deliberately outside the cascade, so attributing its drop to a `FilterRuleType`
       // would be a lie the dashboard would then repeat back to Teja. The gate supplies the
@@ -256,26 +253,6 @@ export function planScreenedApplications(
       // matching nothing configured), so the two are never spelled here.
       inserts.push({ job_id: entry.jobId, status: "dropped_filter", drop_reason: techVerdict.code });
       dropped.push({ jobId: entry.jobId, title: entry.row.title, ruleType: techVerdict.code, reason: techVerdict.reason });
-      continue;
-    }
-
-    // STAGE 0a: no description, no verdict. Since 2026-11-12 this is UNREACHABLE for a blank description: the hold
-    // above takes every blank row the tech gate did not reject. Kept as the shape guard it always was (a future edit
-    // to the hold must not let a blank JD reach the stages below), not as a live drop path.
-    // Every stage after this one reads the JD: the
-    // work-auth gate's text signals, the experience parser in toScreenableJob, and then the
-    // matcher, which fails a blank JD as `missing_description` anyway. Judged on nothing, those
-    // stages PASS, so a blank JD became "screened clean" (2026-11-04: 459 Workday rows passed,
-    // 391 later failed). The shape is checked, never truthiness: only a string with
-    // non-whitespace text counts. After the tech gate, so a title drop keeps its own code.
-    const description = entry.row.description_raw;
-    // Null, absent, "" and whitespace-only are all blank.
-    if (typeof description !== "string" || description.trim().length === 0) {
-      // drop_reason names the stage, like the two gates around it.
-      inserts.push({ job_id: entry.jobId, status: "dropped_filter", drop_reason: "missing_description" });
-      // The prose says what was missing, for the run summary.
-      dropped.push({ jobId: entry.jobId, title: entry.row.title, ruleType: "missing_description", reason: "the posting has no description to screen" });
-      // Nothing after a drop runs.
       continue;
     }
 

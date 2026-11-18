@@ -144,7 +144,9 @@ Gates at discovery:
 - **Gates, in this order** (`screen-batch.ts`). The first drop wins and its code goes into
   `drop_reason`:
   1. Tech gate: `screenTechRole` (`_shared/screen/tech-gate.ts`).
-  2. Missing description: a blank JD drops as `missing_description`.
+  2. ~~Missing description~~: removed 2026-11-18. A blank JD is no longer dropped
+     (`missing_description`) or held at `discovered` (the 2026-11-12 hold, `cb774d83`). It runs the
+     gates here; an unclassified title (`tech_gate_unclassified`) is not a drop when the JD is blank.
   3. **Work-auth gate:** `screenWorkAuth` (`_shared/screen/work-auth-gate.ts:351`). It drops an
      on-site or hybrid job outside the user's work-authorised countries, or a JD that needs
      a status the user lacks. An unknown location passes. If the country list was never set,
@@ -154,15 +156,20 @@ Gates at discovery:
      (`experience_ceiling`, `cascade.ts:155`), which reads the years parsed by
      `requiredExperienceYears` (`_shared/screen/required-experience.ts:132`).
 - **Exits:** `dropped_filter` (with `drop_reason`), `failed`.
+- **A pass waits.** A scouted row that passes rests at `passed_filters` (Ready to tailor) until
+  Teja sends it on (Teja, 2026-11-18 21:45 IST). A blank-JD row shows a "No description" pill there.
 
 ### 3.4 `passed_filters -> scored` (matcher)
 
 - **Code:** `supabase/functions/matcher/index.ts`; score floor in
   `_shared/match/score-threshold.ts`.
-- **Trigger:** no cron (nothing scores `passed_filters` on a schedule).
-  `.github/workflows/postscreen-drain.yml` (manual dispatch, stages matcher -> tailor -> auditor),
+- **Trigger:** no cron (nothing scores `passed_filters` on a schedule, and nothing starts when a
+  scout finishes). `.github/workflows/postscreen-drain.yml` (manual dispatch, stages matcher ->
+  tailor -> auditor; its daily cron only re-gates the approval queue),
   `.github/workflows/run-one.yml` (one row), the Run pipeline modal, Send through pipeline, and
-  `job-link-intake` (runs `row-pipeline.ts` server-side after a pasted link).
+  `job-link-intake` (runs `row-pipeline.ts` server-side after a pasted link). Only a pasted link
+  runs to `awaiting_approval` on its own. If its chain stalls (150 s wall clock), no cron re-drains
+  it; it waits for Send through pipeline or a manual drain.
   `.github/workflows/pregate-sweep.yml` calls `matcher?mode=pregate_only` to prune the queue
   without any Gemini call.
 - **Gates:**
@@ -181,7 +188,7 @@ Gates at discovery:
 
 - **Code:** `supabase/functions/tailor/`, with `_shared/tailor/tailorer.ts`,
   `_shared/tailor/validator.ts` and `_shared/tailor/page-trim.ts`.
-- **Trigger:** the post-screen drain, run-one, the web buttons, or job-link-intake.
+- **Trigger:** the post-screen drain (manual dispatch), run-one, the web buttons, or job-link-intake.
 - **Gates:**
   - **Validator:** every tailored line must come from the master profile. If every candidate
     fails, the row goes to `failed`.
@@ -195,7 +202,7 @@ Gates at discovery:
 
 - **Code:** `supabase/functions/auditor/index.ts`, with `_shared/audit/audit.ts`,
   `_shared/audit/detector.ts` and `supabase/functions/auditor/pregate.ts`.
-- **Trigger:** the post-screen drain, run-one, the web buttons, or job-link-intake.
+- **Trigger:** the post-screen drain (manual dispatch), run-one, the web buttons, or job-link-intake.
 - **Gates:**
   - **Anti-fabrication audit:** every tailored claim must trace to a master node.
     Clean -> `audit_clean` (Bucket A, batch approval allowed). Not clean -> `audit_flagged`
@@ -260,7 +267,7 @@ Gates at discovery:
 | `needs_verification` | `applied` / `failed` | human | Teja checked the employer portal. |
 | `blocked_needs_human` | `applied` / `dropped_filter` / `failed` | human | Teja finishes by hand, or gives up. |
 | `approved` | `applied` / `failed` | human | Manual apply lane (`apps/web/src/features/manual-apply/ManualApplyPage.tsx`) with the kit from `worker/src/apply-kit.ts`. Kits are built by `apply-kit.yml`: after every `apply.yml` run (`workflow_run`), cron `0 12 * * *` (UTC), and on every approve. |
-| `awaiting_approval` / `approved` | `passed_filters` | human | Re-score and re-tailor after the master changed; then run `postscreen-drain.yml`. |
+| `awaiting_approval` / `approved` | `passed_filters` | human | Re-score and re-tailor after the master changed; then dispatch `postscreen-drain.yml` by hand (its cron no longer drains). |
 
 ### 3.10 `applied` and after (tracker)
 

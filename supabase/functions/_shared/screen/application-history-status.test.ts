@@ -109,10 +109,12 @@ test("history filters server-side on status with exactly the committed statuses"
   const { client, inCalls } = fakeClient();
   // Only the history read issues `.in()`, so call it alone.
   await supabaseQueries.supabaseScreenQueries(client, NOW).applicationHistory();
-  // Exactly one filter, on `status`, with the literal list: the positive shape.
-  assert.deepEqual(inCalls, [["status", EXPECTED_COMMITTED]]);
-  // And it is the exported constant itself, so callers and the query share one source.
-  assert.equal(inCalls[0]![1], supabaseQueries.COMMITTED_STATUSES);
+  // Exactly one filter, on `status`: the committed list, then awaiting_approval (2026-11-18, the same-ATS-id set only).
+  assert.deepEqual(inCalls, [["status", [...EXPECTED_COMMITTED, "awaiting_approval"]]]);
+  // The committed constant itself is unchanged: awaiting_approval lives in its own constant, never in this one.
+  assert.deepEqual(supabaseQueries.COMMITTED_STATUSES, EXPECTED_COMMITTED);
+  // And the queued constant holds exactly that one status.
+  assert.deepEqual(supabaseQueries.QUEUED_STATUSES, ["awaiting_approval"]);
 });
 
 // Case C: `failed` is reachable BEFORE approval (discovered/deduped/passed_filters/
@@ -150,7 +152,8 @@ test("T12: the history select reads the job's company_name and title", async () 
   await supabaseQueries.supabaseScreenQueries(client, NOW).applicationHistory();
   // The exact column list, the positive shape, so a dropped column is a named failure.
   // ats_provider joined in fix round 1: it decides which rows reach the aggregator set.
-  assert.deepEqual(selectColumns, ["status, approved_at, applied_at, jobs(fingerprint, company_slug, company_name, title, ats_provider)"]);
+  // ats_job_id joined 2026-11-18: with ats_provider it keys the same-ATS-id set.
+  assert.deepEqual(selectColumns, ["status, approved_at, applied_at, jobs(fingerprint, company_slug, company_name, title, ats_provider, ats_job_id)"]);
 });
 
 // T12 end to end through the adapter: the nested job's name and title reach the cross-source set.

@@ -23,7 +23,7 @@
 // The cascade's context shape, so this module cannot drift from what it feeds.
 import type { ScreenContext } from "../filter/cascade.ts";
 // The twin identity, imported from the rule that reads it so the two sides fold and refuse identically.
-import { twinOf } from "../filter/cascade.ts";
+import { atsJobKeyOf, twinOf } from "../filter/cascade.ts";
 // Row shapes from the schema owner. Never redefined.
 import type { FilterRuleRow } from "../contracts/shared-types.ts";
 // Stage 0's config shape, so the loader hands back something the gates can use directly.
@@ -55,6 +55,11 @@ export interface ApplicationHistoryRow {
   // The job's source. Only the exact value 'other' (an aggregator copy) puts the row in the aggregator set; null or
   // anything else keeps it out, which can only miss a twin (a duplicate), never drop a real job.
   readonly ats_provider: string | null;
+  // The posting's id on its board. With ats_provider, the same-ATS-id key (atsJobKeyOf, 2026-11-18); null adds no entry.
+  readonly ats_job_id: string | null;
+  // True for a committed status (approved and later, or a failed row that was approved). False for awaiting_approval,
+  // which the adapter reads for the same-ATS-id set only: the fingerprint and cross-source sets skip such a row.
+  readonly committed: boolean;
   // Fed the per-company weekly cap, retired 2026-11-10. Still in the row because the query
   // adapter (supabase-queries.ts) still selects it; the loader no longer reads it.
   readonly company_slug: string;
@@ -200,12 +205,22 @@ export async function loadScreenContext(queries: ScreenQueries, now: Date): Prom
   const appliedCrossKeys = new Set<string>();
   // The subset applied through an aggregator copy: what an incoming ATS posting may match (fix round 1).
   const appliedAggregatorCrossKeys = new Set<string>();
+  // Every ATS posting acted on or awaiting approval, by atsJobKeyOf (2026-11-18, pending #5).
+  const appliedAtsJobKeys = new Set<string>();
   // NO PER-COMPANY WEEKLY COUNT IS BUILT HERE ANY MORE. The cap that read it was retired on
   // 2026-11-10 (Teja: "remove it"), and ScreenContext dropped the field, so counting would
   // be dead work. context.test.ts pins the exact key set so it cannot creep back.
 
   // One pass over the history.
   for (const row of historyResult.rows) {
+    // The ATS id of every row read, queued or committed (2026-11-18): null for an id-less or aggregator row.
+    const atsKey = atsJobKeyOf(row.ats_provider, row.ats_job_id);
+    // Added before the committed check below, because this set alone also holds awaiting_approval rows.
+    if (atsKey !== null) appliedAtsJobKeys.add(atsKey);
+    // A queued row stops here: the fingerprint and cross-source sets mean "committed", as they did before. ONLY an exact
+    // `false` skips: a row whose flag is missing counts as committed, because an unknown answer must fail CLOSED against
+    // a double application (the rule supabase-queries.ts states for `failed`), never silently leave the applied sets.
+    if (row.committed === false) continue;
     // Unconditional: applying is permanent regardless of when it happened.
     appliedFingerprints.add(row.fingerprint);
     // Null for a nameless or untitled row: adding nothing is the closed choice, a degenerate entry would fail open.
@@ -251,6 +266,8 @@ export async function loadScreenContext(queries: ScreenQueries, now: Date): Prom
         appliedFingerprints,
         // The company blocklist.
         blockedCompanySlugs,
+        // Every committed or queued row's ATS posting key.
+        appliedAtsJobKeys,
         // Every committed row's twin entry.
         appliedCrossKeys,
         // Only the aggregator-copy rows' entries.

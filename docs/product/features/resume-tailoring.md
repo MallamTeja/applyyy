@@ -145,7 +145,7 @@ flowchart TD
 | approval page re-check | the version pinned on the row now (an attest moves the pin) |
 
 When the master changes, rows already in the queue are re-run by moving them back to
-`passed_filters` and running `postscreen-drain.yml` (commit `87fff82`, migration
+`passed_filters` and dispatching `postscreen-drain.yml` by hand (commit `87fff82`, migration
 `20261101173000_master_change_reruns_pipeline.sql`). See memory `applyyy-master-change-rerun`.
 
 ### 3.3 The tailor
@@ -375,8 +375,11 @@ file; `resume_storage_path` is a record, not the source.
 - **Two rows failed `page_overflow`** (Tether 04d5c6e4, L&T 7890ff1b) before the dense
   rungs. The handoff says they fit on rungs 5 and 4 and should be re-run once the tailor
   is confirmed deployed from `dc8ac5c`. Check with `supabase functions list` (order by `updated_at`).
-- **No cron runs tailor or auditor.** Runs come from `postscreen-drain.yml`, `run-one.yml`,
-  the web runner and job-link intake (memory `applyyy-master-change-rerun`).
+- **No cron runs the tailor, and no cron audits a tailored row.** Runs come from a manual dispatch of
+  `postscreen-drain.yml`, `run-one.yml`, the web runner ("Run pipeline", "Send through
+  pipeline") and job-link intake. Since 2026-11-18 scouted rows wait in Ready to tailor; only
+  pasted links run to the approval queue on their own. The daily `postscreen-drain.yml` cron
+  calls only `auditor?mode=regate_queue` (no Gemini).
 - **Re-tailor from `audit_flagged`** is a human-only edge; the UI lane for it is not wired
   (`persist.ts` comment, `apps/web/src/data/humanLanes.ts`).
 - **The page fit is a model.** It is held to Chromium by the calibration test. A new font

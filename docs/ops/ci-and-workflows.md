@@ -42,7 +42,7 @@ Times are UTC in the cron line. IST is UTC + 5:30.
 | `run-one.yml` | manual only | none | Yes (one row) | Never submits |
 | `prescreen-drain.yml` | manual only | none | Yes (drops rows) | `dry_count_only` checkbox |
 | `pregate-sweep.yml` | manual only | none | Yes (drops rows) | `dry_count_only` checkbox |
-| `postscreen-drain.yml` | after either scout completes, daily 04:30 UTC, manual (Teja ruling 2026-11-09) | none | Yes (drops and tailors rows) | `dry_count_only` checkbox |
+| `postscreen-drain.yml` | schedule (approval-queue re-gate only), manual (full drain) (Teja ruling 2026-11-18) | `30 4 * * *` | Yes (cron: re-gate drops; manual: drops and tailors rows) | `dry_count_only` checkbox; cron never calls Gemini |
 | `ingest-links.yml` | manual only | none | Yes (new rows) | `dry_run` defaults to ON |
 
 All jobs run on `runs-on: ubuntu-latest`. No workflow uses a self-hosted runner at this commit
@@ -425,24 +425,34 @@ for example no description). Each page prints its `failed=` count.
 then `tailored` through `auditor` (`?limit=5`), pausing between pages for Gemini's rate limit.
 
 **Why:** nothing calls these three agents on a schedule. Their other callers handle one row
-(`run-one.yml`, `job-link-intake`) or 10 rows per click (the web runner).
+(`run-one.yml`, `job-link-intake`, "Send through pipeline") or 10 rows per click (the web runner).
 
-**Trigger:** `workflow_dispatch` only. Inputs:
-- `dry_count_only` (default false): print the plan, no sign-in.
-- `from_stage` (choice `matcher` / `tailor` / `auditor`, default `matcher`): later stages
-  always follow.
+**Triggers:** `schedule` (`30 4 * * *`) and `workflow_dispatch`. No `workflow_run`: nothing
+starts when a scout finishes.
+- **Manual dispatch** runs the full drain. Inputs:
+  - `dry_count_only` (default false): print the plan, no sign-in.
+  - `from_stage` (choice `matcher` / `tailor` / `auditor`, default `matcher`): later stages
+    always follow.
+- **Schedule** sets `REGATE_ONLY` (`github.event_name == 'schedule'`). The script runs only the
+  approval-queue re-gate (`auditor?mode=regate_queue`, one request, no Gemini), then exits before
+  the count gate and before any matcher, tailor or auditor call.
 
-**Automatic, by ruling (2026-11-09 ~17:20 IST).** This reverses the 2026-11-05 manual-only ruling, made
-after 55 rows stalled 11-02 to 11-09 (`docs/status/2026-11-09-pipeline-stall.md`). The drain runs:
-- on `workflow_run` when either scout (`applyy scout (ats discovery)`, `applyy scout (remote feeds)`) completes;
-- on one daily `schedule` (04:30 UTC);
-- on manual dispatch.
+**Manual, by ruling (Teja, 2026-11-18 21:45 IST):** "they don't need to directly reach approval, they
+need to go to ready to tailor; only the jobs which I add through the Add job link button need to go
+directly to the approval queue." Scouted rows wait at `passed_filters` (Ready to tailor) until Teja
+sends them on. This reverses the 2026-11-09 ~17:20 IST ruling (superseded), which ran the full drain
+on `workflow_run` after either scout, daily, and on dispatch, after 55 rows stalled 11-02 to 11-09
+(`docs/status/2026-11-09-pipeline-stall.md`).
+
+**Gap:** a pasted link whose server-side chain stalled (150 s wall clock) is no longer re-drained by
+the cron. It waits for "Send through pipeline" or a manual dispatch.
 
 The `postscreen-drain` concurrency group queues overlapping runs instead of racing them.
 
 A page-cap or stall stop now ends only that stage. Later stages still drain, and the run ends red with
-`INCOMPLETE`. `apps/web/test/postscreenDrainTriggers.test.ts` pins three things: the exact trigger set,
-the scout names, and the concurrency guard.
+`INCOMPLETE`. `apps/web/test/postscreenDrainTriggers.test.ts` pins four things: the trigger set
+(`schedule`, `workflow_dispatch`), the `REGATE_ONLY` expression, that the exit sits after the re-gate
+fetch and before the stage fetch, and the concurrency guard.
 
 **Fail-closed:** the matcher drops rows below the score threshold, and drops are one-way.
 
@@ -482,7 +492,7 @@ git grep -l "\.github/workflows" -- '*.test.ts'
 | `worker/test/run-window.test.ts` | The worker run window fits inside `apply.yml` timeout-minutes |
 | `worker/test/postscreen-drain-workflow.test.ts` | `postscreen-drain.yml` script behaviour |
 | `worker/test/pregate-sweep-log.test.ts` | `pregate-sweep.yml` log output |
-| `apps/web/test/postscreenDrainTriggers.test.ts` | `postscreen-drain.yml` triggers exactly on scout completion, one daily cron and manual dispatch, with the concurrency guard |
+| `apps/web/test/postscreenDrainTriggers.test.ts` | `postscreen-drain.yml` triggers are exactly `schedule` + `workflow_dispatch`; the cron is re-gate only (`REGATE_ONLY`, exit before the stage fetch); the concurrency guard |
 | `apps/web/test/scoutScheduleFreshness.test.ts` | Health threshold matches `scout.yml` cron |
 | `apps/web/test/remoteDiscoveryRetired.test.ts` | Remote feeds run only via `scout-remote.yml` |
 | `supabase/functions/job-link-intake/handler.test.ts` | `job-link-intake` contract used by `ingest-links.yml` |

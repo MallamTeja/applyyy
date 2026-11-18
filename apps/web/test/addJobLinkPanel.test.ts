@@ -130,11 +130,11 @@ describe('runJobLinkIntake', () => {
 });
 
 describe('AddJobLinkPanel', () => {
-  it('is one chip-btn trigger plus a closed dialog named by its heading', () => {
+  it('is one primary .button trigger plus a closed dialog named by its heading', () => {
     // The stateful wrapper as the page mounts it; static rendering runs no click, so the dialog stays closed.
     const html = render(h(panel.AddJobLinkPanel, { client: clientAnswering(200, okBody()) as never, pipelineDeps: null }));
     // The trigger keeps the words humanLanes.ts points people at.
-    assert.match(html, /<button type="button" class="chip-btn" aria-haspopup="dialog">Add a job by link<\/button>/);
+    assert.match(html, /<button type="button" class="button button--primary" aria-haspopup="dialog">Add a job by link<\/button>/);
     // A native dialog, rendered without `open`: nothing shows until the button is pressed.
     assert.match(html, /<dialog class="web-scout add-job-link" aria-labelledby="add-job-link-heading">/);
     // The heading the dialog is labelled by exists inside it.
