@@ -147,7 +147,7 @@ Note: the DB name uses `_` (`scout_ats`), the function folder uses `-` (`scout-a
 | Score floor | The matcher drops rows below this score. Teja ruled 2026-11-07: 30 (was 45). Never remove it. | `supabase/functions/_shared/match/score-threshold.ts` |
 | Blocklist | Companies never to apply to. | table `company_blocklist`; page `apps/web/src/features/settings/BlocklistPage.tsx` |
 | Search preferences | Teja's role, location and pay preferences. | table `search_preferences` |
-| Pasted link / add a job by link | Teja pastes one job URL; it skips robots (user-triggered) and enters at `passed_filters` by the human edge. | `supabase/functions/job-link-intake/`, `.github/workflows/ingest-links.yml` |
+| Pasted link / add a job by link | Teja pastes one job URL; it skips robots (user-triggered) and enters at `passed_filters` by the human edge. | `supabase/functions/job-link-intake/` |
 | Robots gate | Reads a site's robots.txt before scouting or applying. SmartRecruiters is OFF (Disallow: /). Ashby's 401 robots counts as no rules for board reads (Teja ruled 2026-11-01). | `packages/master-robots/src/gate.ts` |
 | Jobs tombstone | Weekly job-body cleanup, because the free database quota is 500 MB. | `.github/workflows/jobs-tombstone.yml` |
 

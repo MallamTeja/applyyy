@@ -174,7 +174,6 @@ Nothing runs it on a schedule. Every run is started by a human or by a human act
 | Pasted job link | `supabase/functions/job-link-intake/` | starts matcher -> tailor -> auditor for that one row |
 | One row by hand | `.github/workflows/run-one.yml` | one row per dispatch |
 | Drain the queue | `.github/workflows/postscreen-drain.yml` | manual dispatch only. Its daily cron only re-gates the approval queue and never scores (Teja ruled 2026-11-18 21:45 IST, reversing the superseded 2026-11-09 after-each-scout ruling). Scouted rows wait in Ready to tailor |
-| Bulk links | `.github/workflows/ingest-links.yml` | each link starts the chain |
 | Gemini-free sweep | `.github/workflows/pregate-sweep.yml` | `?mode=pregate_only`, pre-gate only, up to 500 rows a page, no scoring |
 
 ### What about ATS keywords?

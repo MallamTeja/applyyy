@@ -60,7 +60,7 @@ Grep that regenerates this list:
 | `interview-prep` | Builds interview prep notes. | JSON schema | `_shared/interview-prep/prompt.ts` | `_shared/interview-prep/prep-generator.ts` | `satellites.yml` |
 | `referral` | Drafts a referral outreach message. | JSON schema | inline in `referral/index.ts` | `referral/parse-reply.ts` | `satellites.yml` |
 | `scout-web` | Finds Greenhouse/Lever/Ashby posting URLs with Google Search grounding. | Free text + `tools: [{ google_search: {} }]` | inline in `scout-web/index.ts` | `scout-web/core.ts` + `urls.ts`: every URL is fetched from the live board before storage | web Discovery page (`apps/web/src/features/discovery/WebScoutPanel.tsx`) |
-| `job-link-intake` | Extracts job fields from a pasted job page. | JSON schema | `job-link-intake/extract.ts` (`buildExtractPrompt`) | `job-link-intake/extract.ts` shape check | dashboard "Add a job by link", `ingest-links.yml` |
+| `job-link-intake` | Extracts job fields from a pasted job page. | JSON schema | `job-link-intake/extract.ts` (`buildExtractPrompt`) | `job-link-intake/extract.ts` shape check | dashboard "Add a job by link" |
 | `resume-assist` | Proposes resume edit ops on the review page AI box. | JSON schema | `resume-assist/assist.ts` (`buildAssistPrompt`) | `parseAssistOps()` in `resume-assist/assist.ts`; the web's `apps/web/src/features/approval/aiEdit.ts` also refuses unknown op kinds | web review page |
 
 **Not an LLM caller:** the `auditor` is deterministic code (`auditApplication`
@@ -192,7 +192,7 @@ handle this:
 1. **In the client:** `defaultGeminiPacer` keeps at least 500 ms between calls.
    It is per isolate only. Two isolates do not see each other.
 2. **In the workflows:** the batch callers pace themselves.
-   `postscreen-drain.yml` and `ingest-links.yml` wait 45 s after each page and
+   `postscreen-drain.yml` waits 45 s after each page and
    90 s after a quota error page. The matcher page is 10 rows, the tailor page 3.
 
 Lesson from 2026-11-01: a 429 on every key is usually the per-minute window,

@@ -140,8 +140,9 @@ dedupe and insert-time screening path, so its rows also land at `passed_filters`
   Deterministic code then checks each one against the live board, behind the robots
   gate (`scout-web/fetch-board.ts`). The model proposes; code decides.
 
-The older Adzuna, Jooble and Workable adapters in `_shared/scout/adapters/` are not
-reached by any entry point. Check: `grep -rn "scout/tiers" supabase/functions worker/src | grep -v test`.
+The older Workable adapter in `_shared/scout/adapters/` is not reached by any entry point.
+Check: `grep -rn "adapters/workable" supabase/functions worker/src | grep -v test`. The Adzuna
+and Jooble adapters and `_shared/scout/tiers.ts` were deleted as dead code on 2026-11-18.
 
 ### 4.3 Normalizer: removes duplicates and dates each job
 
@@ -388,7 +389,7 @@ These are edge functions that do **not** move an application status (except
 | `interview-prep` | writes a prep pack into `interview_prep_packs` for rows at `interview` | Gemini | `satellites.yml` |
 | `referral` | drafts referral outreach for rows at `awaiting_approval` or `approved` (`referral/eligible-queue.ts`), logged as an `application_events` row | Gemini | `satellites.yml` |
 | `skill-gap` | counts required skills the master lacks across scored and applied jobs, into `skill_gap_reports` | none | `satellites.yml` |
-| `job-link-intake` | a pasted job link: reads the page, creates or revives the row at `passed_filters` as `human`, then runs Matcher, Tailor and Auditor in the background | Gemini | dashboard "Add a job by link"; `ingest-links.yml` |
+| `job-link-intake` | a pasted job link: reads the page, creates or revives the row at `passed_filters` as `human`, then runs Matcher, Tailor and Auditor in the background | Gemini | dashboard "Add a job by link" |
 | `resume-assist` | the AI edit box on the resume editor | Gemini | dashboard |
 | `gmail-sync` | proxies the dashboard's "sync now" to the Apps Script, so its secret stays server-side | none | dashboard |
 | `dispatch-apply` | after an approve, dispatches `apply-kit.yml` and a live drain of `apply.yml` | none | approval page (`apps/web/src/features/approval/dispatchApply.ts`) |

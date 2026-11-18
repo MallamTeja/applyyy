@@ -22,7 +22,7 @@ git ls-files .github/workflows
   [scout.yml](#scoutyml), [scout-remote.yml](#scout-remoteyml), [satellites.yml](#satellitesyml),
   [keepalive.yml](#keepaliveyml), [jobs-tombstone.yml](#jobs-tombstoneyml), [run-one.yml](#run-oneyml),
   [prescreen-drain.yml](#prescreen-drainyml), [pregate-sweep.yml](#pregate-sweepyml),
-  [postscreen-drain.yml](#postscreen-drainyml), [ingest-links.yml](#ingest-linksyml)
+  [postscreen-drain.yml](#postscreen-drainyml), [scout-ats-daily.yml](#scout-ats-dailyyml)
 - [Tests that guard the workflow files](#tests-that-guard-the-workflow-files)
 
 ## Quick table
@@ -43,7 +43,7 @@ Times are UTC in the cron line. IST is UTC + 5:30.
 | `prescreen-drain.yml` | manual only | none | Yes (drops rows) | `dry_count_only` checkbox |
 | `pregate-sweep.yml` | manual only | none | Yes (drops rows) | `dry_count_only` checkbox |
 | `postscreen-drain.yml` | schedule (approval-queue re-gate only), manual (full drain) (Teja ruling 2026-11-18) | `30 4 * * *` | Yes (cron: re-gate drops; manual: drops and tailors rows) | `dry_count_only` checkbox; cron never calls Gemini |
-| `ingest-links.yml` | manual only | none | Yes (new rows) | `dry_run` defaults to ON |
+| `scout-ats-daily.yml` | schedule, manual | `41 1 * * *` | Yes (`jobs.disappeared_at`, `posting_closed` events only) | Liveness only: no scan, no upserts, no Gemini |
 
 All jobs run on `runs-on: ubuntu-latest`. No workflow uses a self-hosted runner at this commit
 (the design is still pending: `docs/ops/2026-11-05-self-hosted-runner.md`).
@@ -91,7 +91,7 @@ rely on this.
 
 Why the app-user password lives in GitHub: the credentials were set as Actions secrets on
 2026-09-11 for `apply.yml`, and they are not on the operator's PC. That is why `run-one`,
-the drains, the sweep and `ingest-links` exist as workflows at all (header comment of each file).
+the drains, the sweep and `scout-ats-daily` exist as workflows at all (header comment of each file).
 
 ### Least privilege
 
@@ -459,22 +459,29 @@ fetch and before the stage fetch, and the concurrency guard.
 **Secrets:** the four app-user/Supabase secrets. **Timeout:** 180 min.
 **Concurrency:** `postscreen-drain`.
 
-## ingest-links.yml
+## scout-ats-daily.yml
 
-**Name:** `applyy ingest job links`. **Runs:** an inline Node script (built-ins only, no install)
-that sends each link in a checked-in list to the `job-link-intake` edge function, one at a time.
-This does from CI what the dashboard's "Add a job by link" panel does by hand.
+**Name:** `applyy scout-ats liveness (daily)`. **Runs:** an inline Node script (built-ins only,
+no install) that signs in as the app user and POSTs `scout-ats?mode=liveness` once.
 
-**Trigger:** `workflow_dispatch` only. Inputs:
-- `list` (default `worker/ingest/2026-11-01-career-page-internships.links.json`): an array of
-  `{url, company, role}`.
-- `dry_run` (boolean, default **true**): print the plan only, no sign-in, no intake call.
+**What it does:** retires dead postings in the approval queue without a dashboard Scan (audit
+item D4: the scheduled scout had no queue or feed liveness). Liveness mode does no scan, no
+screener and no `jobs`/`applications` upserts. It writes only `jobs.disappeared_at`,
+`posting_closed` notes in `application_events`, and its `agent_runs` row. Details:
+`docs/functions/README.md` (scout-ats, Modes). A `halted_by_kill_switch` answer ends green with
+a `HALTED` line; any other non-liveness answer ends red.
 
-**Pacing:** each accepted link starts matcher, tailor and auditor in the background, which
-spends Gemini calls. The script waits 45 s between links and retries a 429 once after 90 s.
-A list must have 1 to 40 entries (`MAX_LINKS`), or the run aborts; 40 paced links fit the 55-min timeout.
+**Triggers:**
+- `schedule`: `41 1 * * *` (07:11 IST).
+- `workflow_dispatch`, no inputs.
 
-**Secrets:** the four app-user/Supabase secrets. **Concurrency:** `ingest-links`.
+**Secrets:** `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `APPLYY_APP_USER_EMAIL`,
+`APPLYY_APP_USER_PASSWORD` (no new secrets). **Timeout:** 10 min.
+**Concurrency:** `applyy-scout-ats-liveness`.
+
+The bulk-links workflow `ingest-links.yml` (and its `worker/ingest/*.links.json` lists) was
+deleted on 2026-11-18 (Teja: "Delete it"). Single links still go through the dashboard's
+"Add a job by link" panel.
 
 ## Tests that guard the workflow files
 
@@ -495,4 +502,4 @@ git grep -l "\.github/workflows" -- '*.test.ts'
 | `apps/web/test/postscreenDrainTriggers.test.ts` | `postscreen-drain.yml` triggers are exactly `schedule` + `workflow_dispatch`; the cron is re-gate only (`REGATE_ONLY`, exit before the stage fetch); the concurrency guard |
 | `apps/web/test/scoutScheduleFreshness.test.ts` | Health threshold matches `scout.yml` cron |
 | `apps/web/test/remoteDiscoveryRetired.test.ts` | Remote feeds run only via `scout-remote.yml` |
-| `supabase/functions/job-link-intake/handler.test.ts` | `job-link-intake` contract used by `ingest-links.yml` |
+| `supabase/functions/job-link-intake/handler.test.ts` | `job-link-intake` contract (its workflow caller `ingest-links.yml` was deleted 2026-11-18) |

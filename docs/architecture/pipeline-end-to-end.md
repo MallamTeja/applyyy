@@ -110,7 +110,7 @@ There are three ways in. Each one inserts a new `applications` row; it never UPD
 | ATS board scout | `worker/src/cli/scout.ts` | `.github/workflows/scout.yml`, cron `17 0,12 * * *` and `17 4 * * *` (UTC), or manual dispatch | `passed_filters` or `dropped_filter` |
 | Remote feeds scout | `worker/src/cli/scout-remote.ts`, `worker/src/scout/remote-run.ts` | `.github/workflows/scout-remote.yml`, cron `30 1 * * *` (UTC) | `passed_filters` or `dropped_filter` |
 | Web search scout | `supabase/functions/scout-web/index.ts` | invoked on demand | `discovered` |
-| Pasted link | `supabase/functions/job-link-intake/handler.ts` | "Add a job by link" button (`apps/web/src/features/discovery/AddJobLinkPanel.tsx`), or `.github/workflows/ingest-links.yml` (manual) | `passed_filters` (human) |
+| Pasted link | `supabase/functions/job-link-intake/handler.ts` | "Add a job by link" button (`apps/web/src/features/discovery/AddJobLinkPanel.tsx`); the bulk `ingest-links.yml` was deleted 2026-11-18 | `passed_filters` (human) |
 
 The two scouts **screen on insert**: they call the screener's own function,
 `planScreenedApplications` (`supabase/functions/_shared/screen/screen-batch.ts`), so the row is

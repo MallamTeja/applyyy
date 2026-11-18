@@ -53,7 +53,7 @@ Each one needs your ruling. None of them was decided by the writers.
 ### Discovery and screening
 
 11. The 24 Greenhouse watchlist rows that returned 404 on 2026-11-01, and the `tcs` row that points at Thornbury: were they disabled?
-12. The Adzuna, Jooble and Workable adapters and `_shared/scout/tiers.ts` have no caller. Wire them in, or delete them?
+12. The Workable adapter has no caller. Wire it in, or delete it? (Adzuna, Jooble and `_shared/scout/tiers.ts` were deleted as dead code on 2026-11-18.)
 13. Should the SmartRecruiters mentions in the `scout-ats` header be removed or marked legacy? SR is off by your 2026-11-01 robots ruling.
 14. The scout measured about 16 minutes for 246 boards against a 12-minute budget. How many boards are left unpolled each run now? Measure it from `agent_runs`.
 15. Nothing moves `discovered` rows through the normalizer on a schedule. Is that intended?

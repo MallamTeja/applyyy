@@ -14,7 +14,7 @@ There are four ways a job enters the system:
 | ATS scout (main path) | Company job boards on Greenhouse, Lever, Ashby and Workday, listed in `company_watchlist` | GitHub cron (`scout.yml`), or the dashboard scan button | `worker/src/cli/scout.ts` (cron), `supabase/functions/scout-ats/` (dashboard) |
 | Remote-feed scout | Public remote-job feeds: RemoteOK, Jobicy, Arbeitnow | GitHub cron (`scout-remote.yml`) | `worker/src/cli/scout-remote.ts`, `worker/src/scout/remote-feeds.ts` |
 | Web scout | Gemini web search proposes Greenhouse/Lever/Ashby posting URLs; code checks each one on the live board | The Discovered page (`WebScoutPanel`) | `supabase/functions/scout-web/` |
-| Pasted job link | One link Teja pastes (careers page, LinkedIn/X post, ATS posting) | "Add a job by link" button on the Discovered page, or `ingest-links.yml` for a list | `supabase/functions/job-link-intake/` |
+| Pasted job link | One link Teja pastes (careers page, LinkedIn/X post, ATS posting) | "Add a job by link" button on the Discovered page | `supabase/functions/job-link-intake/` |
 
 The scouts do not crawl the web. They read each board's own public JSON API.
 The watchlist is the funnel: no board token, no jobs.
@@ -95,7 +95,8 @@ in one map, `ADAPTERS` in `supabase/functions/_shared/ats/registry.ts`.
 | Ashby | `_shared/ats/ashby.ts` | Real publish date. `robots.txt` answers 401 (allowed for scouting by the 2026-11-01 ruling). |
 | Workday | `_shared/scout/adapters/workday.ts` | POST-only list endpoint, 20 per page, `total` only on page one. Discovery only. A title-passing posting gets its description from the detail endpoint (`_shared/scout/workday-detail.ts`, capped by `WORKDAY_DETAIL_CAP`). |
 | SmartRecruiters | removed | Off by the robots ruling. Git history keeps the old adapter. |
-| Workable, Adzuna, Jooble | `_shared/scout/adapters/` | Written, **not registered, not reachable**. `_shared/scout/tiers.ts` has no importer in code. |
+| Workable | `_shared/scout/adapters/workable.ts` | Written, **not registered, not reachable**. |
+| Adzuna, Jooble | deleted | Deleted as dead code on 2026-11-18, with `_shared/scout/tiers.ts` and `_shared/scout/freshness.ts`. The `adzuna`/`jooble` values in the job source enum remain. |
 
 **Why one registry.** Adapters differ in field extraction, so that part is per adapter. But
 fingerprint and freshness must be the same for every source. So an adapter returns a
@@ -170,8 +171,8 @@ Files: `supabase/functions/job-link-intake/` (`handler.ts`, `index.ts`, `extract
 7. Asks first when the job is outside the work-authorised countries (`e63f979`) or was
    dropped before (`ea85dc9`). A paste of a tombstoned job clears `tombstoned_at` (`77f419a`).
 
-A list of links can be run with `.github/workflows/ingest-links.yml` (manual dispatch only;
-default is a dry run). Link lists live in `worker/ingest/*.links.json`.
+The bulk-links channel (`.github/workflows/ingest-links.yml` and the `worker/ingest/*.links.json`
+lists) was deleted on 2026-11-18 (Teja: "Delete it"). Links go in one at a time through the button.
 
 ### 7. Dedupe and the normalizer
 
@@ -191,6 +192,10 @@ default is a dry run). Link lists live in `worker/ingest/*.links.json`.
 | Backlog liveness | `_shared/scout/liveness.ts` | A poll may mark jobs gone only when the poll is trustworthy and is the same board. A row outside the previous poll's basis waits `STALE_BACKLOG_MIN_AGE_MS` (14 days). Sets `jobs.disappeared_at`. The cron scout uses the same planner since `1341608` (`worker/src/scout/liveness-marking.ts`). |
 | Queue liveness | `_shared/scout/queue-liveness.ts` | For `awaiting_approval` and `approved` rows: closed needs two proofs, absent from a complete listing AND the posting endpoint says gone (404, or Workday `canApply: false`). Ashby: a fresh full-board read. Anything else is "unknown". |
 | Feed liveness | `_shared/scout/feed-liveness.ts` | For in-flight rows with no ATS (`other`, `unknown`): one proof, the posting page's own 404 or 410. Capped by `FEED_LIVENESS_CAP`, with a guard against a site that changes its URL scheme. |
+
+Queue and feed liveness run on a dashboard scan and, since 2026-11-18, daily without a scan:
+`.github/workflows/scout-ats-daily.yml` (07:11 IST) calls `scout-ats?mode=liveness`, which only
+checks in-flight rows and writes `jobs.disappeared_at` plus `posting_closed` events.
 
 The Discovered page shows a "Posting gone" mark (`ae5eac5`).
 
@@ -249,8 +254,8 @@ The page also hosts the web scout panel and the "Add a job by link" button.
 - **Live watchlist vs catalog.** On 2026-11-01 a re-probe found 24 enabled Greenhouse rows that
   return 404 and the `tcs` row. Whether they were disabled must be checked on the live table.
 - **Lever has no identity field**, so the identity guard cannot protect Lever boards.
-- **Aggregators are unreachable code** (Adzuna, Jooble, Workable, `tiers.ts`). Decide: wire
-  them or delete them.
+- **The Workable adapter is unreachable code.** Decide: wire it or delete it. (Adzuna, Jooble
+  and `tiers.ts` were deleted on 2026-11-18.)
 - **Workday and SmartRecruiters jobs cannot be bot-applied.** Workday is discovery only; SR job
   pages fail the applier's robots check, so they are hand-apply only.
 - **Unknown location passes the work-auth gate** (Teja ruled this on 2026-11-05: keep unclear

@@ -294,7 +294,7 @@ Values are never written in the repo or in docs. Each row says where the copies 
 | `APPLYY_RLS_PROOF_SECRET` | Caller secret for `rls-proof` | Supabase | `rls-proof/guard.ts` |
 | `GEMINI_API_KEY_<NN>` | Gemini key pool (zero-padded index) | Supabase. The DB table `gemini_key_state` holds only slot state, never key values | `_shared/gemini/pool.ts` |
 | `GEMINI_MODEL`, `GEMINI_FALLBACK_MODEL` | Model choice (not secret, stored as secrets) | Supabase | `_shared/gemini/` |
-| `ADZUNA_APP_ID`, `ADZUNA_APP_KEY`, `JOOBLE_API_KEY` | Job-board API keys | Supabase | `_shared/scout/adapters/` |
+| `ADZUNA_APP_ID`, `ADZUNA_APP_KEY`, `JOOBLE_API_KEY` | Job-board API keys, **read by nothing** since the Adzuna/Jooble adapters were deleted as dead code (2026-11-18); safe to remove from Supabase secrets | Supabase | none |
 | `STORAGE_STATE_ENC_KEY` | Encryption key for a saved browser session | GitHub | Passed by `apply.yml`; no reader in `worker/src` today (see gaps) |
 | `APPLYY_CRON_LIVE`, `APPLYY_SATELLITES_LIVE` | Switches, not secrets | GitHub repo **variables** | `apply.yml`, `satellites.yml` |
 | `SUPABASE_ACCESS_TOKEN` | Supabase CLI token | Teja's Windows user env | **Belongs to the wrong account.** Unset it before any CLI call (CLAUDE.md §3, §4) |
