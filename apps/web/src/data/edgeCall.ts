@@ -11,6 +11,9 @@
  * Never a loop, never the raw code on screen.
  */
 
+// The real error classes, so the streaming call's errors are exactly what invoke would have returned.
+import { FunctionsFetchError, FunctionsHttpError, FunctionsRelayError } from '@supabase/supabase-js';
+
 // The sentence the caller shows when the session is gone; exported so the test pins it.
 export const SIGNED_OUT_MESSAGE = 'You were signed out (your session ended elsewhere). Sign in again.';
 
@@ -102,4 +105,127 @@ async function signedOut(client: EdgeClient): Promise<EdgeCallResult> {
   await signOutThisBrowser(client.auth);
   // The caller shows this, never the raw code.
   return { kind: 'signed_out', message: SIGNED_OUT_MESSAGE };
+}
+
+/* ---------------------------------------------------------------------------------------------------------
+ * The streaming call (2026-11-18, resume chat latency fixes 3 and 5).
+ *
+ * WHY its own fetch: supabase-js's invoke reads any non-JSON body with text(), which waits for the WHOLE
+ * stream, so the reply could not appear while Gemini writes. This posts the same request invoke would
+ * (same URL, apikey, bearer token) plus `Accept: application/x-ndjson`, and hands back the body reader when
+ * the server streams. Any other answer is shaped exactly as invoke returns it, so an old server (JSON) and an
+ * early error (plain JSON, non-2xx) go through the caller's existing reader unchanged. Same session rule as
+ * invokeEdge: a session 401 refreshes once and retries once, else this browser signs out.
+ * ------------------------------------------------------------------------------------------------------- */
+
+// The content type resume-assist streams in; anything else is read the way invoke reads it.
+const NDJSON = 'application/x-ndjson';
+
+/* Where and as whom the raw fetch goes. A plain object, so a test hands one in without a supabase client. */
+export interface EdgeStreamTarget {
+  // The project URL (https://<ref>.supabase.co), as the client was created with.
+  readonly url: string;
+  // The anon key: the gateway wants it as `apikey`, and it is the bearer when there is no session (as supabase-js does).
+  readonly apikey: string;
+  // The CURRENT session's access token, read per request so a retry after a refresh carries the new one.
+  accessToken(): Promise<string | null>;
+}
+
+/* The streaming call's answer: the body reader when the server streams, otherwise invokeEdge's own union. */
+export type EdgeStreamResult = { readonly kind: 'stream'; readonly reader: ReadableStreamDefaultReader<Uint8Array> } | EdgeCallResult;
+
+/* The stream target of a supabase-js client, or null when it lacks one (a test fake, a future SDK that renamed
+   the fields). supabase-js keeps `supabaseUrl`/`supabaseKey` as `protected` instance fields: present at run time,
+   hidden from the type, so they are read through `unknown` and shape-checked here; null makes the caller use
+   plain invoke, which still works, only without live progress. */
+export function edgeStreamTargetOf(client: EdgeClient): EdgeStreamTarget | null {
+  // The run-time view of the client; every field is checked before use.
+  const raw = client as unknown as { supabaseUrl?: unknown; supabaseKey?: unknown; auth: { getSession?: unknown } };
+  // Both must be non-empty strings, or there is no request to build.
+  if (typeof raw.supabaseUrl !== 'string' || raw.supabaseUrl === '' || typeof raw.supabaseKey !== 'string' || raw.supabaseKey === '') return null;
+  // No getSession means no token source; the stream path would send the anon key and be refused.
+  if (typeof raw.auth.getSession !== 'function') return null;
+  // Narrowed copy, typed with only the fields read below (each is checked again at run time).
+  const getSession = raw.auth.getSession as () => Promise<{ data?: { session?: { access_token?: unknown } | null } }>;
+  // The target.
+  return {
+    // Copied as is; the URL join in postOnce adds the slash.
+    url: raw.supabaseUrl,
+    // Same.
+    apikey: raw.supabaseKey,
+    // auth-js refreshes an expired token inside getSession, so this is the token invoke would send.
+    accessToken: async () => {
+      // Called on auth so `this` is the auth client.
+      const { data } = await getSession.call(raw.auth);
+      // The token, only when it is a string.
+      const token = data?.session?.access_token;
+      // No session: the caller falls back to the anon key, as supabase-js does.
+      return typeof token === 'string' && token !== '' ? token : null;
+    },
+  };
+}
+
+/* One POST, answered as a stream or in invoke's own { data, error } shape. Never throws. */
+async function postOnce(target: EdgeStreamTarget, name: string, body: Record<string, unknown>, fetchImpl: typeof fetch): Promise<EdgeStreamResult> {
+  // The functions endpoint, joined the way supabase-js joins it (trailing slash, then a relative path).
+  const url = new URL(`functions/v1/${name}`, target.url.endsWith('/') ? target.url : `${target.url}/`).href;
+  // A failed token read (storage blocked) is a failed request, never a throw out of the chat.
+  try {
+    // The bearer: the session's token, else the anon key exactly as supabase-js sends with no session.
+    const token = (await target.accessToken()) ?? target.apikey;
+    // The request invoke would send, plus the streaming opt-in (an old server ignores the header).
+    const response = await fetchImpl(url, {
+      // resume-assist takes a JSON body over POST.
+      method: 'POST',
+      // The gateway and the edge gate read these.
+      headers: { Authorization: `Bearer ${token}`, apikey: target.apikey, 'Content-Type': 'application/json', Accept: NDJSON },
+      // The caller's body, serialized as invoke would.
+      body: JSON.stringify(body),
+    });
+    // The relay's own failure, as invoke reports it.
+    if (response.headers.get('x-relay-error') === 'true') return { kind: 'answered', data: null, error: new FunctionsRelayError(response), response };
+    // Non-2xx: the Response rides behind error.context, where every caller's error reader looks.
+    if (!response.ok) return { kind: 'answered', data: null, error: new FunctionsHttpError(response), response };
+    // The bare media type, parameters (charset) dropped, as invoke compares it.
+    const type = (response.headers.get('Content-Type') ?? 'text/plain').split(';')[0]?.trim();
+    // The server streams: hand the body over unread.
+    if (type === NDJSON && response.body !== null) return { kind: 'stream', reader: response.body.getReader() };
+    // Anything else is read as invoke reads it: JSON parsed, everything else as text.
+    const data: unknown = type === 'application/json' ? await response.json() : await response.text();
+    // The old server's answer, in the shape the caller already reads.
+    return { kind: 'answered', data, error: null, response };
+  } catch (cause) {
+    // A network drop or an unparsable body: invoke returns it as an error too.
+    return { kind: 'answered', data: null, error: new FunctionsFetchError(cause) };
+  }
+}
+
+/* Call an edge function asking for a stream; on a session 401, refresh once and retry once (invokeEdge's rule).
+   `fetchImpl` is a parameter only so tests answer with a real Response; the app passes nothing. */
+export async function invokeEdgeStream(
+  // Its auth refreshes the session and signs out, exactly as invokeEdge uses it.
+  client: EdgeClient,
+  // Where the raw fetch goes and with which token (edgeStreamTargetOf).
+  target: EdgeStreamTarget,
+  // The edge function's name.
+  name: string,
+  // The JSON body.
+  body: Record<string, unknown>,
+  // Looked up at call time (not captured at import), so a test's stub of the global is honoured too.
+  fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+): Promise<EdgeStreamResult> {
+  // The first attempt.
+  const first = await postOnce(target, name, body, fetchImpl);
+  // A stream, or anything but a session 401, is the caller's to read.
+  if (first.kind !== 'answered' || !(await isSessionRefusal(first.error))) return first;
+  // One refresh: a token that simply expired comes back here.
+  const refreshed = await client.auth.refreshSession();
+  // A revoked refresh token cannot recover; stop before any retry.
+  if (refreshed.error !== null && refreshed.error !== undefined) return signedOut(client);
+  // One retry; accessToken() now reads the refreshed session.
+  const second = await postOnce(target, name, body, fetchImpl);
+  // Still a session 401 after a good refresh: final, no second refresh.
+  if (second.kind === 'answered' && (await isSessionRefusal(second.error))) return signedOut(client);
+  // The retry's answer, whatever it is.
+  return second;
 }

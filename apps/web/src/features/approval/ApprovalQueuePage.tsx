@@ -2497,7 +2497,7 @@ export function ApprovalQueuePage(): ReactElement {
                     /* The pinned master's groups, so a missing keyword can be vouched for and printed in one. */
                     attestCategories={skillGroups(sources.get(diff.applicationId))}
                     /* The AI box's ask; its proposals come back through onEdit like any hand edit. */
-                    onAssist={(body) => requestAssist(supabase, body)}
+                    onAssist={(body, onProgress) => requestAssist(supabase, body, onProgress)}
                     /* Where the chat keeps its chats; undefined when not connected. */
                     chat={chatStore}
                     /* The chat renders in the right-hand dock, and only while it is THIS row's turn. */
@@ -2676,7 +2676,7 @@ export function ApprovalQueuePage(): ReactElement {
                         /* Same vouch-and-add groups as Bucket B. */
                         attestCategories={skillGroups(sources.get(diff.applicationId))}
                         /* Same AI box as Bucket B. */
-                        onAssist={(body) => requestAssist(supabase, body)}
+                        onAssist={(body, onProgress) => requestAssist(supabase, body, onProgress)}
                         /* Where the chat keeps its chats; undefined when not connected. */
                         chat={chatStore}
                         /* Same dock as Bucket B: this row's chat shows only while it is the docked one. */

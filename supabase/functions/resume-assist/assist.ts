@@ -576,8 +576,12 @@ const SYSTEM_INSTRUCTION = [
 const RESPONSE_SCHEMA = {
   // One object holding the ops and a note.
   type: "OBJECT",
-  // Its two fields.
+  // Its two fields. note FIRST (2026-11-18): the model writes keys in this order, so the reply text
+  // arrives before the ops and the stream can show it while Gemini is still writing.
   properties: {
+    // What was changed, in one sentence, for the operator.
+    // Superseded: since 2026-11-01 note is the chat reply, and since 2026-11-04 it never claims a change.
+    note: { type: "STRING" },
     // The changes, in the order to apply them.
     ops: {
       // A list.
@@ -609,10 +613,10 @@ const RESPONSE_SCHEMA = {
         required: ["op"],
       },
     },
-    // What was changed, in one sentence, for the operator.
-    // Superseded: since 2026-11-01 note is the chat reply, and since 2026-11-04 it never claims a change.
-    note: { type: "STRING" },
   },
+  // Gemini's own key-order control: without it the model picks the order (documented as alphabetical), so the
+  // stream's "note first" would rest on an accident of spelling. Explicit, see above.
+  propertyOrdering: ["note", "ops"],
   // Both always present, so "no ops" arrives with its reason.
   required: ["ops", "note"],
 } as const;
@@ -650,11 +654,27 @@ function groupedSkills(skills: readonly PrintedSkill[]): string {
   return [...groups].map(([category, names]) => `${oneLine(category)}: ${names.join(", ")}`).join(" | ");
 }
 
-// Build the prompt: stable resume context first, the instruction last (cache prefix, see header).
+// Build the prompt: most stable first, the instruction last (cache prefix, see header).
+// Order since 2026-11-18: JOB, RESUME, CHAT, INSTRUCTION. The job never changes on a row, while the resume
+// changes with every applied edit, so the job (with its ~2k-token description) now stays in the cacheable
+// prefix after an edit instead of falling behind the first changed bullet. Same lines, only reordered.
 export function buildAssistPrompt(request: AssistRequest): GenerateGeminiOptions["prompt"] {
   // Labelled plain lines: cheaper than JSON (no quotes, braces or repeated keys) and as clear.
   const lines = [
-    // The resume block, which only changes when an edit lands.
+    // The job block, which only changes between rows: first, the longest stable run after the system text.
+    "JOB",
+    // Title and company in one line.
+    `ROLE: ${oneLine(request.job.title)} at ${oneLine(request.job.company)}`,
+    // Keywords the resume does not yet contain.
+    `MISSING KEYWORDS: ${request.job.missing.join(", ") || "(none)"}`,
+    // THE JD (2026-11-04), each line only when sent, so an old client's prompt carries no empty labels.
+    ...(request.job.location === null ? [] : [`LOCATION: ${oneLine(request.job.location)}`]),
+    // Remote / hybrid / onsite.
+    ...(request.job.arrangement === null ? [] : [`ARRANGEMENT: ${oneLine(request.job.arrangement)}`]),
+    // The JD body on one line: its own line breaks would otherwise read as new labels.
+    ...(request.job.description === null ? [] : [`DESCRIPTION: ${oneLine(request.job.description)}`]),
+    // The resume block, which only changes when an edit lands. MASTER SKILLS NOT ON RESUME and AVAILABLE
+    // sit here, not before JOB: they are master items MINUS the resume, so they change with every edit too.
     "RESUME",
     // The groups a new skill may be filed under.
     `SKILL GROUPS: ${request.categories.join(" | ") || "(none: do not add skills)"}`,
@@ -683,19 +703,6 @@ export function buildAssistPrompt(request: AssistRequest): GenerateGeminiOptions
           ...request.available.map((item) => (item.kind === "bullet" ? `${item.id} [${item.entry}]: ${oneLine(item.text)}` : `${item.id} ${item.section}: ${oneLine(item.label)}`)),
         ]
       : []),
-    // The job block, which only changes between rows.
-    "JOB",
-    // Title and company in one line.
-    `ROLE: ${oneLine(request.job.title)} at ${oneLine(request.job.company)}`,
-    // Keywords the resume does not yet contain.
-    `MISSING KEYWORDS: ${request.job.missing.join(", ") || "(none)"}`,
-    // THE JD (2026-11-04), each line only when sent, so an old client's prompt is unchanged. Stable per
-    // job, so it sits here, before the chat and the instruction: inside the shared cacheable prefix.
-    ...(request.job.location === null ? [] : [`LOCATION: ${oneLine(request.job.location)}`]),
-    // Remote / hybrid / onsite.
-    ...(request.job.arrangement === null ? [] : [`ARRANGEMENT: ${oneLine(request.job.arrangement)}`]),
-    // The JD body on one line: its own line breaks would otherwise read as new labels.
-    ...(request.job.description === null ? [] : [`DESCRIPTION: ${oneLine(request.job.description)}`]),
     // The chat's earlier turns, only when there are any (a new chat costs nothing extra).
     ...(request.history.length > 0 ? ["CHAT SO FAR:", ...request.history.map((m) => `${m.role === "user" ? "owner" : "ai"}: ${oneLine(m.text)}`)] : []),
     // Last, so every earlier byte is a shared prefix across asks on the same resume.
@@ -1711,6 +1718,40 @@ export function readUsage(body: GeminiResponseBody): AssistUsage {
   };
 }
 
+// The "note" value written so far in a half-finished JSON answer, decoded, or null before it starts
+// (2026-11-18, for the stream). The note is the schema's first key, so it is the first value the model writes.
+// Cut back to the last COMPLETE character: a trailing "\" or "\u00" is held until its escape is whole, and a
+// lone high surrogate until its pair arrives, so every value returned is a true prefix of the final note.
+export function partialNote(text: string): string | null {
+  // The key, its colon and the opening quote; the key is never escaped, so a quoted "note" in a value cannot match.
+  const open = /"note"\s*:\s*"/.exec(text);
+  // Not written yet.
+  if (open === null) return null;
+  // Where the value's characters start.
+  const start = open.index + open[0].length;
+  // Walks to the closing quote or the last complete escape; the end of the safe slice.
+  let end = start;
+  // One character or one whole escape per step.
+  while (end < text.length && text[end] !== '"') {
+    // Plain character: one step. Escape: "\x" is 2 characters, "\uXXXX" is 6.
+    const step = text[end] !== "\\" ? 1 : text[end + 1] === "u" ? 6 : 2;
+    // An escape cut by the chunk boundary: stop before it.
+    if (end + step > text.length) break;
+    // Whole: take it.
+    end += step;
+  }
+  // JSON.parse decodes every escape exactly as the final parse will; a raw control character (invalid JSON) throws.
+  try {
+    // The safe slice, re-quoted, decoded.
+    const note = JSON.parse(`"${text.slice(start, end)}"`) as string;
+    // A high surrogate whose low half is still in flight would render as a broken glyph: held back.
+    return /[\ud800-\udbff]$/.test(note) ? note.slice(0, -1) : note;
+  } catch {
+    // Unreadable so far; the final result carries the real note.
+    return null;
+  }
+}
+
 // What the handler needs from the outside world; faked in tests.
 export interface AssistDeps {
   // Signs in as the app user. The connection carries its own bound Gemini call, so the handler
@@ -1780,35 +1821,116 @@ export async function handleResumeAssist(req: Request, deps: AssistDeps): Promis
   if (kill.kind === "disabled") return json(409, { status: "disabled", message: "The system switch is off, so the AI is off too." });
   // Unreadable is not "on".
   if (kill.kind === "unreadable") return json(503, { status: "error", message: "kill_switch_unreadable" });
-  // The one call, with every cost lever set.
-  const outcome = await conn.generate({
+  // The one call's options, with every cost lever set; shared by the JSON and the streaming path.
+  const options: GenerateGeminiOptions = {
     // System instruction, compact context, schema.
     prompt: buildAssistPrompt(parsed.request),
     // Output and thinking capped (see the header).
     generation: { maxOutputTokens: MAX_OUTPUT_TOKENS, thinkingLevel: THINKING_LEVEL },
-    // Interactive: give up after 20 s rather than the default 25 s x 4.
-    timeoutMs: 20_000,
+    // Fail fast (2026-11-18): live waits of 42 s and 67.5 s ended in "AI is busy". 15 s per attempt, not 20 s.
+    timeoutMs: 15_000,
     // Two retries ride out a same-minute 503 on both models (13:17, 2026-11-05); more would bill patience the operator no longer has.
     maxRetries: 2,
-  });
+    // Short gaps between attempts, and the first 503 switches to the fallback model with no sleep (client contract A).
+    interactive: true,
+  };
+  // The streaming opt-in is a header, not a body field: an old server ignores it and answers JSON as before.
+  if (!(req.headers.get("accept") ?? "").includes("application/x-ndjson")) {
+    // Today's path: one JSON answer when the call is done.
+    const answer = answerFor(await conn.generate(options), parsed.request);
+    // Status and body from the one builder both paths share.
+    return json(answer.status, answer.body);
+  }
+  // The stream's writer, captured from start(), which the constructor runs synchronously.
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  // The response body: one JSON object per line, flushed as produced.
+  const stream = new ReadableStream<Uint8Array>({ start: (c) => void (controller = c) });
+  // Lines are UTF-8 bytes on the wire.
+  const encoder = new TextEncoder();
+  // One event, one line. A browser that closed the tab makes enqueue throw; the call still finishes and is metered.
+  const send = (event: Record<string, unknown>) => {
+    // Written, or dropped when nobody is reading.
+    try {
+      // Newline-delimited, so the web splits on "\n".
+      controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+    } catch {
+      // The reader is gone: nothing to tell.
+    }
+  };
+  // Shown at once, before attempt 1 even starts.
+  send({ type: "status", stage: "thinking", text: "Thinking..." });
+  // The last note sent, so an unchanged chunk sends no duplicate line.
+  let lastNote = "";
+  // Started BEFORE the Response is returned, so index.ts can hand this same call to waitUntil and meter it.
+  conn
+    .generate({
+      ...options,
+      // A new attempt: say why, and restart the note (the next attempt writes its own from the start).
+      onAttempt: (info) => {
+        // Attempt 1 is already announced by "Thinking...".
+        if (info.reason === "first") return;
+        // The web replaces its note with the new attempt's.
+        lastNote = "";
+        // The honest reason for the wait.
+        send(info.reason === "fallback" ? { type: "status", stage: "switching_model", text: "Gemini is overloaded - trying the backup model..." } : { type: "status", stage: "retrying", text: "No answer yet - trying again..." });
+      },
+      // Every chunk: the note so far, cumulative, only when it grew.
+      onText: (accumulated) => {
+        // Decoded up to the last complete character.
+        const note = partialNote(accumulated);
+        // Nothing new (or not started): no line.
+        if (note === null || note === "" || note === lastNote) return;
+        // Remembered for the duplicate check.
+        lastNote = note;
+        // The web shows it as plain text.
+        send({ type: "note", text: note });
+      },
+    })
+    // The same builder as the JSON path, so the result body is exactly what JSON would have sent.
+    .then((outcome) => answerFor(outcome, parsed.request))
+    // A throw gets withErrorBoundary's 500 body, the shape a crash has on the JSON path.
+    .catch((err) => {
+      // For the function logs; the body stays generic, as withErrorBoundary's does.
+      console.error("[resume-assist] unhandled error in stream:", err);
+      // Same status and body as the boundary.
+      return { status: 500, body: { success: false, error: "internal_error" } as Record<string, unknown> };
+    })
+    // Always the last line, then the stream ends.
+    .then((answer) => {
+      // The outcome, whatever it was.
+      send({ type: "result", httpStatus: answer.status, body: answer.body });
+      // Closing an already-cancelled stream throws; nothing to do then.
+      try {
+        // Ends the response.
+        controller.close();
+      } catch {
+        // The reader is gone.
+      }
+    });
+  // 200 for the stream itself; the real outcome rides in the result line. CORS like json().
+  return new Response(stream, { status: 200, headers: { "content-type": "application/x-ndjson", ...corsHeaders } });
+}
+
+// The HTTP status and body for a finished Gemini call: ONE builder for the JSON and the streaming path.
+function answerFor(outcome: GeminiCallOutcome<GeminiResponseBody>, request: AssistRequest): { status: number; body: Record<string, unknown> } {
   // Every key cooling or the daily budget spent.
-  if (!outcome.ok && outcome.reason === "all_keys_cooling") return json(429, { status: "quota", message: "The AI quota is used up for now. Try again later." });
+  if (!outcome.ok && outcome.reason === "all_keys_cooling") return { status: 429, body: { status: "quota", message: "The AI quota is used up for now. Try again later." } };
   // Google's side is overloaded.
-  if (!outcome.ok && outcome.reason === "upstream_unavailable") return json(503, { status: "upstream_unavailable", message: describeGeminiFailure(outcome) });
+  if (!outcome.ok && outcome.reason === "upstream_unavailable") return { status: 503, body: { status: "upstream_unavailable", message: describeGeminiFailure(outcome) } };
   // Anything else, in the shared operator-readable words.
-  if (!outcome.ok) return json(502, { status: "error", message: describeGeminiFailure(outcome) });
+  if (!outcome.ok) return { status: 502, body: { status: "error", message: describeGeminiFailure(outcome) } };
   // The first candidate is the answer.
   const candidate = outcome.data.candidates?.[0];
   // Hit the output cap: the JSON is cut, and the honest fix is a smaller ask.
-  if (candidate?.finishReason === "MAX_TOKENS") return json(502, { status: "truncated", message: "The AI answer was cut off. Ask for fewer changes at once." });
+  if (candidate?.finishReason === "MAX_TOKENS") return { status: 502, body: { status: "truncated", message: "The AI answer was cut off. Ask for fewer changes at once." } };
   // All text parts joined; JSON mode normally gives one.
   const text = (candidate?.content?.parts ?? []).map((part) => part.text ?? "").join("");
   // Validated against the request it answers.
-  const ops = parseAssistOps(text, parsed.request);
+  const ops = parseAssistOps(text, request);
   // An unusable answer is the model's failure, not the caller's.
-  if (!ops.ok) return json(502, { status: "error", message: ops.message });
+  if (!ops.ok) return { status: 502, body: { status: "error", message: ops.message } };
   // The ops, what was dropped, the note, and what it cost.
   // 2026-11-04: `rejected` names each dropped op (the first MAX_REJECTED); `dropped` stays for browsers
   // from before, and counts every drop, so it exceeds rejected.length only past that cap.
-  return json(200, { status: "ok", ops: ops.ops, dropped: ops.dropped, rejected: ops.rejected, note: ops.note, usage: readUsage(outcome.data) });
+  return { status: 200, body: { status: "ok", ops: ops.ops, dropped: ops.dropped, rejected: ops.rejected, note: ops.note, usage: readUsage(outcome.data) } };
 }

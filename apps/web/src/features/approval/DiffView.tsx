@@ -76,7 +76,7 @@ import type { EditSource } from './saveTailoredEdit';
 /* The AI box: proposes edits that apply through this view's own save path. */
 import { AiEditPanel } from './AiEditPanel';
 /* Types only: the ask and answer of the AI box. */
-import type { AssistBody, AssistResult } from './aiEdit';
+import type { AssistBody, AssistProgress, AssistResult } from './aiEdit';
 /* The chat's structure, read from this same diff so the AI sees what the operator sees. */
 import { structureFromDiff } from './aiEdit';
 /* Type only: the AI chat's store, passed through to the panel. */
@@ -161,7 +161,8 @@ export interface DiffViewProps {
   readonly attestCategories?: readonly string[] | undefined;
   /* The AI box's ask (2026-10-31). Absent means no AI box; its proposals apply through onEdit,
      so a screen without a save path never shows it. */
-  readonly onAssist?: ((body: AssistBody) => Promise<AssistResult>) | undefined;
+  /* 2026-11-18: the optional onProgress carries the streamed status and reply text through to AiEditPanel. */
+  readonly onAssist?: ((body: AssistBody, onProgress?: (progress: AssistProgress) => void) => Promise<AssistResult>) | undefined;
   /* Where the AI chat keeps its chats (2026-11-01). Absent means a session-only chat. */
   readonly chat?: ChatStore | undefined;
   /* The page's docked chat (2026-11-06). Present: the AI chat renders into `node` (the page's right-hand

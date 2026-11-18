@@ -181,7 +181,33 @@ export interface GeminiFailoverOptions<T> {
     readonly retryAfterSeconds: number | null;
     readonly attempt: number;
   }) => void;
+  // Progress hook, fired once per attempt right before its request goes out (after the key
+  // claim, so a refused claim never announces an attempt that did not happen). Lets an
+  // interactive caller say "trying the backup model" instead of a fixed "Thinking...".
+  readonly onAttempt?: (info: GeminiAttemptInfo) => void;
+  // Fail fast for a human who is waiting: the first 503 switches to the fallback with no
+  // sleep, and every other gap is short (INTERACTIVE_GAP_MS, INTERACTIVE_TOTAL_MS in all).
+  // Absent => the batch schedules above, unchanged.
+  readonly interactive?: boolean;
 }
+
+// What onAttempt reports. A named type so the failover loop and generateGeminiContent share one shape.
+export interface GeminiAttemptInfo {
+  // 1-based, the same count `attempts` reports on the outcome.
+  readonly attempt: number;
+  // The model this attempt calls; "" only for a direct loop caller that named no model.
+  readonly model: string;
+  // first = attempt 1; fallback = the model just switched after a 503; retry = anything else.
+  readonly reason: "first" | "retry" | "fallback";
+  // Status of the failed attempt that caused this one (0 = timeout/network); absent on attempt 1.
+  readonly previousStatus?: number;
+}
+
+// Interactive gap between attempts. Short because a person is watching a spinner: the batch
+// schedule's 4-48 s overload waits made the chat wait 42 s and 67 s live (2026-11-18).
+const INTERACTIVE_GAP_MS = 500;
+// Ceiling on ALL interactive gaps in one call, so a larger maxRetries cannot add up to a long wait.
+const INTERACTIVE_TOTAL_MS = 1500;
 
 // Statuses worth retrying on another key: gateway/overload errors and 0 (network/timeout).
 const TRANSIENT_STATUSES: ReadonlySet<number> = new Set([0, 500, 502, 503, 504]);
@@ -402,6 +428,12 @@ export async function callGeminiWithFailover<T>(
   // all share `lastFailure`/this loop, so this tag is the tiebreak that names the exhaustion
   // reason: an EARLIER failure of another kind must not mislabel the final one.
   let lastKind: "rate_limit" | "transient" | "key_rejected" | null = null;
+  // Status of the last failed attempt, for onAttempt's previousStatus; undefined before any failure.
+  let previousStatus: number | undefined;
+  // True when the attempt about to run is the first on the fallback model, so onAttempt says "fallback".
+  let justSwitched = false;
+  // Interactive gaps slept so far, held against INTERACTIVE_TOTAL_MS.
+  let interactiveSlept = 0;
 
   while (attempt <= maxRetries) {
     attempt += 1;
@@ -430,6 +462,20 @@ export async function callGeminiWithFailover<T>(
 
     const { index: keyIndex, apiKey } = claim;
 
+    // 1b. Announce the attempt now that a key is held, so the hook never names one that cannot run.
+    options.onAttempt?.({
+      // The same 1-based count the outcome reports.
+      attempt,
+      // "" only when a direct caller named no model; generateGeminiContent always resolves one.
+      model: currentModel ?? "",
+      // Attempt 1 is "first"; the attempt right after a model switch is "fallback"; the rest retry.
+      reason: attempt === 1 ? "first" : justSwitched ? "fallback" : "retry",
+      // Spread only when known (exactOptionalPropertyTypes): attempt 1 has no previous failure.
+      ...(previousStatus !== undefined ? { previousStatus } : {}),
+    });
+    // A switch is announced once; later fallback attempts are plain retries.
+    justSwitched = false;
+
     // 2. Execute the request through the deterministic token pacer.
     // The model is passed per attempt because a fallback switch changes it mid-call.
     const execResult = await pacer.pace(() => options.execute(apiKey, keyIndex, currentModel));
@@ -438,6 +484,8 @@ export async function callGeminiWithFailover<T>(
     // so the write never holds the serial queue. `currentModel` is still this attempt's model:
     // a fallback switch happens later, in the transient branch.
     await recordUsage(db, keyIndex, currentModel, execResult);
+    // Remembered for the NEXT attempt's onAttempt; a success returns below, so only failures matter.
+    if (!execResult.ok) previousStatus = execResult.status;
 
     // 3. On success: record positive outcome in Postgres and return.
     if (execResult.ok) {
@@ -553,10 +601,23 @@ export async function callGeminiWithFailover<T>(
         console.warn(`[gemini] ${options.model} returned 503; falling back to ${fallbackModel} for the remaining attempts`);
         // Every remaining attempt calls the fallback; the loop never switches back mid-call.
         currentModel = fallbackModel;
+        // The next attempt is the first on the fallback, which onAttempt reports as "fallback".
+        justSwitched = true;
+      }
+      // Interactive: a person is waiting, so no overload backoff and no Retry-After wait. A switch
+      // goes at once (the fallback is a different model, not the one shedding load); other gaps are
+      // short and capped in total. Only reached when another attempt follows (see below).
+      if (attempt <= maxRetries && options.interactive === true) {
+        // Zero at a switch; otherwise one short gap, never past the per-call total.
+        const delay = switching ? 0 : Math.min(INTERACTIVE_GAP_MS, INTERACTIVE_TOTAL_MS - interactiveSlept);
+        // Counted before sleeping so the cap holds even if the sleep seam throws.
+        interactiveSlept += delay;
+        // Zero is skipped rather than slept, like the batch path.
+        if (delay > 0) await sleep(delay);
       }
       // Never sleep after the final attempt: nothing follows it, so waiting only delays the error.
       // `attempt <= maxRetries` is exactly "another attempt will follow".
-      if (attempt <= maxRetries) {
+      else if (attempt <= maxRetries) {
         // Zero-based gap index between this attempt and the next.
         const gap = attempt - 1;
         // Clamp attempts past the table to the last delay, so a larger maxRetries cannot index
@@ -751,6 +812,133 @@ export interface GenerateGeminiOptions {
     // and cannot be expressed. https://ai.google.dev/gemini-api/docs/thinking
     readonly thinkingLevel?: "low" | "medium" | "high";
   };
+  // STREAMING (2026-11-18, resume-assist chat). Set => each attempt calls
+  // `:streamGenerateContent?alt=sse` and this receives candidate 0's ACCUMULATED text of the
+  // current attempt after every chunk that adds text (a retry restarts it from ""). The outcome
+  // keeps the non-streaming shape: one joined text part, finishReason and usageMetadata from the
+  // last chunk that carried them. A failure before the first chunk is today's status; a failure
+  // mid-stream (dropped connection, malformed chunk, no finishReason) is transient (status 0).
+  readonly onText?: (accumulatedText: string) => void;
+  // Forwarded to the failover loop; see GeminiFailoverOptions.onAttempt.
+  readonly onAttempt?: (info: GeminiAttemptInfo) => void;
+  // Forwarded to the failover loop; see GeminiFailoverOptions.interactive.
+  readonly interactive?: boolean;
+}
+
+// Reads one alt=sse response into the non-streaming body shape, calling onText as text arrives.
+// Returns { failure } instead of throwing for a malformed stream, so the executor can report it as
+// transient (status 0); a dropped connection still throws from the reader, into the executor's catch.
+// SHAPE-CHECKED per chunk (CLAUDE.md §6): a chunk that is not a JSON object fails the attempt, and
+// a stream that ends without a finishReason (or promptFeedback) is a truncation, never an answer.
+async function readGeminiStream(
+  body: ReadableStream<Uint8Array> | null,
+  onText: (accumulatedText: string) => void,
+): Promise<GeminiResponseBody | { readonly failure: string }> {
+  // A 200 with no body cannot be an answer.
+  if (body === null) return { failure: "stream had no body" };
+  // stream:true keeps a multi-byte character split across chunks intact.
+  const decoder = new TextDecoder();
+  // Bytes received but not yet ended by a newline: a chunk boundary can fall anywhere.
+  let buffer = "";
+  // The data lines of the event being assembled; SSE joins several with "\n".
+  let data: string[] = [];
+  // Candidate 0's text so far, for this attempt only.
+  let text = "";
+  // The last finishReason / usageMetadata / promptFeedback seen; Google sends them on the final chunk(s).
+  let finishReason: string | undefined;
+  let usageMetadata: unknown;
+  let promptFeedback: unknown;
+  // Ends one event (a blank line): parse it, fold it in. Returns a failure string or null.
+  const dispatch = (): string | null => {
+    // Blank lines between events with no data carry nothing.
+    if (data.length === 0) return null;
+    // One payload per event, per the SSE spec.
+    const payload = data.join("\n");
+    // Cleared first so the next event starts fresh whatever happens below.
+    data = [];
+    // The payload is untrusted text from the network.
+    let chunk: unknown;
+    try {
+      chunk = JSON.parse(payload);
+    } catch {
+      // A broken chunk means the stream is corrupt: fail the attempt, never guess.
+      return "malformed stream chunk";
+    }
+    // `null`, a number or an array parse fine but are not a GenerateContentResponse.
+    if (typeof chunk !== "object" || chunk === null || Array.isArray(chunk)) return "malformed stream chunk";
+    // Read the fields this client uses; each is shape-checked before use.
+    const c = chunk as { candidates?: unknown; usageMetadata?: unknown; promptFeedback?: unknown };
+    // Candidate 0, the only one any caller reads (same as the non-streaming check).
+    const first = (Array.isArray(c.candidates) ? c.candidates[0] : undefined) as { content?: { parts?: unknown }; finishReason?: unknown } | undefined;
+    // Its parts, if they are an array.
+    const parts = Array.isArray(first?.content?.parts) ? (first!.content!.parts as unknown[]) : [];
+    // Only string text counts, matching the hasText rule after the loop.
+    const delta = parts.map((p) => (p as { text?: unknown } | null)?.text).filter((t): t is string => typeof t === "string").join("");
+    // Latest wins: the final chunk carries the real reason.
+    if (typeof first?.finishReason === "string") finishReason = first.finishReason;
+    // Latest wins: the last usage chunk has the full counts.
+    if (c.usageMetadata !== undefined) usageMetadata = c.usageMetadata;
+    // A blocked prompt arrives as promptFeedback with no candidates; kept so the empty check names it.
+    if (c.promptFeedback !== undefined) promptFeedback = c.promptFeedback;
+    // Only a chunk that adds text calls the hook, so the caller never re-renders an unchanged text.
+    if (delta.length > 0) {
+      // Accumulated, so the hook can simply replace what it shows.
+      text += delta;
+      onText(text);
+    }
+    return null;
+  };
+  // One complete line: a trailing \r (CRLF streams) is dropped, a blank line ends the event.
+  const feed = (raw: string): string | null => {
+    // Strip CR here, after reassembly, so a \r\n split across chunks is still one line ending.
+    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+    // Blank line = end of event.
+    if (line === "") return dispatch();
+    // Only data lines matter; SSE strips exactly one space after the colon. event:/id:/comments are ignored.
+    if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+    return null;
+  };
+  // A reader error (abort timeout, reset) throws out of here into the executor's catch: status 0.
+  // getReader(), not `for await`: the web DOM lib that CI's tsconfig.test.json checks this file against
+  // gives ReadableStream no async iterator (TS2504), while Deno and node accept both.
+  const reader = body.getReader();
+  // Until the stream reports it is done.
+  while (true) {
+    // One chunk of bytes, or the end of the stream.
+    const { done, value: bytes } = await reader.read();
+    // Closed by the server: leave the loop and let the caller check for a finishReason.
+    if (done) break;
+    // Append the decoded bytes to whatever partial line was left.
+    buffer += decoder.decode(bytes, { stream: true });
+    // Every complete line in the buffer is fed; the remainder waits for more bytes.
+    let newline: number;
+    while ((newline = buffer.indexOf("\n")) >= 0) {
+      // The line without its \n; feed strips a trailing \r itself.
+      const failure = feed(buffer.slice(0, newline));
+      // Consume the line and its \n.
+      buffer = buffer.slice(newline + 1);
+      // A corrupt chunk ends the attempt at once; cancel the body so the connection is released, not left open.
+      if (failure !== null) { void reader.cancel().catch(() => {}); return { failure }; }
+    }
+  }
+  // Flush the decoder, then a last unterminated line, then a last event with no closing blank line.
+  buffer += decoder.decode();
+  const tail = (buffer.length > 0 ? feed(buffer) : null) ?? dispatch();
+  // A corrupt final chunk fails like any other.
+  if (tail !== null) return { failure: tail };
+  // No finish reason and no block: the connection closed mid-answer, so retry rather than return half.
+  if (finishReason === undefined && promptFeedback === undefined) return { failure: "stream ended before finishReason" };
+  // The non-streaming shape, each optional key only when Google sent it, so the empty_response
+  // check after the loop reads it exactly as it reads a generateContent body.
+  const result: Record<string, unknown> = {
+    // One candidate with the joined text; no part at all when empty, so empty_response triggers.
+    candidates: [{ content: { parts: text.length > 0 ? [{ text }] : [] }, ...(finishReason !== undefined ? { finishReason } : {}) }],
+    // Logged per attempt by recordUsage, exactly as for a non-streaming body.
+    ...(usageMetadata !== undefined ? { usageMetadata } : {}),
+    // Lets the empty_response detail name a blockReason.
+    ...(promptFeedback !== undefined ? { promptFeedback } : {}),
+  };
+  return result as GeminiResponseBody;
 }
 
 export interface GeminiResponseBody {
@@ -869,13 +1057,18 @@ export async function generateGeminiContent(
     ...(fallbackModel !== undefined ? { fallbackModel } : {}),
     // Same spread rule for the clock seam.
     ...(options.now !== undefined ? { now: options.now } : {}),
+    // Progress hook and fail-fast mode, spread only when set so an absent option stays absent.
+    ...(options.onAttempt !== undefined ? { onAttempt: options.onAttempt } : {}),
+    ...(options.interactive !== undefined ? { interactive: options.interactive } : {}),
     // `attemptModel` is the loop's per-attempt choice; `?? model` only satisfies the type, since
     // the loop always passes the primary or the fallback.
     execute: async (apiKey: string, _keyIndex: number, attemptModel: string | undefined) => {
       // NO key in the URL: a URL travels into error messages, stack traces, proxy/CDN logs and
       // `Response.url` (kept on `rawResponse`), while a header does not. The key goes only in
       // the `x-goog-api-key` header below.
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${attemptModel ?? model}:generateContent`;
+      // Streaming only when the caller asked for it; otherwise the exact URL every caller used before.
+      const endpoint = options.onText !== undefined ? "streamGenerateContent?alt=sse" : "generateContent";
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${attemptModel ?? model}:${endpoint}`;
       try {
         const response = await fetchFn(url, {
           method: "POST",
@@ -886,6 +1079,15 @@ export async function generateGeminiContent(
           signal: AbortSignal.timeout(timeoutMs),
         });
 
+        // Streaming success: read the SSE body. Inside this try, so a mid-stream drop or the abort
+        // timer lands in the catch below as status 0 (transient), like a failed non-streaming fetch.
+        if (response.ok && options.onText !== undefined) {
+          // Parsed into the non-streaming shape, or a named failure.
+          const streamed = await readGeminiStream(response.body, options.onText);
+          // A corrupt or truncated stream is transient: another attempt may well stream cleanly.
+          if ("failure" in streamed) return { ok: false, status: 0, statusText: streamed.failure };
+          return { ok: true, data: streamed };
+        }
         if (response.ok) {
           // A malformed SUCCESS body is not an outage: parse separately so it does not fall into
           // the outer catch (status 0 = transient) and get retried 4x as a "network error".

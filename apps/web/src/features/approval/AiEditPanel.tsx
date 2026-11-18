@@ -72,7 +72,7 @@ const ADDING_KINDS: ReadonlySet<EditAction['kind']> = new Set<EditAction['kind']
 // The pure halves: build the ask, resolve and apply ops, read applied state and outcomes, format the bill.
 import { applyTogether, batchRunLine, buildAssistDraft, formatUsage, holdReason, isApplied, isPairedHalf, outcomeNote, replyNote, resolveOps, sectionTitle, shouldAutoApply, opLabel, runApplyBatch, swapPartners, toEditAction } from './aiEdit';
 // Types for the ask and its parts.
-import type { ApplicableOp, AssistBody, AssistResult, AssistStructure, AuditAdvice, StoredOp } from './aiEdit';
+import type { ApplicableOp, AssistBody, AssistProgress, AssistResult, AssistStructure, AuditAdvice, StoredOp } from './aiEdit';
 // The memory: grouping into chats and the window sent back as context.
 import { groupThreads, historyFor } from './resumeChat';
 // Types for stored messages and the injected store.
@@ -406,7 +406,8 @@ export function AiEditPanel({
   // The page's guarded save; one call per applied edit, saying whether the AI or a click applied it.
   readonly onEdit: (action: EditAction, editSource: ChatSource) => Promise<EditResult>;
   // The ask; injected so this component never holds a client.
-  readonly onAssist: (body: AssistBody) => Promise<AssistResult>;
+  // onProgress (2026-11-18) gets the live status and the reply so far; a caller that drops it still works, just without them.
+  readonly onAssist: (body: AssistBody, onProgress?: (progress: AssistProgress) => void) => Promise<AssistResult>;
   // A save is in flight somewhere in this diff; one write at a time per resume.
   readonly busy: boolean;
   // The master's skill groups, the only places a new skill may be filed.
@@ -445,6 +446,9 @@ export function AiEditPanel({
   }, [instruction, diff.applicationId]);
   // An ask is in flight.
   const [asking, setAsking] = useState<boolean>(false);
+  /* What the streamed ask has said so far (2026-11-18): the server's stage line and the reply as Gemini writes it.
+     Empty when nothing streamed (an old server's JSON answer), so the pending line falls back to "Thinking…". */
+  const [progress, setProgress] = useState<AssistProgress>({});
   /* Prompts sent while another was still being answered or applied (Teja, 2026-11-12: "if I send multiple
      prompts they need to be queued, applied and served by the AI"). Oldest first; the drain effect below sends
      the head only once the panel is idle, so each prompt is built from the resume AFTER the previous one's
@@ -550,8 +554,12 @@ export function AiEditPanel({
     const turns = active.map((m) => (m.role === 'assistant' && m.ops !== null ? { ...m, content: [outcomeNote(m.ops, diff, structure ?? null), m.content].filter((part) => part !== '').join(' ') } : m));
     // Built from the diff as it is NOW (every applied edit included), its structure, and those turns.
     const draft = buildAssistDraft(diff, categories, text, historyFor(turns), structure ?? null);
-    // The call; never throws.
-    const result = await onAssist(draft.body);
+    // A fresh ask starts with no stale stage line or half reply from the last one.
+    setProgress({});
+    // The call; never throws. Each streamed update replaces the whole progress view.
+    const result = await onAssist(draft.body, setProgress);
+    // The answer is in: the final reply renders from the result, so the streamed draft goes.
+    setProgress({});
     // A failed ask is said and nothing is stored; the prompt goes back to the head of the queue for a retry.
     if (result.kind === 'error') {
       // Shown above the composer.
@@ -1041,7 +1049,15 @@ export function AiEditPanel({
           );
         })}
         {/* The pending reply, so the operator sees the ask is in flight. */}
-        {asking ? <li className="ai-chat__msg ai-chat__msg--ai ai-chat__meta">Thinking…</li> : null}
+        {asking ? (
+          // The server's latest stage, else the old fixed word; the reply so far under it, as plain text (React escapes it).
+          <li className="ai-chat__msg ai-chat__msg--ai" aria-live="polite">
+            {/* The stage line, muted like before, so it reads as status, not as the AI talking. */}
+            <span className="ai-chat__meta">{progress.status ?? 'Thinking…'}</span>
+            {/* The reply as it is written; hidden until the first words arrive. */}
+            {progress.note !== undefined && progress.note !== '' ? <p className="ai-chat__note">{progress.note}</p> : null}
+          </li>
+        ) : null}
         {/* Prompts waiting their turn, oldest first, after the one being answered: the order they will be served in. */}
         {queue.map((text, index) => (
           // Keyed by position and text: two queued prompts may share a text.

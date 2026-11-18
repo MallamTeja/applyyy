@@ -407,7 +407,7 @@ test("parseAssistRequest refuses a structure that does not hang together", () =>
   assert.equal(parseAssistRequest(structured({ available: tooMany })).ok, false);
 });
 
-test("buildAssistPrompt labels each entry once, tags bullets with it, and lists AVAILABLE before the job", () => {
+test("buildAssistPrompt labels each entry once, tags bullets with it, and lists AVAILABLE before the chat", () => {
   // The user content's lines.
   const lines = buildAssistPrompt(structuredRequest()).userContent.split("\n");
   // The order, printed once.
@@ -418,8 +418,8 @@ test("buildAssistPrompt labels each entry once, tags bullets with it, and lists 
   assert.ok(lines.includes("b1 [e0]: Cut p95 latency by 30%."));
   // The master items: a bullet under its entry, a whole entry under its section.
   const from = lines.indexOf("AVAILABLE (in the master, not on the resume):") + 1;
-  // Between the AVAILABLE label and the job block.
-  assert.deepEqual(lines.slice(from, lines.indexOf("JOB")), ["m0 [e0]: Mentored two interns.", "n0 achievements: LeetCode"]);
+  // Between the AVAILABLE label and the instruction (the job block leads since 2026-11-18; this request has no chat).
+  assert.deepEqual(lines.slice(from, -1), ["m0 [e0]: Mentored two interns.", "n0 achievements: LeetCode"]);
   // The instruction is still last.
   assert.match(lines.at(-1) ?? "", /^INSTRUCTION: /);
   // Without a structure the prompt carries none of the new blocks (old clients cost nothing extra).
@@ -794,7 +794,11 @@ function promptLines(raw: Record<string, unknown>): string[] {
 
 // The exact prompt for withJob({}) BEFORE the 2026-11-04 change, captured from the old code. An old
 // client's request must still produce these bytes, so the implicit cache and old asks are unaffected.
+// 2026-11-18: the same lines, with the JOB block moved first (cache order, stream.test.ts); nothing else changed.
 const PROMPT_BEFORE_2026_11_04 = [
+  "JOB",
+  "ROLE: Backend Engineer at Acme",
+  "MISSING KEYWORDS: Kafka, gRPC",
   "RESUME",
   "SKILL GROUPS: Languages | Tools",
   "SKILLS: TypeScript, Postgres",
@@ -809,22 +813,21 @@ const PROMPT_BEFORE_2026_11_04 = [
   "AVAILABLE (in the master, not on the resume):",
   "m0 [e0]: Mentored two interns.",
   "n0 achievements: LeetCode",
-  "JOB",
-  "ROLE: Backend Engineer at Acme",
-  "MISSING KEYWORDS: Kafka, gRPC",
   "CHAT SO FAR:",
   "owner: Shorten b0",
   "ai: Shortened one bullet.",
   "INSTRUCTION: Add Kafka and make b1 about latency",
 ];
 
-test("the JOB block carries location, arrangement and description only when sent, before the chat", () => {
+test("the JOB block carries location, arrangement and description only when sent, before the resume and the chat", () => {
   // All three sent; the description with the line breaks an ATS page leaves.
   const lines = promptLines(withJob({ location: "Bengaluru, India", arrangement: "hybrid", description: "We build payments.\n\n  Python required." }));
   // Right after the keywords, in this order, the description on one line.
   const at = lines.indexOf("MISSING KEYWORDS: Kafka, gRPC");
-  // The three new lines, then the chat.
-  assert.deepEqual(lines.slice(at + 1, at + 5), ["LOCATION: Bengaluru, India", "ARRANGEMENT: hybrid", "DESCRIPTION: We build payments. Python required.", "CHAT SO FAR:"]);
+  // The three new lines, then the resume block (the job leads since 2026-11-18, for the cache prefix).
+  assert.deepEqual(lines.slice(at + 1, at + 5), ["LOCATION: Bengaluru, India", "ARRANGEMENT: hybrid", "DESCRIPTION: We build payments. Python required.", "RESUME"]);
+  // And the chat still comes after the job.
+  assert.ok(lines.indexOf("CHAT SO FAR:") > at);
   // The instruction stays the very last line (the cache prefix depends on it).
   assert.match(lines.at(-1) ?? "", /^INSTRUCTION: /);
   // Only the location sent: only its line appears.

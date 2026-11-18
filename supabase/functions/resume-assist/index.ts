@@ -23,6 +23,9 @@ Deno.serve(withErrorBoundary("resume-assist", async (req: Request): Promise<Resp
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   // This request's Gemini meter: without it the AI editor spent quota with no agent_runs row (2026-11-09).
   const meter = geminiMeter("resume_assist");
+  // The Gemini call in flight. A streamed answer (2026-11-18) returns its Response BEFORE the call ends, so the
+  // run row must wait for the call itself, not for the Response; resolved already when no call is made.
+  let call: Promise<unknown> = Promise.resolve();
   // Everything else goes through the handler with real seams.
   const response = await handleResumeAssist(req, {
     // Signs in per request, since isolates keep no state between calls.
@@ -33,11 +36,13 @@ Deno.serve(withErrorBoundary("resume-assist", async (req: Request): Promise<Resp
       if (!client.ok) return client.kind === "refused" ? client : { ok: false, reason: client.reason };
       // The gates read through `db`; Gemini claims its key through the same client.
       // The call goes through the meter, which writes gemini_calls into this request's run row.
-      return { ok: true, db: client.db, userId: client.userId, generate: (options) => meter.call(client.db, () => generateGeminiContent(client.db, options)) };
+      // The call is kept in `call` so the run row below is written only once it has settled.
+      return { ok: true, db: client.db, userId: client.userId, generate: (options) => (call = meter.call(client.db, () => generateGeminiContent(client.db, options))) };
     },
   });
-  // The run row in the background, so the person waiting pays no extra round trip; no call, no row.
-  EdgeRuntime.waitUntil(meter.record());
+  // The run row in the background, after the call settles (a throw too), so the person waiting pays no extra
+  // round trip and a streamed call is metered with its real outcome; no call, no row.
+  EdgeRuntime.waitUntil(call.catch(() => {}).then(() => meter.record()));
   // The handler's answer, untouched by the telemetry.
   return response;
 }));

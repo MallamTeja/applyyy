@@ -58,7 +58,8 @@ import { keywordAppearsIn } from '../../../../../supabase/functions/_shared/tail
 import { PAGE_FIT_FLOORS } from '../../../../../supabase/functions/_shared/tailor/page-trim.ts';
 /* The one edge call that refreshes once and retries once on a revoked session (2026-11-07), so the chat
    never shows the raw `invalid_session` code. */
-import { invokeEdge } from '../../data/edgeCall.ts';
+// Plus its streaming twin and the client-to-target read it needs (2026-11-18, live progress in the chat).
+import { edgeStreamTargetOf, invokeEdge, invokeEdgeStream } from '../../data/edgeCall.ts';
 // Its client shape; the ask's own client type is this one.
 import type { EdgeClient } from '../../data/edgeCall.ts';
 
@@ -1444,64 +1445,188 @@ async function readErrorBody(error: unknown): Promise<unknown> {
   }
 }
 
-/* Ask the edge function. Never throws: every outcome is an AssistResult. */
-export async function requestAssist(client: AssistClient | null, body: AssistBody): Promise<AssistResult> {
+/* What a streamed ask has shown so far: the latest status line and the reply note as written so far. The panel
+   replaces its whole view with each one, so a note that restarted after a model switch never shows stale words. */
+export interface AssistProgress {
+  // The server's own words for the stage ("Thinking...", "Gemini is overloaded - trying the backup model...").
+  readonly status?: string;
+  // The reply note so far (cumulative); '' right after a status, since the next attempt writes it afresh.
+  readonly note?: string;
+}
+
+// The chat's words for a stream that ended without its `result` line (server crash, dropped socket). Exported for the test.
+export const AI_DROPPED_MESSAGE = 'The AI connection dropped; try again.';
+
+/* Complete NDJSON lines from a decoded buffer, plus the unfinished tail to prepend to the next chunk.
+   WHY a held tail: a network chunk can end anywhere, mid-line included; parsing a half line would drop an event. */
+export function splitNdjson(buffer: string): { readonly lines: string[]; readonly rest: string } {
+  // Every piece but the last ended with a newline, so it is whole.
+  const pieces = buffer.split('\n');
+  // The last piece has no newline yet: held back (it is '' when the buffer ended exactly on one).
+  const rest = pieces.pop() ?? '';
+  // CRLF tolerated, and blank keep-alive lines are not events.
+  const lines = pieces.map((piece) => piece.trim()).filter((piece) => piece !== '');
+  // Both halves.
+  return { lines, rest };
+}
+
+/* One streamed event, shape-checked (repo CLAUDE.md §6: a lenient reader is the fail-open). */
+type AssistEvent =
+  // A stage change; it also clears the note, since a new attempt writes it afresh.
+  | { readonly type: 'status'; readonly text: string }
+  // The reply note so far.
+  | { readonly type: 'note'; readonly text: string }
+  // The final outcome: today's JSON body with the HTTP status the JSON path would have had.
+  | { readonly type: 'result'; readonly httpStatus: number; readonly body: unknown };
+
+/* One NDJSON line as an event, or null for anything malformed or of an unknown type (a newer server's extra
+   event is skipped, never fatal; the mandatory `result` line is what decides success). */
+function readAssistEvent(line: string): AssistEvent | null {
+  // A broken line must not throw out of the stream read.
+  let value: unknown;
+  // Parsed on its own, so one bad line costs only itself.
+  try {
+    // One JSON object per line.
+    value = JSON.parse(line);
+  } catch {
+    // Not JSON: skipped.
+    return null;
+  }
+  // Every event is an object with a type.
+  if (!isRecord(value)) return null;
+  // status and note both carry text, and are only shown when it is a string.
+  if ((value.type === 'status' || value.type === 'note') && typeof value.text === 'string') return { type: value.type, text: value.text };
+  // The result needs an integer HTTP status to pick the ok or the error reader; the body is checked by that reader.
+  if (value.type === 'result' && Number.isInteger(value.httpStatus)) return { type: 'result', httpStatus: value.httpStatus as number, body: value.body };
+  // Anything else: unknown or malformed, skipped.
+  return null;
+}
+
+/* Read a streamed answer to its end: each status and note goes to onProgress as it arrives, and the `result` line
+   becomes the AssistResult through the SAME reader the JSON path uses. Never throws. */
+export async function readAssistStream(reader: ReadableStreamDefaultReader<Uint8Array>, onProgress: (progress: AssistProgress) => void): Promise<AssistResult> {
+  // stream: true keeps a multi-byte character split across chunks whole.
+  const decoder = new TextDecoder();
+  // Decoded text not yet ending in a newline.
+  let pending = '';
+  // What the panel shows now.
+  let progress: AssistProgress = {};
+  // The outcome, once its line arrives.
+  let result: { readonly httpStatus: number; readonly body: unknown } | null = null;
+  // Applies one line: progress to the panel, or the outcome.
+  const take = (line: string): void => {
+    // Shape-checked; null is skipped.
+    const event = readAssistEvent(line);
+    // Nothing usable, or anything after the result (which is always last): ignored.
+    if (event === null || result !== null) return;
+    // The outcome is kept for after the read.
+    if (event.type === 'result') result = event;
+    // A new stage: the note restarts with the next attempt.
+    else if (event.type === 'status') progress = { status: event.text, note: '' };
+    // The note so far replaces the old one (cumulative), under the same status.
+    else progress = { ...progress, note: event.text };
+    // Progress, told after it changed.
+    if (event.type !== 'result') onProgress(progress);
+  };
+  // A dropped socket rejects read(); that is the same dropped answer, not a throw.
+  try {
+    // Until the server closes the body.
+    for (;;) {
+      // The next chunk, whatever its size.
+      const { done, value } = await reader.read();
+      // Closed: the tail below is the last line.
+      if (done) break;
+      // Appended after the held tail, so a line split across chunks is joined.
+      const { lines, rest } = splitNdjson(pending + decoder.decode(value, { stream: true }));
+      // The tail waits for the next chunk.
+      pending = rest;
+      // The whole lines, in order.
+      lines.forEach(take);
+    }
+    // Flush the decoder, then the last line, which may lack a trailing newline.
+    splitNdjson(`${pending}${decoder.decode()}\n`).lines.forEach(take);
+  } catch {
+    // Mid-stream failure: whatever arrived is incomplete.
+    return { kind: 'error', message: AI_DROPPED_MESSAGE };
+  }
+  // A type-only copy, since TS cannot see the closure's assignment.
+  const outcome = result as { readonly httpStatus: number; readonly body: unknown } | null;
+  // No result line: the answer never finished.
+  if (outcome === null) return { kind: 'error', message: AI_DROPPED_MESSAGE };
+  // The same reader as the JSON path; a 2xx is read as an answer, anything else as an error body.
+  return readAssistBody(outcome.httpStatus >= 200 && outcome.httpStatus < 300, outcome.body);
+}
+
+/* Ask the edge function. Never throws: every outcome is an AssistResult.
+   With onProgress, it asks for a stream and reports progress; an old server's JSON is read exactly as without it. */
+export async function requestAssist(client: AssistClient | null, body: AssistBody, onProgress?: (progress: AssistProgress) => void): Promise<AssistResult> {
   // No client means the app is not configured; nothing can be asked.
   if (client === null) return { kind: 'error', message: 'The app is not connected to the database.' };
   // The call.
   try {
-    // The function validates the body again; nothing here is trusted by it. Routed through the shared
-    // helper so a session revoked elsewhere is refreshed once, or ends in a plain sentence.
-    const answer = await invokeEdge(client, 'resume-assist', { body: { ...body } });
+    // Streaming only when someone listens AND the client exposes its URL and session; otherwise plain invoke.
+    const target = onProgress === undefined ? null : edgeStreamTargetOf(client);
+    // The function validates the body again; nothing here is trusted by it. Both routes refresh a session
+    // revoked elsewhere once, or end in a plain sentence.
+    const answer = target === null ? await invokeEdge(client, 'resume-assist', { body: { ...body } }) : await invokeEdgeStream(client, target, 'resume-assist', { ...body });
     // The session could not be recovered and this browser is signed out: the plain sentence, never the code.
     if (answer.kind === 'signed_out') return { kind: 'error', message: answer.message };
+    // The new server streamed: progress live, the result through the shared reader. target !== null implies onProgress.
+    if (answer.kind === 'stream') return await readAssistStream(answer.reader, onProgress ?? (() => undefined));
     // Otherwise exactly what invoke returned, read as before.
     const { data, error } = answer;
-    // A non-2xx answer: read the function's own message when it sent one.
-    if (error) {
-      // The JSON body behind the error, if readable.
-      const errBody = (await readErrorBody(error)) ?? data;
-      // 503 {status:'upstream_unavailable'}: Gemini overloaded. Its message is the operator line
-      // "upstream_unavailable status=503 …" (describeGeminiFailure), which the chat showed raw as if the AI
-      // had said it (A1, 2026-11-05). The user gets plain words; the raw line goes to the console for debugging.
-      if (isRecord(errBody) && errBody.status === 'upstream_unavailable') {
-        // Kept for whoever debugs it, never on screen.
-        console.warn('resume-assist upstream_unavailable:', errBody.message);
-        // What the user can act on.
-        return { kind: 'error', message: AI_BUSY_MESSAGE };
-      }
-      // The function's message, verbatim, when it has the expected shape.
-      if (isRecord(errBody) && typeof errBody.message === 'string') return { kind: 'error', message: errBody.message };
-      // Otherwise a plain sentence; the gateway's 404 for an undeployed function lands here.
-      return { kind: 'error', message: 'The AI request failed and returned no readable message.' };
-    }
-    // A 200 must be the ok shape.
-    if (!isRecord(data) || data.status !== 'ok' || !Array.isArray(data.ops)) return { kind: 'error', message: 'The AI answer had an unexpected shape.' };
-    // Each op read on its own.
-    const ops = data.ops.map(readOp);
-    // One unreadable op means the contract drifted; say so rather than show a partial list.
-    if (ops.some((op) => op === null)) return { kind: 'error', message: 'The AI answer had an unexpected shape.' };
-    // The server's refusals with reasons (2026-11-04); absent from a server deployed before then.
-    const listed = data.rejected === undefined ? [] : Array.isArray(data.rejected) ? data.rejected.map(readRejection) : null;
-    // A malformed list is a drifted contract, like an unreadable op: never shown in part.
-    if (listed === null || listed.some((item) => item === null)) return { kind: 'error', message: 'The AI answer had an unexpected shape.' };
-    // Every refusal the server reported.
-    const rejected = listed.filter((item): item is Rejection => item !== null);
-    // How many it dropped in all; the list is capped there, and an older server sends only this.
-    const unlisted = (count(data.dropped) ?? 0) - rejected.length;
-    // Any it counted but did not itemise are still said, never lost.
-    if (unlisted > 0) rejected.push({ what: `${unlisted} ${rejected.length > 0 ? 'more ' : ''}proposed change${unlisted === 1 ? '' : 's'}`, why: 'The AI service did not say why.' });
-    // The validated answer.
-    return {
-      kind: 'ok',
-      ops: ops.filter((op): op is AssistOp => op !== null),
-      rejected,
-      note: typeof data.note === 'string' ? data.note : '',
-      // The bill, every count checked.
-      usage: readUsage(data.usage),
-    };
+    // A non-2xx answer: the JSON body behind the error, if readable, read as an error body.
+    if (error) return readAssistBody(false, (await readErrorBody(error)) ?? data);
+    // A 2xx answer.
+    return readAssistBody(true, data);
   } catch (cause) {
     // A network drop or a thrown fetch.
     return { kind: 'error', message: `The AI request failed: ${cause instanceof Error ? cause.message : 'no answer'}.` };
   }
+}
+
+/* resume-assist's JSON body as an AssistResult: the ONE reader for both the JSON answer and the stream's `result`
+   line, so the two routes cannot drift. `ok` says whether the HTTP status was 2xx. */
+function readAssistBody(ok: boolean, data: unknown): AssistResult {
+  // A non-2xx answer: read the function's own message when it sent one.
+  if (!ok) {
+    // 503 {status:'upstream_unavailable'}: Gemini overloaded. Its message is the operator line
+    // "upstream_unavailable status=503 …" (describeGeminiFailure), which the chat showed raw as if the AI
+    // had said it (A1, 2026-11-05). The user gets plain words; the raw line goes to the console for debugging.
+    if (isRecord(data) && data.status === 'upstream_unavailable') {
+      // Kept for whoever debugs it, never on screen.
+      console.warn('resume-assist upstream_unavailable:', data.message);
+      // What the user can act on.
+      return { kind: 'error', message: AI_BUSY_MESSAGE };
+    }
+    // The function's message, verbatim, when it has the expected shape.
+    if (isRecord(data) && typeof data.message === 'string') return { kind: 'error', message: data.message };
+    // Otherwise a plain sentence; the gateway's 404 for an undeployed function lands here.
+    return { kind: 'error', message: 'The AI request failed and returned no readable message.' };
+  }
+  // A 200 must be the ok shape.
+  if (!isRecord(data) || data.status !== 'ok' || !Array.isArray(data.ops)) return { kind: 'error', message: 'The AI answer had an unexpected shape.' };
+  // Each op read on its own.
+  const ops = data.ops.map(readOp);
+  // One unreadable op means the contract drifted; say so rather than show a partial list.
+  if (ops.some((op) => op === null)) return { kind: 'error', message: 'The AI answer had an unexpected shape.' };
+  // The server's refusals with reasons (2026-11-04); absent from a server deployed before then.
+  const listed = data.rejected === undefined ? [] : Array.isArray(data.rejected) ? data.rejected.map(readRejection) : null;
+  // A malformed list is a drifted contract, like an unreadable op: never shown in part.
+  if (listed === null || listed.some((item) => item === null)) return { kind: 'error', message: 'The AI answer had an unexpected shape.' };
+  // Every refusal the server reported.
+  const rejected = listed.filter((item): item is Rejection => item !== null);
+  // How many it dropped in all; the list is capped there, and an older server sends only this.
+  const unlisted = (count(data.dropped) ?? 0) - rejected.length;
+  // Any it counted but did not itemise are still said, never lost.
+  if (unlisted > 0) rejected.push({ what: `${unlisted} ${rejected.length > 0 ? 'more ' : ''}proposed change${unlisted === 1 ? '' : 's'}`, why: 'The AI service did not say why.' });
+  // The validated answer.
+  return {
+    kind: 'ok',
+    ops: ops.filter((op): op is AssistOp => op !== null),
+    rejected,
+    note: typeof data.note === 'string' ? data.note : '',
+    // The bill, every count checked.
+    usage: readUsage(data.usage),
+  };
 }
