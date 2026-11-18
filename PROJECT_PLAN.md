@@ -17,7 +17,7 @@ discover → screen → tailor → approve → **submit by the bot** → confirm
 
 | Stage | State | Evidence |
 |---|---|---|
-| Discover | done, scheduled | `scout.yml` (ATS boards, `worker/src/cli/scout.ts`), `scout-remote.yml` (RemoteOK, Jobicy, Arbeitnow); pasted links via `job-link-intake` and `ingest-links.yml` |
+| Discover | done, scheduled | `scout.yml` (ATS boards, `worker/src/cli/scout.ts`), `scout-remote.yml` (RemoteOK, Jobicy, Arbeitnow); pasted links via `job-link-intake` (the bulk `ingest-links.yml` channel was deleted 2026-11-18); `scout-ats-daily.yml` runs `scout-ats?mode=liveness` daily |
 | Screen | done | scouts screen at insert; `experience_ceiling` fires since migration `20261104193000` (`_shared/screen/required-experience.ts`); work-auth gate `_shared/screen/work-auth-gate.ts` |
 | Score, tailor, audit | done, **manual trigger only** | `matcher/`, `tailor/`, `auditor/`; started by `postscreen-drain.yml`, `run-one.yml` or the dashboard. No schedule, by Teja's ruling of 2026-11-05 (header of `.github/workflows/postscreen-drain.yml`) |
 | Approve | done | `apps/web/src/features/approval/`; every resume fits one page (`_shared/tailor/page-trim.ts`) |
@@ -393,8 +393,9 @@ them. Added because an audit caught the omission, not because anyone broke them.
 >   and **Workday** (added 2026-11-01, migration `20261101124500_ats_provider_workday.sql`;
 >   `registry.ts:25`). **SmartRecruiters is OFF** by the robots ruling of 2026-11-01: its
 >   robots.txt disallows everything, so no SR board is seeded and there is no SR adapter
->   in `_shared/scout/adapters/`. Workable, Adzuna and Jooble adapters exist in that folder
->   but nothing outside tests imports them. Remote feeds (RemoteOK, Jobicy, Arbeitnow) come in
+>   in `_shared/scout/adapters/`. A Workable adapter exists in that folder but nothing outside
+>   tests imports it. The Adzuna and Jooble adapters, `tiers.ts` and `freshness.ts` were deleted
+>   as dead code on 2026-11-18. Remote feeds (RemoteOK, Jobicy, Arbeitnow) come in
 >   through `scout-remote.yml`.
 > - **`pg_cron` is still not installed** (re-checked live 2026-11-08 with
 >   `select extname from pg_extension`). Bounded batches are re-fired by GitHub Actions
@@ -420,7 +421,8 @@ One `applications` table whose `status` column **is** the workflow. Each agent i
 | schedule, gated | `satellites.yml` | skill-gap, follow-up, cover-letter, interview-prep, referral; runs on schedule only when `APPLYY_SATELLITES_LIVE` is `true` |
 | schedule | `keepalive.yml`, `jobs-tombstone.yml` | §14 keepalive; weekly DB space purge |
 | scout completion + daily 04:30 UTC + manual | `postscreen-drain.yml` | matcher → tailor → auditor (Teja ruling 2026-11-09) |
-| manual only | `prescreen-drain.yml`, `pregate-sweep.yml`, `run-one.yml`, `ingest-links.yml` | normalizer + screener; matcher pre-gate; one row; a list of links |
+| manual only | `prescreen-drain.yml`, `pregate-sweep.yml`, `run-one.yml` | normalizer + screener; matcher pre-gate; one row (`ingest-links.yml` deleted 2026-11-18) |
+| schedule (07:11 IST) + manual | `scout-ats-daily.yml` | `scout-ats?mode=liveness`: queue + feed liveness for in-flight rows, no scan |
 | approve click | `dispatch-apply` edge function | always dispatches `apply-kit.yml`; dispatches a live `apply.yml` drain only when `system_settings.auto_apply_on_approve` is true (`supabase/functions/dispatch-apply/handler.ts`) |
 
 Matcher, tailor and auditor run **automatically** through the post-screen drain: after every scout,
@@ -489,8 +491,8 @@ If free Flash gives even 100 requests/day per project, **two keys covers it.** B
 | **Scout-ATS** | Edge Fn (dashboard) + `scout.yml` via `worker/src/cli/scout.ts` | watchlist → `passed_filters` / `dropped_filter` (screened at insert); `discovered` only if the screener is unavailable |
 | **Scout-Web** | Edge Fn, Gemini web search (dashboard) | model-proposed Greenhouse/Lever/Ashby URLs, verified against the live board |
 | **Scout-Remote** | `scout-remote.yml` via `worker/src/cli/scout-remote.ts` | RemoteOK, Jobicy, Arbeitnow feeds → same insert path as Scout-ATS |
-| **Job-link intake** | Edge Fn `job-link-intake` (dashboard "Add a job by link") + `ingest-links.yml` | one pasted link → `discovered` → `passed_filters` as `human` (migration `20261031200000`); a pasted link skips robots because a human asked for it |
-| **Scout-Aggregator** | — **built, not reachable** | Adzuna/Jooble/Workable adapters in `_shared/scout/adapters/`; `_shared/scout/tiers.ts` has no importer outside its test. (SmartRecruiters was removed: robots ruling 2026-11-01. Workday moved out of this row: it is reachable through `_shared/ats/registry.ts:25`.) |
+| **Job-link intake** | Edge Fn `job-link-intake` (dashboard "Add a job by link"; the bulk `ingest-links.yml` was deleted 2026-11-18) | one pasted link → `discovered` → `passed_filters` as `human` (migration `20261031200000`); a pasted link skips robots because a human asked for it |
+| **Scout-Aggregator** | — **Workable built, not reachable** | Workable adapter in `_shared/scout/adapters/`, no importer outside its test. Adzuna/Jooble adapters and `_shared/scout/tiers.ts` deleted as dead code 2026-11-18. (SmartRecruiters was removed: robots ruling 2026-11-01. Workday moved out of this row: it is reachable through `_shared/ats/registry.ts:25`.) |
 | **Normalizer** | Edge Fn | `discovered` → `deduped` / `dropped_duplicate` |
 | **Screener** | Edge Fn, **no LLM** | `deduped` → `passed_filters` / `dropped_filter` |
 | **Matcher** | Edge Fn, Gemini | `passed_filters` → `scored` |
@@ -1112,7 +1114,7 @@ so no one mistakes it for evidence about Lever's actual DOM.
 | **3 — Compounding** | Skill-gap aggregator, interview prep packs. *(Company briefs, A/B resume testing, calendar sync, assessment detector and portfolio selector removed from this phase — see the UNAPPROVED table in §17. Do not schedule them.)* |
 
 > **Status 2026-11-08 per phase.** Phase 1: done, except the aggregator part of discovery
-> (Adzuna/Jooble/Workable adapters are built but not wired; §7) and a proven bot submit.
+> (the Workable adapter is built but not wired; Adzuna/Jooble deleted 2026-11-18; §7) and a proven bot submit.
 > Phase 2: all built (freshness `matcher/freshness-queue.ts`, ATS parse check, `referral`,
 > `cover-letter`, email tracker, `follow-up`). Phase 3: built (`skill-gap`, `interview-prep`).
 > The Phase 2/3 agents run daily only while `APPLYY_SATELLITES_LIVE` is `true`. None of the

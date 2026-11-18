@@ -253,7 +253,9 @@ export function parseJobicy(body: unknown): RemoteParse {
   // Jobicy's field names.
   return collect(jobs, (item) => toRemoteJob(item, 'jobicy', {
     title: 'jobTitle', company: 'companyName', location: 'jobGeo', locationDefault: 'Remote',
-    urls: ['url'], description: ['jobExcerpt', 'jobDescription'], published: 'pubDate',
+    // Full text first (D8, 2026-11-18): readString takes the first non-empty key, and the excerpt-first order stored
+    // a two-line teaser the screener and tailor then judged the job on. The excerpt stays as the fallback.
+    urls: ['url'], description: ['jobDescription', 'jobExcerpt'], published: 'pubDate',
     salaryMin: 'annualSalaryMin', salaryMax: 'annualSalaryMax', currency: 'salaryCurrency', currencyDefault: 'USD',
   }));
 }
@@ -274,15 +276,22 @@ export function parseArbeitnow(body: unknown): RemoteParse {
 }
 
 // Which ATS would submit this posting, from its apply URL's host. 'other' when none matches.
+// THE HOST, NEVER THE WHOLE URL (D13, 2026-11-18): a substring test typed "https://acme.com/?ref=lever.co" as lever,
+// and "clever.com" contains "lever.co". Matched like scout-web's urls.ts: the exact domain or a subdomain of it.
+// SmartRecruiters is not detected: it is off by the 2026-11-01 robots ruling, so an SR link is the generic path.
 function detectAtsProvider(url: string): AtsProvider {
-  // Lower-cased once so the host checks ignore casing.
-  const lower = url.toLowerCase();
-  // Each known ATS host, as before.
-  if (lower.includes('greenhouse.io') || lower.includes('gh_jid=')) return 'greenhouse';
-  if (lower.includes('lever.co')) return 'lever';
-  if (lower.includes('ashbyhq.com')) return 'ashby';
-  if (lower.includes('workable.com')) return 'workable';
-  if (lower.includes('smartrecruiters.com')) return 'smartrecruiters';
+  // The parsed host; an unparseable URL has no ATS.
+  let host: string;
+  // URL throws on garbage, which is "no recognised host", not an error.
+  try { host = new URL(url).hostname.toLowerCase(); } catch { return 'other'; }
+  // True when the host is the domain itself or a subdomain of it ("boards.greenhouse.io").
+  const on = (domain: string): boolean => host === domain || host.endsWith(`.${domain}`);
+  // Greenhouse: its own hosts; gh_jid is the embed parameter on an employer's own page, read as a real parameter.
+  if (on('greenhouse.io') || new URL(url).searchParams.has('gh_jid')) return 'greenhouse';
+  // The other employer ATSes, by host.
+  if (on('lever.co')) return 'lever';
+  if (on('ashbyhq.com')) return 'ashby';
+  if (on('workable.com')) return 'workable';
   // No recognised host: the generic path.
   return 'other';
 }
@@ -291,8 +300,10 @@ function detectAtsProvider(url: string): AtsProvider {
 function detectEmploymentType(title: string): EmploymentType {
   // Lower-cased once.
   const lower = title.toLowerCase();
-  // Same word lists as before, so rows already stored classify the same way.
-  if (lower.includes('intern') || lower.includes('co-op') || lower.includes('trainee')) return 'internship';
+  // WHOLE WORDS (D7, 2026-11-18): includes('intern') typed "Internal Tools Engineer" and "International Sales" as
+  // internships, and the cascade then dropped them silently. Word-bounded: intern, interns, internship(s), co-op(s),
+  // trainee(s).
+  if (/\bintern(ship)?s?\b/.test(lower) || /\bco-ops?\b/.test(lower) || /\btrainees?\b/.test(lower)) return 'internship';
   if (lower.includes('contract') || lower.includes('freelance')) return 'contract';
   if (lower.includes('part-time') || lower.includes('part time')) return 'part_time';
   if (lower.includes('full-time') || lower.includes('full time') || lower.includes('permanent')) return 'full_time';

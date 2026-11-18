@@ -57,6 +57,13 @@ const SWEEP_READ_LIMIT = 1000;
 // The employer ATSes a twin may come from. linkedin, manual, unknown and smartrecruiters rows are not an employer's
 // own board posting, so they never make an aggregator copy redundant (fix round 1, item 5).
 const TWIN_ATS_PROVIDERS = ['greenhouse', 'lever', 'ashby', 'workday'] as const;
+// Board slugs per twin read (D6, 2026-11-18): bounds the `in.(...)` list so a run's whole board set never builds one
+// oversized request URL. The twin key itself is a client-side fold (crossSourceKey), not a column, so the slug is the
+// narrowest filter the server can apply.
+const TWIN_SLUG_CHUNK = 200;
+// Rows per twin page: PostgREST's max_rows (1000) cut the old single read at "1000 of 2134" on 11-16..18, failing
+// scout-remote three runs in a row. Keyset pages of this size read every row; the exact count still proves it.
+const TWIN_PAGE_SIZE = 1000;
 // A twin whose own application sits here is not live: the ATS copy was dropped or failed, so the aggregator copy
 // may be the only path to the job left. Dropping it too would lose the job (fix round 1, item 1).
 const DEAD_TWIN_STATUSES: readonly string[] = ['dropped_filter', 'dropped_duplicate', 'failed'];
@@ -96,6 +103,54 @@ async function loadBoardSlugs(client: SupabaseClient): Promise<Lookup<Map<string
   return { ok: true, value: boards };
 }
 
+// Every employer-ATS jobs row on these boards, by keyset pages on id (D6). Keyset, not offset: a row inserted while we
+// page cannot shift a later page and hide a row that existed when the read began.
+async function readTwinChunk(client: SupabaseClient, slugs: readonly string[]): Promise<Lookup<unknown[]>> {
+  // The rows read so far.
+  const rows: unknown[] = [];
+  // The exact count the FIRST page reported: the size a complete read must reach.
+  let expected: number | null = null;
+  // The last id read; pages continue strictly after it.
+  let cursor: string | null = null;
+  // Until the count is reached or a page comes back empty.
+  for (;;) {
+    // Employer-ATS rows on these boards, in id order so the cursor is meaningful.
+    let query = client.from('jobs').select('id, company_name, title', { count: 'exact' }).in('company_slug', [...slugs]).in('ats_provider', [...TWIN_ATS_PROVIDERS]).order('id', { ascending: true }).limit(TWIN_PAGE_SIZE);
+    // After the first page, only ids past the cursor.
+    if (cursor !== null) query = query.gt('id', cursor);
+    // One page.
+    const { data, error, count } = await query;
+    // A refused read is a failure, never "no twins".
+    if (error) return { ok: false, reason: error.message };
+    // Shape check: anything but an array is an answer we cannot trust.
+    if (!Array.isArray(data)) return { ok: false, reason: 'jobs read returned no row array' };
+    // The first page's count is the target; without one there is nothing to prove completeness against.
+    if (expected === null) {
+      // A count that is not a number cannot prove anything: refused, as the old single read did.
+      if (typeof count !== 'number') return { ok: false, reason: `ats twin lookup truncated (${data.length} of unknown)` };
+      // Remembered for the end check.
+      expected = count;
+    }
+    // An empty page: the server has nothing past the cursor.
+    if (data.length === 0) break;
+    // The page's last id, which must move the cursor forward or the loop would re-read the same page forever.
+    const last = (data[data.length - 1] as { id?: unknown }).id;
+    // An id that is missing or not past the cursor means the server ignored the keyset filter: refused, never looped on.
+    if (typeof last !== 'string' || (cursor !== null && last <= cursor)) break;
+    // Kept.
+    for (const row of data) rows.push(row);
+    // Advanced.
+    cursor = last;
+    // Every row the count promised is in hand: no extra empty round trip.
+    if (rows.length >= expected) break;
+  }
+  // Fewer rows than the count promised: a partial answer, refused so nothing is dropped on it.
+  // More is fine: a row inserted mid-read is still a real ATS row.
+  if (rows.length < (expected ?? 0)) return { ok: false, reason: `ats twin lookup truncated (${rows.length} of ${expected})` };
+  // Complete.
+  return { ok: true, value: rows };
+}
+
 // LIVE ATS jobs sharing a twin key with any of `postings`: key -> twin job ids, smallest first.
 async function findAtsTwins(client: SupabaseClient, boards: ReadonlyMap<string, string>, postings: readonly TwinQuery[]): Promise<Lookup<Map<string, string[]>>> {
   // Only keys some posting asked about are kept; a posting whose key folds to nothing asks for nothing.
@@ -107,14 +162,19 @@ async function findAtsTwins(client: SupabaseClient, boards: ReadonlyMap<string, 
   const twins = new Map<string, string[]>();
   // No boards matched or no usable key: a true "no twins", and no pointless round trip.
   if (slugs.length === 0 || wanted.size === 0) return { ok: true, value: twins };
-  // Employer-ATS rows only; the exact count exposes a read PostgREST cut at max_rows without saying so.
-  const { data, error, count } = await client.from('jobs').select('id, company_name, title', { count: 'exact' }).in('company_slug', slugs).in('ats_provider', [...TWIN_ATS_PROVIDERS]);
-  // A refused read is a failure, never "no twins".
-  if (error) return { ok: false, reason: error.message };
-  // Shape check, as above.
-  if (!Array.isArray(data)) return { ok: false, reason: 'jobs read returned no row array' };
-  // A partial answer is an arbitrary subset: treated as no answer, so nothing is dropped on it.
-  if (count !== data.length) return { ok: false, reason: `ats twin lookup truncated (${data.length} of ${count ?? 'unknown'})` };
+  // Every employer-ATS row of this batch's boards, read chunk by chunk and page by page (D6).
+  const data: unknown[] = [];
+  // One chunk of at most TWIN_SLUG_CHUNK slugs at a time.
+  for (let start = 0; start < slugs.length; start += TWIN_SLUG_CHUNK) {
+    // This chunk's slugs.
+    const chunk = slugs.slice(start, start + TWIN_SLUG_CHUNK);
+    // The chunk's own rows, every page of them.
+    const rows = await readTwinChunk(client, chunk);
+    // A failed or partial chunk fails the whole lookup: a partial answer is an arbitrary subset, so nothing is dropped on it.
+    if (!rows.ok) return rows;
+    // Collected; push one by one, since spreading thousands of rows into push() is a call-stack risk.
+    for (const row of rows.value) data.push(row);
+  }
   // Twin key -> candidate ids, before the liveness check.
   const candidates = new Map<string, string[]>();
   // Row by row.

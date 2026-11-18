@@ -299,7 +299,7 @@ async function buildFromBoard(target: ParsedJobUrl, deps: IntakeDeps, store: Int
 
 // How a link's text was read: the site's public endpoint, a plain fetch, or the browser. Kept in
 // source_refs metadata. The response's `source` stays 'page' for all three: its closed union is a
-// contract the web panel (parseIntakeOk) and ingest-links.yml both parse.
+// contract the web panel (parseIntakeOk) parses.
 type ReadVia = "site" | "plain" | "render";
 
 // The reading ladder (Teja, 2026-11-01: a link is read from the link alone, no pasted text): the
@@ -348,8 +348,8 @@ function saysNotAJob(outcome: GeminiCallOutcome<GeminiResponseBody>): boolean {
 // render, a second extract) can approach the 150 s kill; add a deadline check before step e if
 // function logs ever show this request timing out.
 async function buildFromPage(req: IntakeRequest, deps: IntakeDeps, db: unknown, now: Date, authorization: string): Promise<Built | Refusal> {
-  // a. Pasted text long enough to be a description is used as-is: no fetch needed (ingest-links.yml
-  // still sends text for its listed links).
+  // a. Pasted text long enough to be a description is used as-is: no fetch needed (a caller
+  // that already holds the posting text sends it).
   const pasted = req.text !== null && req.text.length >= MIN_JOB_TEXT_CHARS ? req.text.slice(0, MAX_SOURCE_CHARS) : null;
   // Where the text came from, for the response.
   const source: Built["source"] = pasted !== null ? "pasted_text" : "page";

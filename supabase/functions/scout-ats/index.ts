@@ -10,6 +10,9 @@ import { createAuthorizedAppUserClient } from "../_shared/db/client.ts";
 // The kill-switch verdict, pure so node --test can pin "force never bypasses the halt",
 // and the run close (W12), pure so its screener_not_run flag is pinned the same way.
 import { haltedByKillSwitch, planScoutRunClose } from "./gate.ts";
+// `?mode=liveness` (2026-11-18, D4): the mode parse that refuses unknown values, the queue read's
+// completeness check, and the choice of which boards hold queue rows. Pure, node-tested.
+import { queueBoards, queueReadComplete, resolveScoutMode, SWEEP_QUEUE_STATUSES } from "./liveness-mode.ts";
 // The board fetch, through the robots-gated shared transport (111791c closed every
 // httpFetch path; this import closes the one bare `fetch(` that remained here).
 import { fetchBoard } from "./poll-fetch.ts";
@@ -145,6 +148,407 @@ function jsonResponse(status: number, data: Record<string, unknown>): Response {
   });
 }
 
+// The signed-in, RLS-bound client createAuthorizedAppUserClient hands back, named once for the helpers below.
+type Db = Extract<Awaited<ReturnType<typeof createAuthorizedAppUserClient>>, { ok: true }>["db"];
+// The handler-entry countdown, passed to the passes that must stop before the wall clock.
+type Deadline = ReturnType<typeof createDeadline>;
+// One stored job of a board snapshot; postgrest hands back loosely typed rows.
+type BoardJob = QueueSnapshotJob & { repost_count: number; last_seen_at: string | null };
+// The watchlist columns both the scan and the liveness sweep read, spelled once so they cannot drift.
+const WATCHLIST_COLUMNS = "id, ats_provider, board_token, company_name, company_slug, poll_count, first_polled_at, last_polled_at, consecutive_failures, last_poll_job_count";
+
+// One board page through the robots-gated transport, for collectBoardPages. A body (Workday) makes it a
+// JSON POST; without one it is the same GET as before. No robots cache override here. Shared by the
+// scan and the liveness sweep, so both read a board the same way.
+async function readBoardPage(pageUrl: string, body?: string): Promise<unknown> {
+  // The gated request; a disallow or a non-ok status throws to the caller's catch.
+  const response = await fetchBoard(pageUrl, undefined, body);
+  // Null is only possible under a notFound override this caller does not use; the
+  // guard beats a blind non-null assertion (CLAUDE.md §6) and the catch records it.
+  if (response === null) throw new Error("unexpected null response from fetchBoard");
+  // Decoded JSON for the adapter's pure parser.
+  return await response.json();
+}
+
+// The board's stored jobs, as liveness judges them. Read BEFORE the scan writes anything (see the
+// call site), and by the sweep before it confirms anything. Scoped to THIS board: same owner,
+// provider and company, and discovered through this adapter's source -- an aggregator-found job with
+// the same provider and slug may not be on this board, so its absence here says nothing.
+// ponytail: postgrest caps at 1000 rows; a truncated snapshot can only under-mark,
+// never over-mark. Page it if a board ever exceeds 1000 stored jobs.
+function boardSnapshotQuery(db: Db, userId: string, board: WatchlistRow, discoverySource: string) {
+  // The query, awaited by the caller.
+  return db
+    .from("jobs")
+    // ats_job_id, apply_url and the applications' statuses feed queue liveness (2026-11-07):
+    // the posting endpoint is built from them, and only queue rows are confirmed early.
+    .select("id, fingerprint, disappeared_at, repost_count, last_seen_at, ats_job_id, apply_url, applications(id, status)")
+    // Explicit owner scope, not only RLS: the update below must never cross users.
+    .eq("user_id", userId)
+    // Provider + slug identify the board's company (core_tables.sql jobs columns).
+    .eq("ats_provider", board.ats_provider)
+    .eq("company_slug", board.company_slug)
+    // Only rows this board's adapter has ever reported can drop off this board.
+    .contains("discovered_via", [discoverySource]);
+}
+
+// What one queue confirmation needs.
+interface QueueConfirmInput {
+  // The signed-in client.
+  readonly db: Db;
+  // The owner every write is scoped to.
+  readonly userId: string;
+  // The board whose listing was just read.
+  readonly board: WatchlistRow;
+  // The board's stored jobs (boardSnapshotQuery).
+  readonly snapshot: readonly QueueSnapshotJob[];
+  // The complete listing's identity set.
+  readonly polledFingerprints: readonly string[];
+  // The planner's marks: excluded from the candidates, so nothing is confirmed twice.
+  readonly plannedIds: readonly string[];
+  // Whether those marks were written; only then do their queue rows get a reason note.
+  readonly plannerMarked: boolean;
+  // The run's instant, for disappeared_at.
+  readonly now: Date;
+  // Confirmation requests left this run, shared across boards and spent here.
+  readonly budget: { left: number };
+}
+
+// QUEUE LIVENESS (2026-11-07), shared by the scan and the liveness sweep. Called only on a TRUSTED
+// listing (the planner did not refuse it). A queue row absent from that listing and not marked by the
+// planner gets ONE request to its own posting endpoint; only an explicit 404 (or Workday
+// canApply:false) retires it now instead of after the 14-day backlog wait. Unknown changes nothing.
+// Returns the rows retired by the confirmation, counted only when the write landed.
+async function confirmQueueClosures(input: QueueConfirmInput): Promise<number> {
+  // Unpacked for the loop below.
+  const { db, userId, board, snapshot, polledFingerprints, plannedIds, now, budget } = input;
+  // Retired by the confirmation, counted only when the write landed.
+  let queueClosedCount = 0;
+  // Rows the posting endpoint confirmed closed.
+  const closedIds: string[] = [];
+  for (const job of queueCandidates(snapshot, polledFingerprints, plannedIds)) {
+    // The provider's own endpoint (Ashby: its board listing), or null (another provider, a
+    // malformed id): cannot confirm, skip.
+    const url = postingCheckUrl(board.ats_provider, board.board_token, job);
+    // No endpoint: the 14-day path still applies.
+    if (url === null) continue;
+    // Out of requests for this run: the rest wait for the next poll.
+    if (budget.left <= 0) break;
+    // One request spent.
+    budget.left -= 1;
+    // The robots-gated GET, the same transport the board poll used; the id is what an Ashby
+    // listing is searched for.
+    if ((await checkPosting((u) => fetchBoard(u), board.ats_provider, url, job.ats_job_id)) === "closed") closedIds.push(job.id);
+  }
+  if (closedIds.length > 0) {
+    // Same scoping as the planner's mark: owner, ids, and only rows still live.
+    const { error: closeError } = await db
+      .from("jobs")
+      .update({ disappeared_at: now.toISOString() })
+      .eq("user_id", userId)
+      .in("id", closedIds)
+      .is("disappeared_at", null);
+    // Logged, not thrown: the board polled fine; the next poll retries the confirmation.
+    if (closeError) console.warn(`[scout-ats] queue liveness mark failed: ${closeError.message}`);
+    // Counted only when it landed.
+    else queueClosedCount = closedIds.length;
+  }
+  // A reason event for every QUEUE application retired this poll, by the planner or by the
+  // confirmation, so the history says why the row can no longer be approved or applied.
+  // application_events is append-only; a failed insert is logged, never retried as a cleanup.
+  const retired = new Set([...(input.plannerMarked ? plannedIds : []), ...(queueClosedCount > 0 ? closedIds : [])]);
+  // One note per queue application whose job was retired.
+  const notes = snapshot.filter((job) => retired.has(job.id)).flatMap((job) =>
+    queueApplicationIds(job).map((applicationId) => ({
+      user_id: userId,
+      application_id: applicationId,
+      event_type: "note",
+      agent: "scout_ats",
+      detail: {
+        reason: "posting_closed",
+        // Which proof retired it: the posting endpoint, or the planner's churn mark.
+        evidence: closedIds.includes(job.id) ? "absent from board listing + posting endpoint gone (404 / canApply:false)" : "absent from board listing (liveness planner)",
+        board: `${board.ats_provider}/${board.board_token}`,
+      },
+    })));
+  if (notes.length > 0) {
+    // The event write; RLS admits scout_ats through the agent-key header every edge client sends.
+    const { error: noteError } = await db.from("application_events").insert(notes);
+    // Logged: the job is retired either way, and the worker refuses it on disappeared_at.
+    if (noteError) console.warn(`[scout-ats] queue liveness note failed: ${noteError.message}`);
+  }
+  // For the board's summary.
+  return queueClosedCount;
+}
+
+// FEED LIVENESS (2026-11-07), shared by the scan (after its boards) and the liveness sweep. In-flight
+// rows with NO ATS have no board to poll; each gets one robots-gated GET of its own page, and only an
+// explicit 404/410 retires it (feed-liveness.ts has the full rule, including the all-gone host guard).
+async function feedLivenessPass(db: Db, userId: string, deadline: Deadline, now: Date): Promise<{ feedLiveness: { probed: number; closed: number }; feedRefusals: string[] }> {
+  // Pages probed and rows retired, reported as measured.
+  const feedLiveness = { probed: 0, closed: 0 };
+  // The rows: owner-scoped, live, no ATS, with an in-flight application (the inner join drops the rest).
+  const { data: feedRows, error: feedReadError } = await db
+    .from("jobs")
+    .select("id, apply_url, disappeared_at, applications!inner(id, status)")
+    .eq("user_id", userId)
+    .in("ats_provider", [...FEED_LIVENESS_PROVIDERS])
+    .is("disappeared_at", null)
+    .in("applications.status", [...FEED_LIVENESS_STATUSES]);
+  // Labelled refusals for the run row's liveness_refused segment (not errors: the boards polled fine).
+  const feedRefusals: string[] = [];
+  if (feedReadError) {
+    // An unreadable snapshot is "no evidence", never "no rows": recorded, nothing marked.
+    feedRefusals.push(`feed: snapshot_failed: ${feedReadError.message}`);
+  } else {
+    // Probe within the cap. A null answer is "unknown", so near the deadline the remaining rows are
+    // skipped without a request rather than racing the function's wall clock.
+    const probe = await probeFeedRows(feedRows as FeedLivenessRow[], (u) => deadline.remainingMs() < FEED_PROBE_MIN_REMAINING_MS ? Promise.resolve(null) : fetchPage(u), FEED_LIVENESS_CAP);
+    // Reported as measured.
+    feedLiveness.probed = probe.probed;
+    // Each guarded host is a labelled refusal, so a restructure is visible on the health page.
+    for (const host of probe.refusedHosts) feedRefusals.push(`feed/${host}: all_probes_gone`);
+    if (probe.closedIds.length > 0) {
+      // Same scoping as the board marks: owner, ids, and only rows still live.
+      const { error: feedMarkError } = await db
+        .from("jobs")
+        .update({ disappeared_at: now.toISOString() })
+        .eq("user_id", userId)
+        .in("id", probe.closedIds)
+        .is("disappeared_at", null);
+      if (feedMarkError) {
+        // Not marked: recorded, and the next run probes again.
+        feedRefusals.push(`feed: mark_write_failed: ${feedMarkError.message}`);
+      } else {
+        // Counted only when the write landed.
+        feedLiveness.closed = probe.closedIds.length;
+        // A reason event for every in-flight application whose posting was retired, so the card and
+        // the history say why. application_events is append-only; a failed insert is logged only.
+        const closed = new Set(probe.closedIds);
+        // One note per in-flight application of a retired job.
+        const notes = (feedRows as FeedLivenessRow[]).filter((job) => closed.has(job.id)).flatMap((job) =>
+          feedApplicationIds(job).map((applicationId) => ({
+            user_id: userId,
+            application_id: applicationId,
+            event_type: "note",
+            agent: "scout_ats",
+            detail: {
+              reason: "posting_closed",
+              // One proof only: there is no ATS listing to cross-check against.
+              evidence: "posting page answered 404/410 (no ATS listing to cross-check)",
+              url: job.apply_url,
+            },
+          })));
+        if (notes.length > 0) {
+          // The event write; RLS admits scout_ats through the agent-key header every edge client sends.
+          const { error: noteError } = await db.from("application_events").insert(notes);
+          // Logged: the job is retired either way, and the worker refuses it on disappeared_at.
+          if (noteError) console.warn(`[scout-ats] feed liveness note failed: ${noteError.message}`);
+        }
+      }
+    }
+  }
+  // Both, for the run close and the report.
+  return { feedLiveness, feedRefusals };
+}
+
+// One board's outcome in the liveness sweep.
+interface SweepBoardResult {
+  // provider/token, as the scan's summaries name a board.
+  readonly board: string;
+  // ok: listing trusted and confirmations ran; refused: listing read but not evidence; failed: unreadable.
+  readonly status: "ok" | "refused" | "failed" | "skipped";
+  // Queue rows retired on this board.
+  readonly queue_closed: number;
+  // Why it was not ok.
+  readonly reason?: string;
+}
+
+// THE LIVENESS-ONLY SWEEP (`?mode=liveness`, 2026-11-18, D4). Runs the two liveness checks the
+// scheduled worker scout lacks, and nothing else of the scan: no jobs/applications upserts, no
+// screener, no Workday detail reads, no watchlist telemetry, no planner marks. For each watchlist
+// board holding an awaiting_approval/approved row it reads the listing (read-only), lets the planner
+// JUDGE it (a refused plan means the listing is not evidence), then confirms the queue rows absent from
+// it (confirmQueueClosures, the scan's own code). Then the feed pass. The listing read keeps queue
+// liveness's two-proof rule: a dead board token cannot retire the queue on 404s alone.
+async function runLivenessSweep(db: Db, userId: string, deadline: Deadline, runId: string | undefined): Promise<Response> {
+  // One instant for every mark this run.
+  const now = new Date();
+  // The run row's close, the same columns the scan writes.
+  const closeRun = async (status: "succeeded" | "failed", errorCount: number, errorDetail: string | null, rowsIn: number, rowsOut: number) => {
+    // No run row (its insert failed): nothing to close.
+    if (!runId) return;
+    // Closed on every exit, so a sweep never leaves a row stuck at 'running'.
+    await db.from("agent_runs").update({ status, error_count: errorCount, error_detail: errorDetail, finished_at: new Date().toISOString(), rows_in: rowsIn, rows_out: rowsOut }).eq("id", runId);
+  };
+
+  // 1. THE QUEUE: live jobs on a pollable ATS with an application awaiting approval or approved. The
+  // exact count is asked for because postgrest truncates silently; a partial queue swept as whole
+  // would report "checked" for rows it never saw.
+  const { data: queueData, count: queueCount, error: queueError } = await db
+    .from("jobs")
+    .select("id, ats_provider, company_slug, applications!inner(id, status)", { count: "exact" })
+    .eq("user_id", userId)
+    .in("ats_provider", supportedProviders())
+    .is("disappeared_at", null)
+    .in("applications.status", [...SWEEP_QUEUE_STATUSES]);
+  if (queueError) {
+    // Unreadable is "no evidence", and the run failed its one job.
+    await closeRun("failed", 1, `queue_read_failed: ${queueError.message}`, 0, 0);
+    // Non-2xx, so the daily workflow goes red.
+    return jsonResponse(500, { error: "queue_read_failed", detail: queueError.message });
+  }
+  // The rows, typed once.
+  const queueJobs = (queueData ?? []) as { id: string; ats_provider: string; company_slug: string }[];
+  // Truncated: refuse rather than sweep part of the queue as if it were all of it.
+  if (!queueReadComplete(queueCount, queueJobs.length)) {
+    // Both numbers, so the gap is diagnosable from the run row.
+    const detail = `queue_read_truncated: count ${queueCount}, rows ${queueJobs.length}`;
+    // Recorded on the run row.
+    await closeRun("failed", 1, detail, queueJobs.length, 0);
+    // Non-2xx.
+    return jsonResponse(500, { error: "queue_read_truncated", detail });
+  }
+
+  // 2. THE BOARDS holding those rows: enabled watchlist rows on the same provider + slug.
+  const slugs = [...new Set(queueJobs.map((job) => job.company_slug))];
+  // Empty queue: no board to read, and no watchlist query either.
+  let boards: readonly WatchlistRow[] = [];
+  // Queue rows no single board covers, reported so the sweep's reach is visible.
+  let unmatched = 0;
+  let ambiguous = 0;
+  if (slugs.length > 0) {
+    // The same columns the scan reads; deterministic order for a deadline-cut run.
+    const { data: watchlist, error: watchlistError } = await db
+      .from("company_watchlist")
+      .select(WATCHLIST_COLUMNS)
+      .eq("enabled", true)
+      .in("ats_provider", supportedProviders())
+      .in("company_slug", slugs)
+      .order("board_token", { ascending: true });
+    if (watchlistError) {
+      // The run cannot place its queue rows.
+      await closeRun("failed", 1, `watchlist_query_failed: ${watchlistError.message}`, queueJobs.length, 0);
+      // Non-2xx.
+      return jsonResponse(500, { error: "watchlist_query_failed", detail: watchlistError.message });
+    }
+    // The pure grouping (liveness-mode.ts).
+    const plan = queueBoards(queueJobs, (watchlist ?? []) as WatchlistRow[]);
+    // Carried into the report.
+    boards = plan.boards;
+    unmatched = plan.unmatched;
+    ambiguous = plan.ambiguous;
+  }
+
+  // 3. EACH BOARD: read, judge, confirm. Nothing here writes except confirmQueueClosures' marks.
+  const results: SweepBoardResult[] = [];
+  // The run's confirmation allowance, shared across boards like the scan's.
+  const queueBudget = { left: QUEUE_LIVENESS_CAP };
+  for (const board of boards) {
+    // provider/token, for every result line.
+    const name = `${board.ats_provider}/${board.board_token}`;
+    // Near the deadline: stop reading boards so the feed pass and the run close still fit.
+    if (deadline.remainingMs() < FEED_PROBE_MIN_REMAINING_MS) {
+      // Skipped boards wait for tomorrow.
+      results.push({ board: name, status: "skipped", queue_closed: 0, reason: "deadline" });
+      continue;
+    }
+    // The board's adapter; queueBoards only returns supported providers, so null is a registry change.
+    const adapter = getAdapter(board.ats_provider);
+    if (!adapter) {
+      // Reported, not guessed at.
+      results.push({ board: name, status: "skipped", queue_closed: 0, reason: "no_adapter" });
+      continue;
+    }
+    try {
+      // The whole listing or a failure, through the scan's own page reader.
+      const parseResult = await collectBoardPages(adapter, board.board_token, readBoardPage);
+      if (!parseResult.ok) {
+        // Unreadable: no evidence. No watchlist failure mark either; the sweep leaves telemetry to the scan.
+        results.push({ board: name, status: "failed", queue_closed: 0, reason: `board_read_failed: ${parseResult.reason}` });
+        continue;
+      }
+      // The scan's identity and emptied-board refusals, before anything is judged.
+      const refusal = boardRefusal(evaluateBoardIdentity(adapter, parseResult.firstPayload, board.company_name, board.board_token), board, parseResult.postings.length);
+      if (refusal !== null) {
+        // A stranger's or an emptied board is not evidence of any closure.
+        results.push({ board: name, status: "failed", queue_closed: 0, reason: refusal.warning });
+        continue;
+      }
+      // The stored jobs, by the scan's query.
+      const { data: boardJobs, error: boardJobsError } = await boardSnapshotQuery(db, userId, board, adapter.discoverySource);
+      if (boardJobsError) {
+        // No snapshot: nothing to judge against.
+        results.push({ board: name, status: "refused", queue_closed: 0, reason: `snapshot_failed: ${boardJobsError.message}` });
+        continue;
+      }
+      // Typed once.
+      const snapshot = (boardJobs ?? []) as BoardJob[];
+      // The fingerprints the scan would compute for this listing (pure apart from hashing; nothing stored).
+      const context: JobInsertContext = { companyName: board.company_name, companySlug: board.company_slug, now, firstSeenAt: now, isFirstPollOfBoard: board.poll_count === 0 || !board.first_polled_at };
+      // The listing's identity set.
+      const polledFingerprints = await Promise.all(parseResult.postings.map(async (posting) => (await toJobInsert(posting, adapter, context)).fingerprint));
+      // Live stored rows, for the planner's drift and mass guards.
+      const storedLive: LiveStoredJob[] = snapshot.filter((j) => j.disappeared_at === null).map((j) => ({ id: j.id, fingerprint: j.fingerprint, lastSeenAt: j.last_seen_at }));
+      // The last real scan's time and count (this sweep never writes them).
+      const previousPoll = board.last_polled_at !== null && board.last_poll_job_count !== null ? { at: board.last_polled_at, jobCount: board.last_poll_job_count } : null;
+      // The VERDICT only: its marks are the scan's job, so they are neither written nor excluded below.
+      const plan = planDisappearances({ storedLive, polledFingerprints, pollOk: true, batchErrors: 0, previousPoll });
+      if (plan.kind === "refuse") {
+        // The listing is not evidence (drift, mass disappearance): confirm nothing.
+        results.push({ board: name, status: "refused", queue_closed: 0, reason: plan.reason });
+        continue;
+      }
+      // The scan's confirmation: no planner ids excluded and none noted, because none were marked.
+      const closed = await confirmQueueClosures({ db, userId, board, snapshot, polledFingerprints, plannedIds: [], plannerMarked: false, now, budget: queueBudget });
+      // Done for this board.
+      results.push({ board: name, status: "ok", queue_closed: closed });
+    } catch (e: unknown) {
+      // A thrown transport error (robots refusal, HTTP status, timeout): this board only.
+      results.push({ board: name, status: "failed", queue_closed: 0, reason: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  // 4. THE FEED PASS, exactly as the scan runs it.
+  const { feedLiveness, feedRefusals } = await feedLivenessPass(db, userId, deadline, now);
+
+  // 5. THE CLOSE. Failed only when every attempted board failed (the scan's honest-close rule);
+  // refusals and skips are recorded but are not errors.
+  const attempted = results.filter((r) => r.status !== "skipped");
+  const failed = results.filter((r) => r.status === "failed");
+  // Rows retired by the queue pass.
+  const queueClosed = results.reduce((n, r) => n + r.queue_closed, 0);
+  // Labelled segments, the first few of each, so the detail stays bounded.
+  const segments = [
+    ...failed.slice(0, 5).map((r) => `${r.board}: ${r.reason ?? "unknown"}`),
+    ...results.filter((r) => r.status === "refused").slice(0, 5).map((r) => `liveness_refused ${r.board}: ${r.reason}`),
+    ...feedRefusals.slice(0, 5).map((r) => `liveness_refused ${r}`),
+  ];
+  // The run's verdict.
+  const status = attempted.length > 0 && failed.length === attempted.length ? "failed" : "succeeded";
+  // rows_in is what the sweep looked at, rows_out what it retired.
+  await closeRun(status, failed.length, segments.length > 0 ? segments.join("; ") : null, queueJobs.length, queueClosed + feedLiveness.closed);
+  // The report; a failed run answers 500 so the workflow shows red.
+  return jsonResponse(status === "failed" ? 500 : 200, {
+    success: status === "succeeded",
+    mode: "liveness",
+    // Queue rows found, and the ones no single board covers.
+    queue_rows: queueJobs.length,
+    queue_unmatched: unmatched,
+    queue_ambiguous: ambiguous,
+    // Boards whose listing was read (skips excluded).
+    boards_read: attempted.length,
+    // Rows retired by the queue pass.
+    queue_closed: queueClosed,
+    // Pages probed and rows retired by the feed pass.
+    feed_liveness: feedLiveness,
+    // Feed refusals in the scan's labelled form.
+    feed_refusals: feedRefusals,
+    // Per-board detail.
+    results,
+  });
+}
+
 // withCors: every response, preflight included, gets the allowlisted origin and Vary: Origin.
 Deno.serve(withCors(async (req: Request): Promise<Response> => {
   if (req.method === "OPTIONS") {
@@ -161,6 +565,11 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
   // Validated: `parseInt("abc")` is NaN and `parseInt("2.5")` silently truncates.
   const limitBoards = resolveBoardLimit(url.searchParams.get("limit"));
   const specificBoard = url.searchParams.get("board");
+  // Scan (no parameter, the web button) or the daily liveness-only sweep (liveness-mode.ts).
+  const mode = resolveScoutMode(url.searchParams.get("mode"));
+  // Refused before the sign-in: an unknown mode must never fall through to a full scan (§6), and a
+  // typo'd caller should not cost a password grant to learn that.
+  if (mode === null) return jsonResponse(400, { error: "unknown_mode", detail: "mode must be absent (full scan) or 'liveness'" });
 
   // GATE 1 — WHO IS CALLING, checked BEFORE the sign-in (W15). The browser invokes this
   // function (discoveryService.ts), and the platform's verify_jwt accepts the public anon
@@ -241,10 +650,16 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
     });
   }
 
+  // THE LIVENESS-ONLY SWEEP returns here: after the kill switch (it writes liveness marks, so a
+  // halted system halts it too) and before the watchlist poll, the screener and the board loop,
+  // none of which it runs. liveness-mode.test.ts pins this order by name.
+  if (mode === "liveness") return await runLivenessSweep(db, clientResult.userId, deadline, runId);
+
   // 2. Query active watchlist boards
   let query = db
     .from("company_watchlist")
-    .select("id, ats_provider, board_token, company_name, company_slug, poll_count, first_polled_at, last_polled_at, consecutive_failures, last_poll_job_count")
+    // The shared column list (WATCHLIST_COLUMNS), the same one the liveness sweep reads.
+    .select(WATCHLIST_COLUMNS)
     .eq("enabled", true)
     .in("ats_provider", supportedProviders());
 
@@ -363,8 +778,9 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
   // Counted separately from ordinary failures: this is the one failure mode where the
   // board is HEALTHY and the watchlist row is what's wrong.
   let totalIdentityMismatch = 0;
-  // Queue-liveness confirmation requests left this run, shared across every board.
-  let queueChecksLeft = QUEUE_LIVENESS_CAP;
+  // Queue-liveness confirmation requests left this run, shared across every board (an object, so
+  // confirmQueueClosures can spend from it).
+  const queueBudget = { left: QUEUE_LIVENESS_CAP };
 
   // 3. Poll each board
   for (const board of boards as WatchlistRow[]) {
@@ -388,16 +804,7 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
       // robots-gated transport (poll-fetch.ts): a disallow throws RobotsDisallowedError
       // before the board is contacted, and a non-ok status throws HttpError — both land
       // in the catch below. The transport sends the identity header itself.
-      const parseResult = await collectBoardPages(adapter, board.board_token, async (pageUrl, body) => {
-        // One page through the gated transport. A body (Workday) makes it a JSON POST;
-        // without one it is the same GET as before. No robots cache override here.
-        const response = await fetchBoard(pageUrl, undefined, body);
-        // Null is only possible under a notFound override this caller does not use; the
-        // guard beats a blind non-null assertion (CLAUDE.md §6) and the catch records it.
-        if (response === null) throw new Error("unexpected null response from fetchBoard");
-        // Decoded JSON for the adapter's pure parser.
-        return await response.json();
-      });
+      const parseResult = await collectBoardPages(adapter, board.board_token, readBoardPage);
 
       if (!parseResult.ok) {
         // The shared failed-poll update, identical for every failure path.
@@ -476,20 +883,8 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
       // whole-set rule (liveness.ts guardBasis), never mark a listed job.
       // ponytail: postgrest caps at 1000 rows; a truncated snapshot can only under-mark,
       // never over-mark. Page it if a board ever exceeds 1000 stored jobs.
-      const { data: boardJobs, error: boardJobsError } = await db
-        .from("jobs")
-        // ats_job_id, apply_url and the applications' statuses feed queue liveness (2026-11-07):
-        // the posting endpoint is built from them, and only queue rows are confirmed early.
-        .select("id, fingerprint, disappeared_at, repost_count, last_seen_at, ats_job_id, apply_url, applications(id, status)")
-        // Explicit owner scope, not only RLS: the update below must never cross users.
-        .eq("user_id", clientResult.userId)
-        // Provider + slug identify the board's company (core_tables.sql jobs columns).
-        .eq("ats_provider", board.ats_provider)
-        .eq("company_slug", board.company_slug)
-        // Only rows this board's adapter has ever reported can drop off this board.
-        .contains("discovered_via", [adapter.discoverySource]);
-      // The snapshot's row shape; postgrest hands back loosely typed rows.
-      type BoardJob = QueueSnapshotJob & { repost_count: number; last_seen_at: string | null };
+      // The board's stored jobs, by the one query the liveness sweep reads too (boardSnapshotQuery).
+      const { data: boardJobs, error: boardJobsError } = await boardSnapshotQuery(db, clientResult.userId, board, adapter.discoverySource);
       // Typed once for both splits below.
       const snapshot = (boardJobs ?? []) as BoardJob[];
       // Live jobs: the candidates for marking.
@@ -743,59 +1138,10 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
         // request to its own posting endpoint; only an explicit 404 (or Workday canApply:false)
         // retires it now instead of after the 14-day backlog wait. Unknown changes nothing.
         if (plan.kind !== "refuse") {
-          // Rows the posting endpoint confirmed closed.
-          const closedIds: string[] = [];
-          for (const job of queueCandidates(snapshot, polledFingerprints, plan.ids)) {
-            // The provider's own endpoint (Ashby: its board listing), or null (another provider, a
-            // malformed id): cannot confirm, skip.
-            const url = postingCheckUrl(board.ats_provider, board.board_token, job);
-            // No endpoint: the 14-day path still applies.
-            if (url === null) continue;
-            // Out of requests for this run: the rest wait for the next poll.
-            if (queueChecksLeft <= 0) break;
-            // One request spent.
-            queueChecksLeft -= 1;
-            // The robots-gated GET, the same transport the board poll used; the id is what an Ashby
-            // listing is searched for.
-            if ((await checkPosting((u) => fetchBoard(u), board.ats_provider, url, job.ats_job_id)) === "closed") closedIds.push(job.id);
-          }
-          if (closedIds.length > 0) {
-            // Same scoping as the planner's mark: owner, ids, and only rows still live.
-            const { error: closeError } = await db
-              .from("jobs")
-              .update({ disappeared_at: now.toISOString() })
-              .eq("user_id", clientResult.userId)
-              .in("id", closedIds)
-              .is("disappeared_at", null);
-            // Logged, not thrown: the board polled fine; the next poll retries the confirmation.
-            if (closeError) console.warn(`[scout-ats] queue liveness mark failed: ${closeError.message}`);
-            // Counted only when it landed.
-            else queueClosedCount = closedIds.length;
-          }
-          // A reason event for every QUEUE application retired this poll, by the planner or by the
-          // confirmation, so the history says why the row can no longer be approved or applied.
-          // application_events is append-only; a failed insert is logged, never retried as a cleanup.
-          const retired = new Set([...(markedCount > 0 ? plan.ids : []), ...(queueClosedCount > 0 ? closedIds : [])]);
-          // One note per queue application whose job was retired.
-          const notes = snapshot.filter((job) => retired.has(job.id)).flatMap((job) =>
-            queueApplicationIds(job).map((applicationId) => ({
-              user_id: clientResult.userId,
-              application_id: applicationId,
-              event_type: "note",
-              agent: "scout_ats",
-              detail: {
-                reason: "posting_closed",
-                // Which proof retired it: the posting endpoint, or the planner's churn mark.
-                evidence: closedIds.includes(job.id) ? "absent from board listing + posting endpoint gone (404 / canApply:false)" : "absent from board listing (liveness planner)",
-                board: `${board.ats_provider}/${board.board_token}`,
-              },
-            })));
-          if (notes.length > 0) {
-            // The event write; RLS admits scout_ats through the agent-key header every edge client sends.
-            const { error: noteError } = await db.from("application_events").insert(notes);
-            // Logged: the job is retired either way, and the worker refuses it on disappeared_at.
-            if (noteError) console.warn(`[scout-ats] queue liveness note failed: ${noteError.message}`);
-          }
+          // The shared confirmation (the liveness sweep calls it too): the planner's own marks are
+          // excluded from the candidates so nothing is confirmed twice, and get their reason note
+          // only when their mark landed.
+          queueClosedCount = await confirmQueueClosures({ db, userId: clientResult.userId, board, snapshot, polledFingerprints, plannedIds: plan.ids, plannerMarked: markedCount > 0, now, budget: queueBudget });
         }
 
         // Reposts: cleared and counted. Per row because repost_count is per-row + 1.
@@ -849,68 +1195,8 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
   // of >= 2 probes said gone is reported instead of retired (feed-liveness.ts has the full rule).
   // Run once per invocation, after the boards, because the boards are the scout's main job.
   // Guarded hosts are not repeated here: they reach disappearance_refused_reason via feedRefusals.
-  const feedLiveness = { probed: 0, closed: 0 };
-  // The rows: owner-scoped, live, no ATS, with an in-flight application (the inner join drops the rest).
-  const { data: feedRows, error: feedReadError } = await db
-    .from("jobs")
-    .select("id, apply_url, disappeared_at, applications!inner(id, status)")
-    .eq("user_id", clientResult.userId)
-    .in("ats_provider", [...FEED_LIVENESS_PROVIDERS])
-    .is("disappeared_at", null)
-    .in("applications.status", [...FEED_LIVENESS_STATUSES]);
-  // Labelled refusals for the run row's liveness_refused segment (not errors: the boards polled fine).
-  const feedRefusals: string[] = [];
-  if (feedReadError) {
-    // An unreadable snapshot is "no evidence", never "no rows": recorded, nothing marked.
-    feedRefusals.push(`feed: snapshot_failed: ${feedReadError.message}`);
-  } else {
-    // Probe within the cap. A null answer is "unknown", so near the deadline the remaining rows are
-    // skipped without a request rather than racing the function's wall clock.
-    const probe = await probeFeedRows(feedRows as FeedLivenessRow[], (u) => deadline.remainingMs() < FEED_PROBE_MIN_REMAINING_MS ? Promise.resolve(null) : fetchPage(u), FEED_LIVENESS_CAP);
-    // Reported as measured.
-    feedLiveness.probed = probe.probed;
-    // Each guarded host is a labelled refusal, so a restructure is visible on the health page.
-    for (const host of probe.refusedHosts) feedRefusals.push(`feed/${host}: all_probes_gone`);
-    if (probe.closedIds.length > 0) {
-      // Same scoping as the board marks: owner, ids, and only rows still live.
-      const { error: feedMarkError } = await db
-        .from("jobs")
-        .update({ disappeared_at: now.toISOString() })
-        .eq("user_id", clientResult.userId)
-        .in("id", probe.closedIds)
-        .is("disappeared_at", null);
-      if (feedMarkError) {
-        // Not marked: recorded, and the next run probes again.
-        feedRefusals.push(`feed: mark_write_failed: ${feedMarkError.message}`);
-      } else {
-        // Counted only when the write landed.
-        feedLiveness.closed = probe.closedIds.length;
-        // A reason event for every in-flight application whose posting was retired, so the card and
-        // the history say why. application_events is append-only; a failed insert is logged only.
-        const closed = new Set(probe.closedIds);
-        // One note per in-flight application of a retired job.
-        const notes = (feedRows as FeedLivenessRow[]).filter((job) => closed.has(job.id)).flatMap((job) =>
-          feedApplicationIds(job).map((applicationId) => ({
-            user_id: clientResult.userId,
-            application_id: applicationId,
-            event_type: "note",
-            agent: "scout_ats",
-            detail: {
-              reason: "posting_closed",
-              // One proof only: there is no ATS listing to cross-check against.
-              evidence: "posting page answered 404/410 (no ATS listing to cross-check)",
-              url: job.apply_url,
-            },
-          })));
-        if (notes.length > 0) {
-          // The event write; RLS admits scout_ats through the agent-key header every edge client sends.
-          const { error: noteError } = await db.from("application_events").insert(notes);
-          // Logged: the job is retired either way, and the worker refuses it on disappeared_at.
-          if (noteError) console.warn(`[scout-ats] feed liveness note failed: ${noteError.message}`);
-        }
-      }
-    }
-  }
+  // The pass itself is feedLivenessPass (above the handler), shared with the liveness sweep.
+  const { feedLiveness, feedRefusals } = await feedLivenessPass(db, clientResult.userId, deadline, now);
 
   // THE MOST IMPORTANT ONE OF THE THREE. Before this, the success path was the only
   // exit that never closed its run row, so every HEALTHY scout invocation left a row

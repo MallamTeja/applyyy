@@ -169,6 +169,37 @@ async function fakeFetch(url: string): Promise<unknown> {
   return { data: [{ title: 'Software Engineer', company_name: 'Arbeit', url: 'https://www.arbeitnow.com/jobs/3', remote: true, created_at: 1761300000 }] };
 }
 
+// Feed-correctness bugs from the 2026-11-18 discovery-channels audit (D7, D8, D13), pinned through the public row builder.
+describe('remote feed correctness (2026-11-18 audit)', () => {
+  // A fixed sighting time; only the row's typed fields are asserted.
+  const SEEN = new Date('2026-11-18T08:00:00Z');
+  // The row a RemoteOK posting with this title and apply URL would write.
+  const rowFor = async (title: string, applyUrl = 'https://example.com/apply') => (await remotePreparedJob(parseRemoteOK([LEGAL, { ...remoteOkItem(applyUrl), position: title }]).jobs[0]!, SEEN)).row;
+
+  it('D7: "Internal" and "International" titles are NOT internships; real intern / co-op / trainee titles are', async () => {
+    // The two live false positives the substring test produced, then the true cases.
+    const types = await Promise.all(['Internal Tools Engineer', 'International Payments Engineer', 'Software Engineer Intern', 'Engineering Internship 2027', 'Co-op Developer', 'Graduate Trainee Engineer'].map(async (t) => (await rowFor(t)).employment_type));
+    // Unknown (the screener decides) for the first two; internship for the rest.
+    expect(types).toEqual(['unknown', 'unknown', 'internship', 'internship', 'internship', 'internship']);
+  });
+
+  it('D8: Jobicy keeps the FULL description when both it and the excerpt are present', () => {
+    // A teaser and the full text, as Jobicy ships both.
+    const { jobs } = parseJobicy({ jobs: [{ jobTitle: 'Engineer', companyName: 'Acme', url: 'https://jobicy.com/jobs/1', jobExcerpt: 'Short teaser', jobDescription: '<p>Full role text with requirements</p>' }] });
+    // The full text wins.
+    expect(jobs[0]?.description).toBe('Full role text with requirements');
+  });
+
+  it('D13: the ATS is read from the host only; a lookalike host or a query mention is not that ATS', async () => {
+    // Real hosts, then traps the substring test fell for, then SR (off by the robots ruling), then gh_jid embeds.
+    const urls = ['https://jobs.lever.co/acme/1', 'https://boards.greenhouse.io/acme/jobs/1', 'https://jobs.ashbyhq.com/acme/1', 'https://apply.workable.com/acme/j/1', 'https://clever.com/jobs/1', 'https://acme.com/apply?ref=lever.co', 'https://evil.com/greenhouse.io/job', 'https://jobs.smartrecruiters.com/Acme/1', 'https://acme.com/careers?gh_jid=123', 'not a url'];
+    // Each URL's detected provider.
+    const providers = await Promise.all(urls.map(async (u) => (await rowFor('Backend Engineer', u)).ats_provider));
+    // Hosts match; traps and SR fall to the generic path; a gh_jid parameter is Greenhouse's embed.
+    expect(providers).toEqual(['lever', 'greenhouse', 'ashby', 'workable', 'other', 'other', 'other', 'other', 'greenhouse', 'other']);
+  });
+});
+
 // The database the fake answers with: kill switch ON, a run row id, nothing stored yet.
 const DB = { system_settings: { system_enabled: true }, agent_runs: { id: 'run-1' } };
 
@@ -410,6 +441,31 @@ describe('T12: aggregator vs ATS twins', () => {
     expect(upserted(ops)?.map((r) => [r.status, r.drop_reason])).toEqual([['passed_filters', null]]);
     // Said, with both numbers.
     expect(result.errors).toContain('ats twin lookup: ats twin lookup truncated (2 of 1500)');
+  });
+
+  it('D6: a board with 2134 ATS rows is read in keyset pages past max_rows, so a twin at row 1501 still drops the copy', async () => {
+    // The live shape of the 11-16..18 failures: 2134 employer-ATS rows on this batch's boards, zero-padded ids so string
+    // order is id order; the one twin sits past the first 1000.
+    const BOARD = Array.from({ length: 2134 }, (_, i) => ({ id: `ats-${String(i).padStart(4, '0')}`, company_name: 'Acme Labs', title: i === 1500 ? 'Backend Engineer' : `Other Role ${i}` }));
+    // A fake that honours what PostgREST would: .gt('id', cursor), then at most 1000 rows (max_rows), with the exact count.
+    const paged: Answer = (calls) => {
+      // The cursor, when this page has one.
+      const after = calls.find((c) => c.method === 'gt' && c.args[0] === 'id')?.args[1] as string | undefined;
+      // Rows past the cursor, capped like max_rows.
+      const page = BOARD.filter((r) => after === undefined || r.id > after).slice(0, 1000);
+      // The exact count is of the whole filtered set, as PostgREST reports it.
+      return { data: page, count: after === undefined ? BOARD.length : BOARD.filter((r) => r.id > after).length };
+    };
+    // The twin's own application is live, so it counts.
+    const { client, ops } = recordingClient({ ...DB, company_watchlist: WATCHLIST, jobs: jobsTable(paged), applications: appsTable([], [], { twinApps: [{ job_id: 'ats-1500', status: 'scored' }] }) });
+    // The live path.
+    const result = await runRemoteScout({ client, fetchJson: jobicyOnly, now: NOW, dryRun: false, force: false, log: () => {} });
+    // Dropped against the twin on page two: the old single read saw only rows 0..999 and refused.
+    expect(upserted(ops)?.map((r) => [r.status, r.drop_reason])).toEqual([['dropped_filter', 'duplicate_of_ats:ats-1500']]);
+    // No truncation error any more.
+    expect(result.errors.filter((e) => e.includes('ats twin lookup'))).toEqual([]);
+    // Non-vacuity: it really paged (three pages: 1000 + 1000 + 134).
+    expect(ops.filter((o) => o.table === 'jobs' && o.method === 'gt').length).toBe(2);
   });
 
   it('T12: a sweep read cut at max_rows is reported, and the rows read are still processed', async () => {

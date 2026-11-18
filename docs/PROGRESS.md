@@ -116,7 +116,7 @@ GitHub cron is best-effort; real start times are in `gh run list`. There is no `
 
 **Manual routes (no cron):** `run-one.yml` (matcher → tailor → auditor for one row,
 `worker/src/cli/run-one.ts`), `pregate-sweep.yml`, `prescreen-drain.yml`,
-`postscreen-drain.yml`, `ingest-links.yml`, and the web app's batch runner. Normalizer, tailor
+`postscreen-drain.yml`, and the web app's batch runner (`ingest-links.yml` was deleted 2026-11-18). Normalizer, tailor
 and auditor have no schedule of their own.
 
 **Screening rules:**

@@ -691,7 +691,7 @@ test("refusal wording: needs_text and not_a_job say what failed and never ask fo
   assert.equal(unreadable.message, "Could not read that page, even with a browser (HTTP 403 Forbidden; the browser could not open it: no browser in tests).");
   assert.equal(shell.message, "Could not read that page, even with a browser (almost no readable text (it may need a login or JavaScript); the browser could not open it: no browser in tests).");
   assert.equal(notJob.message, "That does not look like a single job posting. Try the link to the job's own page instead.");
-  // Status codes and field names unchanged: the web panel and ingest-links.yml parse them.
+  // Status codes and field names unchanged: the web panel (parseIntakeOk) parses them.
   assert.deepEqual([unreadable.status, shell.status, notJob.status], ["needs_text", "needs_text", "not_a_job"]);
   // And the UI has no paste box any more, so none of them asks for one.
   for (const m of [unreadable.message, shell.message, notJob.message]) assert.doesNotMatch(m, /paste/i);
@@ -830,32 +830,4 @@ test("handler: a row dropped FOR work_auth asks once: confirming work_auth also 
   const res = await handleJobLinkIntake(post({ url: "https://job-boards.greenhouse.io/acme/jobs/111", confirm: ["work_auth"] }), deps);
   // Revived without a second question.
   assert.deepEqual([res.status, (await res.json()).revived_from, runs.length], [200, "dropped_filter", 1]);
-});
-
-// THE BATCH CALLER'S REFUSAL LIST MATCHES THIS HANDLER (2026-11-06, P3 #6). ingest-links.yml
-// classifies a 4xx answer as a refusal only when its status is in REFUSALS; an unknown status
-// aborts the batch as an "unknown shape". So its list must hold exactly the refusal statuses this
-// handler sends: one missing aborts a real run, one extra is a dead entry (confirm_revive outlived
-// the ea85dc9 build it was for). Read from both sources, never restated by hand.
-test("ingest-links.yml REFUSALS equals the refusal statuses handler.ts can send", async () => {
-  // Plain file reads; the workflow is not a module.
-  const { readFileSync } = await import("node:fs");
-  // The handler's source.
-  const handler = readFileSync(new URL("./handler.ts", import.meta.url), "utf8");
-  // The workflow, three directories up from supabase/functions/job-link-intake/.
-  const workflow = readFileSync(new URL("../../../.github/workflows/ingest-links.yml", import.meta.url), "utf8");
-  // Every literal response status in the handler, minus the success answer and the
-  // application status it reports on a revive (line `status: "passed_filters"`).
-  const sent = new Set([...handler.matchAll(/status: "([a-z_]+)"/g)].map((m) => m[1]!));
-  sent.delete("ok");
-  sent.delete("passed_filters");
-  // The workflow's set literal, by its exact shape: one line, single-quoted names.
-  const line = workflow.match(/const REFUSALS = new Set\(\[([^\]]*)\]\)/);
-  // The shape must be found, or the comparison below would pass vacuously.
-  assert.ok(line, "REFUSALS set literal not found in ingest-links.yml");
-  const listed = new Set([...line[1]!.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]!));
-  // Guard against an empty parse on either side.
-  assert.ok(sent.size >= 5 && listed.size >= 5, `parsed too few statuses: handler ${sent.size}, workflow ${listed.size}`);
-  // Exactly equal, sorted so a failure shows the difference.
-  assert.deepEqual([...listed].sort(), [...sent].sort());
 });

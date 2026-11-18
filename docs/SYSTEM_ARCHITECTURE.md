@@ -105,7 +105,7 @@ posture is set per function in `supabase/config.toml` (`verify_jwt`).
 | `matcher` | `matcher` | `passed_filters` | `scored`, `dropped_filter`, `failed`. A score below `MATCH_ADVANCE_FLOOR` (`_shared/match/score-threshold.ts`) does not advance | Run pipeline · run-one · `postscreen-drain.yml` · `pregate-sweep.yml` (`?mode=pregate_only`) · job-link-intake (background) |
 | `tailor` | `tailor` | `scored` | `tailored` (+ `tailored_profile`, `tailor_refs`, `master_version`) | Run pipeline · run-one · `postscreen-drain.yml` · job-link-intake (background) |
 | `auditor` | `auditor` | `tailored`, `audit_clean`, `audit_flagged` | `audit_clean`/`audit_flagged` → `awaiting_approval` | Run pipeline · run-one · `postscreen-drain.yml` · job-link-intake (background) |
-| `job-link-intake` | `human` (user-triggered) | — (inserts, or revives `discovered`/`deduped`/`dropped_filter`/`failed`) | inserts or moves to `passed_filters` as `human`, then runs matcher → tailor → auditor via `EdgeRuntime.waitUntil` | Add-a-job-by-link panel · `ingest-links.yml` |
+| `job-link-intake` | `human` (user-triggered) | — (inserts, or revives `discovered`/`deduped`/`dropped_filter`/`failed`) | inserts or moves to `passed_filters` as `human`, then runs matcher → tailor → auditor via `EdgeRuntime.waitUntil` | Add-a-job-by-link panel |
 | `resume-assist` | — | — | none (proposes edit ops; the human applies them through the guarded save) | approval page AI edit box |
 | `dispatch-apply` | — | counts `approved` rows whose job is still live | none. Starts `apply-kit.yml` on every call; starts `apply.yml` as a live drain only when `system_settings.auto_apply_on_approve` is exactly true | approval page, once after a successful approve |
 | `cover-letter` | `cover_letter` | `tailored`, `audit_clean`, `audit_flagged` | none (letter only; never written at `awaiting_approval`) | `satellites.yml` |
@@ -161,8 +161,8 @@ browser, a worker CLI or a GitHub Actions workflow invokes them.
 | Class | Workflows |
 |---|---|
 | CI | `ci.yml` |
-| Scheduled (+ dispatch) | `scout`, `scout-remote`, `apply`, `apply-kit`, `satellites`, `keepalive`, `jobs-tombstone` |
-| Dispatch only | `run-one`, `ingest-links`, `prescreen-drain`, `postscreen-drain`, `pregate-sweep` |
+| Scheduled (+ dispatch) | `scout`, `scout-remote`, `scout-ats-daily` (liveness only), `apply`, `apply-kit`, `satellites`, `keepalive`, `jobs-tombstone` |
+| Dispatch only | `run-one`, `prescreen-drain`, `postscreen-drain`, `pregate-sweep` |
 
 Schedules: `grep -n "cron:" .github/workflows/*.yml`. GitHub's scheduled runs can start
 hours late; read actual start times with `gh run list --workflow <file>`.
@@ -420,7 +420,7 @@ function check. A docs-only push runs no CI (`paths-ignore`).
 | Agent key is fail-closed (empty table = every machine agent locked out; emergency flag in `applyy_internal.agent_key_emergency`) | `select count(*) from applyy_internal.agent_key` (expect 1) |
 | No database scheduler: edge agents run on clicks, worker CLIs and GitHub Actions (cron is best-effort, often hours late) | `select extname from pg_extension where extname='pg_cron'` |
 | Bot submits mostly end at `blocked_needs_human` (reCAPTCHA, unsupported forms, unanswerable questions; see the note in `dispatch-apply/handler.ts`). Those rows go to Manual apply | `select status, count(*) from applications where status in ('approved','blocked_needs_human','applied') group by 1` |
-| Aggregator adapters Adzuna/Jooble/Workable (`_shared/scout/adapters/`) unreached | `grep -rln "scout/tiers" supabase/functions worker/src \| grep -v test` (empty = unreached) |
+| Workable adapter (`_shared/scout/adapters/workable.ts`) unreached; Adzuna/Jooble adapters and `scout/tiers.ts` deleted as dead code 2026-11-18 | `grep -rln "adapters/workable" supabase/functions worker/src \| grep -v test` (empty = unreached) |
 | ATS simulator unwired (only a comment names it) | `grep -rlnE "from \"[^\"]*ats-simulator" supabase/functions apps/web/src \| grep -v test` |
 | `interview ↔ oa_pending` cycle unbounded | §3 invariants |
 | No LIVE declared-vs-graph diff test (`packages/shared-types/test/enum-parity.test.ts` compares migrations with the mirror only) | `grep -rln application_status_transitions --include=*.test.ts .` |

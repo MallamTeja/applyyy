@@ -93,7 +93,7 @@ jobs:
           set -euo pipefail
           # Node reads the module from stdin; --input-type=module enables top-level await.
           node --input-type=module <<'JS'
-          // Promise-based sleep for the pacing gaps; stdlib, nothing to hand-roll (same as ingest-links.yml).
+          // Promise-based sleep for the pacing gaps; stdlib, nothing to hand-roll (the pattern the retired bulk-links workflow used).
           import { setTimeout as sleep } from 'node:timers/promises';
 
           // The three stages, declared up front so the plan log and the loop read ONE source.
@@ -130,12 +130,12 @@ jobs:
           // Pause after every page that read rows. The second live run (41305575499) sent ~10
           // calls every ~20 s, and by page 5 every key answered 429 RESOURCE_EXHAUSTED. A single
           // row run 3 minutes later succeeded, so it was the ~15 RPM free-tier window
-          // (gemini/client.ts:22), not the daily quota. 45 s is the gap ingest-links.yml uses for
-          // the same budget.
+          // (gemini/client.ts:22), not the daily quota. 45 s was the gap the retired bulk-links workflow
+          // (ingest-links.yml, deleted 2026-11-18) used for the same budget.
           const GAP_MS = 45_000;
           // After a page with errors, wait long enough for a per-minute window to roll over
           // before the next page, so one burst does not count toward the stall cap
-          // (ingest-links.yml's 429 retry wait).
+          // (the retired bulk-links workflow's 429 retry wait).
           const QUOTA_BACKOFF_MS = 90_000;
           // Consecutive pages that read rows but advance none before the run stops red. A
           // Gemini outage (every key cooling, or 503 "high demand") leaves each row in

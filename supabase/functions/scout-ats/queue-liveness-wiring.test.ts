@@ -24,21 +24,23 @@ function at(needle: string, from = 0): number {
 
 describe("scout-ats: queue liveness wiring", () => {
   it("confirms only after the planner ran, and only when it did not refuse the poll", () => {
-    // The planner's verdict on this poll.
-    const plan = at("const plan = planDisappearances(");
+    // The scan's planner verdict, inside the handler (the liveness sweep above it has its own, pinned in liveness-mode.test.ts).
+    const plan = at("const plan = planDisappearances(", at("Deno.serve(withCors("));
     // The trust guard: a refused plan means the listing is not evidence of anything.
-    const guard = at('if (plan.kind !== "refuse") {');
-    // The candidates, built from the planner's own marks so nothing is confirmed twice.
-    const candidates = at("queueCandidates(snapshot, polledFingerprints, plan.ids)");
-    // Order: plan, guard, candidates.
-    assert.ok(plan < guard && guard < candidates, `order wrong: plan@${plan}, guard@${guard}, candidates@${candidates}`);
+    const guard = at('if (plan.kind !== "refuse") {', plan);
+    // The shared confirmation, handed the planner's own marks so nothing is confirmed twice.
+    const confirm = at("queueClosedCount = await confirmQueueClosures({ db, userId: clientResult.userId, board, snapshot, polledFingerprints, plannedIds: plan.ids, plannerMarked: markedCount > 0,", guard);
+    // Inside the helper, those marks are what the candidates exclude.
+    at("queueCandidates(snapshot, polledFingerprints, plannedIds)");
+    // Order: plan, guard, confirmation.
+    assert.ok(plan < guard && guard < confirm, `order wrong: plan@${plan}, guard@${guard}, confirm@${confirm}`);
   });
 
   it("asks the posting endpoint through the robots-gated board transport, within the run's cap", () => {
     // fetchBoard applies the 'scouting' robots policy; a bare fetch here would skip robots.txt.
     at('checkPosting((u) => fetchBoard(u), board.ats_provider, url, job.ats_job_id)');
     // The shared per-run allowance is checked before a request is spent.
-    const capCheck = at("if (queueChecksLeft <= 0) break;");
+    const capCheck = at("if (budget.left <= 0) break;");
     // The request itself.
     const request = at("checkPosting((u) => fetchBoard(u)");
     // Cap first.
