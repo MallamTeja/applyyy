@@ -76,9 +76,12 @@ const TITLE_RANGE = /\(\s*(\d+)\s*(?:\+|-|–|—|to)\s*\d*\s*\+?\s*(?:years?|yr
 // 2026-11-04) carry a work word in the WRONG place. So: a work word AFTER the years ("5+ years of
 // backend experience", "8+ years building") or a requirement word just BEFORE them ("Experience: 2-4
 // years", "at least 3 years"). Bare "work" is deliberately absent from the after-list.
-const CONTEXT_AFTER = /experien|\byoe\b|professional|industry|hands[- ]on|\bbuilding\b|\bdeveloping\b|\bdevelopment\b|\bengineering\b|\bworking (?:with|on|in|as)\b|\bcoding\b|\bprogramming\b|\bshipping\b|\bdesigning\b|\bin (?:a |an )?(?:software|backend|frontend|data|devops|security|ml|machine learning|cloud|platform|infrastructure|engineering|development)\b/i;
-// The requirement words that may sit before the number instead.
-const CONTEXT_BEFORE = /experien|\byoe\b|qualif|requirement|minimum|at least|must have|you have|you bring/i;
+// "business intelligence" and "analytics" joined the "in <field>" list on 2026-11-18: DXC's "2-5+ years in
+// business intelligence or data analytics roles." reached Teja's approval queue because no listed field followed.
+const CONTEXT_AFTER = /experien|\byoe\b|professional|industry|hands[- ]on|\bbuilding\b|\bdeveloping\b|\bdevelopment\b|\bengineering\b|\bworking (?:with|on|in|as)\b|\bcoding\b|\bprogramming\b|\bshipping\b|\bdesigning\b|\bin (?:a |an )?(?:software|backend|frontend|data|devops|security|ml|machine learning|cloud|platform|infrastructure|engineering|development|business intelligence|analytics)\b/i;
+// The requirement words that may sit before the number instead. "\bexp\b" is the abbreviation (2026-11-18):
+// DXC's Workday template "Exp Needed - 8 to 14 years" had no other word for the parser to tie the years to.
+const CONTEXT_BEFORE = /experien|\bexp\b|\byoe\b|qualif|requirement|minimum|at least|must have|you have|you bring/i;
 // How far after and before the number those words may sit, in characters.
 const CONTEXT_AFTER_CHARS = 60;
 const CONTEXT_BEFORE_CHARS = 50;

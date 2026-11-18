@@ -385,6 +385,76 @@ function jdLocationLine(description: string | null): string | null {
   return line.length >= 2 && line.length <= JD_LOCATION_MAX_CHARS ? line : null;
 }
 
+// A remote part or clause that says it is open (worldwide, anywhere, global) or names a region holding India (APAC,
+// Asia) is open, never locked. Module level since 2026-11-18: the board rule and the JD lock rule read the same list.
+const OPEN_OR_INDIA_REGION = words(["apac", "asia", "asia-pacific", "asia pacific", "global", "globally", "worldwide", "anywhere", "international", "the world"]);
+
+// A JD sentence that says WHERE the remote work may be done: a work word, then "anywhere in <places>" in the same
+// sentence. The work word is required so "our product serves hospitals anywhere in the US" (a market, not a work
+// location) never reads as a lock. The capture is the place list; [^\n] so the sentence cut below decides its end.
+const JD_ANYWHERE_IN = /\b(?:remote(?:ly)?|work(?:ed|ing)?|performed|executed|based|located|reside)\b[^\n]{0,80}?\banywhere in\s+([^\n]{2,160})/i;
+
+// A UTC/GMT window ("GMT-5 to GMT+1", "UTC-8 - UTC-3"). Each side's offset is optional (bare "UTC" is +0). The minus
+// sign may be the Unicode one. Hours with optional ":30"/":45" minutes.
+const TZ_WINDOW = /\b(?:GMT|UTC)\s*([+\-−]\s*\d{1,2}(?::\d{2})?)?\s*(?:to|through|and|-|–|—)\s*(?:GMT|UTC)\s*([+\-−]\s*\d{1,2}(?::\d{2})?)?/i;
+
+// The window is a REQUIREMENT only when the sentence says so. An "overlap with" ask is satisfiable from India by shifting
+// a few hours, so it is never read as a lock (fail-open, CLAUDE.md section 6).
+const TZ_REQUIRED = /\b(?:required|requires|must|only)\b/i;
+// The overlap wording that turns a window into a soft ask.
+const TZ_OVERLAP = /\boverlap/i;
+
+// IST, the offset Teja works in (UTC+5:30), as hours.
+const IST_OFFSET_HOURS = 5.5;
+
+// One "+5:30"-style offset as hours; a missing offset is UTC itself.
+function offsetHours(raw: string | undefined): number {
+  // Bare GMT/UTC.
+  if (raw === undefined) return 0;
+  // Unicode minus to ASCII, spaces out, so one regex reads every spelling.
+  const clean = raw.replace("−", "-").replace(/\s/g, "");
+  // Sign, hours, optional minutes. The TZ_WINDOW capture guarantees this shape.
+  const [, sign, hours, minutes] = clean.match(/^([+-])(\d{1,2})(?::(\d{2}))?$/)!;
+  // Signed hours with the minutes as a fraction.
+  return (sign === "-" ? -1 : 1) * (Number(hours) + Number(minutes ?? "0") / 60);
+}
+
+// The JD's remote lock, as the quoted sentence, or null when the JD states none Teja can meet. Two signals, each read one
+// sentence at a time: "anywhere in <places>" naming places none of which is authorised, and a REQUIRED time-zone window
+// that excludes IST. Anything unclear (no place resolved, an open word, India named, an overlap ask) is no lock.
+function jdRemoteLock(description: string | null, authorized: ReadonlySet<string>): string | null {
+  // Plain text, so markup cannot split a sentence.
+  const text = stripHtml(description);
+  // No JD: no lock (missing data is never a drop).
+  if (text === null) return null;
+  // Sentences: a line break, or a full stop that is not part of an initialism ("U.S.", "D.C." keep going).
+  const sentences = text.split(/\n|(?<!\b[A-Z])\.(?:\s|$)/);
+  // Each sentence on its own, so a place in one sentence never pairs with a work word in another.
+  for (const sentence of sentences) {
+    // The "anywhere in" form.
+    const anywhere = sentence.match(JD_ANYWHERE_IN);
+    // Its place list, judged only when it names a place, none authorised, and no open or India-holding region.
+    if (anywhere !== null && !OPEN_OR_INDIA_REGION.test(anywhere[1]!)) {
+      // The places the list names, regions expanded.
+      const named = countriesIn(anywhere[1]!);
+      // Named and none reachable: a lock.
+      if (named.size > 0 && ![...named].some((name) => authorized.has(name))) return sentence.trim();
+    }
+    // The time-zone form.
+    const window = sentence.match(TZ_WINDOW);
+    // Judged only when the sentence requires it and is not an overlap ask.
+    if (window !== null && TZ_REQUIRED.test(sentence) && !TZ_OVERLAP.test(sentence)) {
+      // Both ends as hours.
+      const [a, b] = [offsetHours(window[1]), offsetHours(window[2])];
+      // Outside [low, high] means IST cannot meet it. A wrap-around window ("UTC+10 to UTC-8") reads as the wide span
+      // and keeps, which is the safe direction.
+      if (IST_OFFSET_HOURS < Math.min(a, b) || IST_OFFSET_HOURS > Math.max(a, b)) return sentence.trim();
+    }
+  }
+  // No lock stated.
+  return null;
+}
+
 // Run the gate over one job against the user's work-authorised countries.
 // `remotePolicy` is REQUIRED, not optional with a default: every caller must say which reading
 // of remote it applies, so a forgotten argument cannot silently restore the 10-24 behaviour.
@@ -462,9 +532,8 @@ export function screenWorkAuth(
   const placed = parts.filter((part) => places(part).size > 0);
   // The parts that name no place: for this rule each must say remote, so "2 Locations" never counts.
   const unplaced = parts.filter((part) => places(part).size === 0);
-  // A remote part that says it is open (worldwide, anywhere, global) or names a region holding India (APAC, Asia) is
-  // open, never "remote from those offices": the 11-04 test "Home Based - Americas; Home Based - APAC" stays kept.
-  const OPEN_OR_INDIA_REGION = words(["apac", "asia", "asia-pacific", "asia pacific", "global", "globally", "worldwide", "anywhere", "international"]);
+  // OPEN_OR_INDIA_REGION (module level) marks a remote part that is open, never "remote from those offices": the 11-04
+  // test "Home Based - Americas; Home Based - APAC" stays kept.
   // Drop when every placed part is elsewhere and every other part is a bare remote with no open or India-holding region.
   if (remotePolicy === "unlocked_or_authorized" && placed.length > 0 && unplaced.length > 0 && placed.every(isElsewhere) && unplaced.every((part) => REMOTE.test(part) && !OPEN_OR_INDIA_REGION.test(part))) {
     // Quoted, so a wrong drop is diagnosable from the run summary.
@@ -501,6 +570,20 @@ export function screenWorkAuth(
       // Quote the title, since the board location is empty.
       return { drop: true, code: "work_auth", reason: `title "${job.title}" names only places outside the work-authorised countries (board location "${job.locationRaw ?? ""}")` };
     }
+  }
+
+  /* JD REMOTE LOCK (2026-11-18, pending parcel 1: Quora 07b20985 "Remote - Multiple Locations" + "performed remotely
+     from anywhere in the US or Canada"; ElevenLabs fb6d35e4 "Remote" + "anywhere in Europe and the US East Coast ...
+     GMT-5 to GMT+1 timezones required"). The board said remote and named no place, so everything above kept them as
+     open remote; the country lock was only in the JD. Teja's 11-04 ruling drops country-locked remote, so the JD's own
+     lock decides here. Read only when the board location names no place at all (a board place has already decided)
+     and only under 'unlocked_or_authorized' ('any' keeps every remote by definition). */
+  const boardPlaceless = parts.every((part) => places(part).size === 0);
+  // The lock, if the JD states one; null keeps.
+  const lock = boardPlaceless && remotePolicy === "unlocked_or_authorized" ? jdRemoteLock(job.description, authorized) : null;
+  // A lock found: drop, quoting the JD's own words so a wrong drop is diagnosable from the run summary.
+  if (lock !== null) {
+    return { drop: true, code: "work_auth", reason: `JD locks remote work outside the work-authorised countries: "${lock}" (board location "${job.locationRaw ?? ""}")` };
   }
 
   // TEXT: a JD that legally requires US status, unless the user may work in the US or some

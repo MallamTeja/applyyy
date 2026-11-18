@@ -619,3 +619,74 @@ test("2026-11-11 controls: India, bare remote, APAC remote, worldwide remote bes
     assert.equal(screenWorkAuth({ title, locationRaw, description: "We build developer tools." }, TEJA, UNLOCKED).drop, false, label);
   }
 });
+
+// --- 2026-11-18: remote on the board, the country lock only in the JD (pending parcel 1) ---------------------------
+// Quora (07b20985, c45a62ef, 7bbcc499) and ElevenLabs (fb6d35e4) reached the approval queue with a board location of
+// "Remote - Multiple Locations" / "Remote", which names no place, so the gate kept them as open remote. Their JDs lock
+// the remote work to the US/Canada and to Europe + US East Coast (GMT-5..GMT+1). Teja's 11-04 ruling ("i dont need
+// country lokced remote except indain remote jobs") drops exactly that, so the JD's own remote-restriction sentence
+// now decides when the board names no place. The sentences below are verbatim from the live description_raw.
+
+// Quora's sentence, verbatim, inside a JD-shaped paragraph.
+const QUORA_JD = "About the team: we build Quora's ranking systems.\n[Quora is a privately held, \"remote-first\" company. This position can be performed remotely from anywhere in the US or Canada. Please visit careers.quora.com/eligible-countries for details regarding employment eligibility by country.]";
+// The ML Platform row's word order.
+const QUORA_ML_JD = "This position can be performed remotely from anywhere in Canada or the United States.";
+// ElevenLabs' sentence, verbatim. It names Europe AND a time-zone window, and lists offices as an option.
+const ELEVENLABS_JD = "Location\nThis role is remote-first, so it can be executed from anywhere in Europe and the US East Coast, with the ability to operate in GMT-5 to GMT+1 timezones required.\nIf you prefer, you can work from our offices in London, New York, Dublin, Amsterdam, and Warsaw.\nGlobal team: We prioritize your talent, not your location.";
+
+test("2026-11-18 Quora 07b20985: \"Remote - Multiple Locations\" + JD \"remotely from anywhere in the US or Canada\" drops", () => {
+  // The live board location and JD.
+  const verdict = screenWorkAuth({ title: "Full Stack Software Engineer, New Grad - Quora (Remote)", locationRaw: "Remote - Multiple Locations", description: QUORA_JD }, TEJA, UNLOCKED);
+  // Dropped, as work_auth.
+  assert.deepEqual([verdict.drop, verdict.drop && verdict.code], [true, "work_auth"]);
+});
+
+test("2026-11-18 Quora 7bbcc499: the reversed order \"anywhere in Canada or the United States\" drops", () => {
+  // The ML Platform row's wording.
+  assert.equal(screenWorkAuth({ title: "Software Engineer New Grad, Machine Learning Platform", locationRaw: "Remote - Multiple Locations", description: QUORA_ML_JD }, TEJA, UNLOCKED).drop, true);
+});
+
+test("2026-11-18 ElevenLabs fb6d35e4: bare \"Remote\" + JD \"anywhere in Europe and the US East Coast\" drops", () => {
+  // The live board location and JD.
+  assert.equal(screenWorkAuth({ title: "Full-Stack Engineer - ElevenMusic", locationRaw: "Remote", description: ELEVENLABS_JD }, TEJA, UNLOCKED).drop, true);
+});
+
+test("2026-11-18 time-zone window: a required GMT-5..GMT+1 window excludes IST (UTC+5:30) and drops on its own", () => {
+  // Only the window, no place, so the time-zone rule alone must decide.
+  assert.equal(screenWorkAuth(job("Remote", "Fully remote. Working hours in UTC-5 to UTC+1 timezones required."), TEJA, UNLOCKED).drop, true);
+});
+
+test("2026-11-18 controls: these JD/location shapes all KEEP", () => {
+  // label, board location, JD.
+  const keeps: readonly [string, string | null, string][] = [
+    // India remote on the board.
+    ["Remote (India)", "Remote (India)", QUORA_JD],
+    // An Indian city on the board outranks a JD lock (that footer is boilerplate).
+    ["Hyderabad board", "Hyderabad", QUORA_JD],
+    // APAC holds India.
+    ["Remote — APAC", "Remote — APAC", "We build developer tools."],
+    // Missing and unknown locations keep (Teja, 11-05).
+    ["empty location", null, "We build developer tools."],
+    // An unknown non-remote board location with no JD lock.
+    ["unknown location", "2 Locations", "We build developer tools."],
+    // Open remote in the JD.
+    ["anywhere in the world", "Remote", "You can work remotely from anywhere in the world."],
+    // India in the JD lock.
+    ["anywhere in India", "Remote", "This role can be performed remotely from anywhere in India."],
+    // A JD lock that includes India among others.
+    ["India among others", "Remote", "This position can be performed remotely from anywhere in the US, Canada or India."],
+    // "anywhere in" about customers, not about where the work is done.
+    ["customers, not work", "Remote", "Our product serves hospitals anywhere in the US."],
+    // A time-zone window that contains IST.
+    ["window holds IST", "Remote", "Working hours in UTC+4 to UTC+9 timezones required."],
+    // An overlap ask is satisfiable from India; fail-open.
+    ["overlap only", "Remote", "You need 4 hours of overlap with GMT-5 to GMT+1."],
+    // Ramp 644d66ae: its JD names countries only as benefit headers, so there is no lock to read.
+    ["Ramp benefit headers", "Remote", "BENEFITS AVAILABLE TO ALL FULL-TIME RAMP EMPLOYEES (GLOBAL)\nUNITED STATES\nComprehensive medical.\nCANADA\nRelocation expense coverage to NYC or SF (if needed)"],
+  ];
+  // Each control.
+  for (const [label, locationRaw, description] of keeps) {
+    // Kept.
+    assert.equal(screenWorkAuth({ title: "Software Engineer", locationRaw, description }, TEJA, UNLOCKED).drop, false, label);
+  }
+});

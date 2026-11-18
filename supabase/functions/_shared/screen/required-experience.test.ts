@@ -263,3 +263,67 @@ describe("requiredExperienceYears: P1 #7 leaks", () => {
     assert.equal(requiredExperienceYears("Graduate Engineer (2 year programme)", null), null);
   });
 });
+
+// The 2026-11-18 leaks (pending parcel 2): live JD sentences that the parser read as "no requirement".
+// Each one reached the approval queue although it asks for more than the ceiling of 1 year.
+describe("requiredExperienceYears: 2026-11-18 leaks", () => {
+  // DXC "Devops Engineer (RR-0447768)", 575da609: "Exp" is the abbreviation, so CONTEXT_BEFORE never fired.
+  it("DXC 'Exp Needed - 8 to 14 years' is 8", () => {
+    // The live line, as stripHtml hands it over.
+    assert.equal(requiredExperienceYears("Devops Engineer (RR-0447768)", "Exp Needed - 8 to 14 years"), 8);
+  });
+  // DXC "Sisense Developer", 7ba7ef22: the work words are "in business intelligence ... roles", none listed.
+  it("DXC '2-5+ years in business intelligence or data analytics roles.' is 2", () => {
+    // The live sentence, verbatim.
+    assert.equal(requiredExperienceYears("Sisense Developer", "2-5+ years in business intelligence or data analytics roles."), 2);
+  });
+  // The same domain, written the shorter way.
+  it("'3+ years in analytics' is 3", () => {
+    // A sibling of the DXC wording: the domain word alone after "in".
+    assert.equal(requiredExperienceYears(SWE, "3+ years in analytics"), 3);
+  });
+  // Already caught, pinned so a later change cannot reopen them. FamPay "Data Analyst", e4435867.
+  it("FamPay '3-5 years of experience in SQL skills ...' is 3", () => {
+    // The live sentence, verbatim.
+    assert.equal(requiredExperienceYears("Data Analyst", "3-5 years of experience in SQL skills with experience writing complex queries involving joins, CTEs and window functions."), 3);
+  });
+  // Supabase "Software Engineer - Storage", e625b50f.
+  it("Supabase '- Have 5+ years backend engineering experience ...' is 5", () => {
+    // The live bullet, verbatim.
+    assert.equal(requiredExperienceYears("Software Engineer - Storage", "- Have 5+ years backend engineering experience of running Rust and Tokio in production"), 5);
+  });
+  // Cursor "Forward Deployed Engineer - India", ce965450.
+  it("Cursor '- You have 5+ years of experience in software engineering ...' is 5", () => {
+    // The live bullet, verbatim.
+    assert.equal(requiredExperienceYears("Forward Deployed Engineer - India", "- You have 5+ years of experience in software engineering, machine learning engineering, or data science"), 5);
+  });
+});
+
+// Fresher-friendly wording that must still KEEP after the 11-18 widening (Teja is a final-year student).
+describe("screenRequiredExperience: 2026-11-18 keeps", () => {
+  // A range that starts at zero is open to freshers.
+  it("'0-2 years of experience' keeps at ceiling 1", () => {
+    // The lower bound 0 is under the ceiling.
+    assert.deepEqual(screenRequiredExperience({ title: SWE, description: "0-2 years of experience", minExperienceYears: null }, 1), { drop: false });
+  });
+  // No number at all.
+  it("'Freshers welcome' keeps", () => {
+    // Nothing to read, and nothing never drops.
+    assert.deepEqual(screenRequiredExperience({ title: SWE, description: "Freshers welcome to apply.", minExperienceYears: null }, 1), { drop: false });
+  });
+  // A soft minimum is a wish.
+  it("'1+ year preferred' keeps", () => {
+    // SOFT_AFTER softens it, and 1 is at the ceiling anyway.
+    assert.deepEqual(screenRequiredExperience({ title: SWE, description: "1+ year of experience preferred.", minExperienceYears: null }, 1), { drop: false });
+  });
+  // The new "Exp" word must not turn a fresher range into a drop.
+  it("'Exp Needed - 0 to 1 years' keeps", () => {
+    // Same DXC template, fresher numbers.
+    assert.deepEqual(screenRequiredExperience({ title: SWE, description: "Exp Needed - 0 to 1 years", minExperienceYears: null }, 1), { drop: false });
+  });
+  // The new domain words must not turn company history into a requirement.
+  it("'We have been a leader in analytics for 10 years' keeps", () => {
+    // The years come AFTER "in analytics", so no work word follows them.
+    assert.deepEqual(screenRequiredExperience({ title: SWE, description: "We have been a leader in analytics for 10 years.", minExperienceYears: null }, 1), { drop: false });
+  });
+});
