@@ -23,6 +23,7 @@ import {
   collectBoardPages,
   failureMark,
   getAdapter,
+  MAX_BOARD_PAGES,
   supportedProviders,
   toJobInsert,
   type JobInsertContext,
@@ -510,9 +511,22 @@ test("smartrecruiters is not registered: no adapter, never polled", () => {
 
 // The Scout selects watchlist rows by this list, so a board it cannot handle is never
 // claimed in the first place.
-test("supportedProviders reports exactly the four shipped adapters", () => {
-  // Sorted so the assertion does not depend on map insertion order.
-  assert.deepEqual([...supportedProviders()].sort(), ["ashby", "greenhouse", "lever", "workday"]);
+test("supportedProviders reports exactly the five shipped adapters", () => {
+  // Sorted so the assertion does not depend on map insertion order. icims added 2026-11-21.
+  assert.deepEqual([...supportedProviders()].sort(), ["ashby", "greenhouse", "icims", "lever", "workday"]);
+});
+
+// iCIMS (2026-11-21, pending item 7): registering it is what makes both scouts select an
+// icims watchlist row, so this goes red if the registry entry is reverted.
+test("icims is registered: text pages and its own page cap reach the loop", () => {
+  // Resolved by provider, the same lookup both scouts use.
+  const adapter = getAdapter("icims");
+  // Present.
+  assert.equal(adapter?.provider, "icims");
+  // The transport is told to hand it raw text (sitemap + HTML), not decoded JSON.
+  assert.equal(adapter?.payloadFormat, "text");
+  // One page per job needs more than the shared cap.
+  assert.ok((adapter?.maxPages ?? 0) > MAX_BOARD_PAGES);
 });
 
 // --- pagination: collectBoardPages, the loop every paged board runs through -----------
@@ -607,6 +621,24 @@ test("a single-response adapter is fetched exactly once", async () => {
   const result = await collectBoardPages(greenhouseAdapter, "zomato", fetchJson);
   assert.equal(result.ok, true);
   assert.deepEqual(requested, [url]);
+});
+
+// payloadFormat (2026-11-21, iCIMS; orch condition 1): an adapter that declares NOTHING must
+// still be asked for JSON, so no pre-iCIMS board changes how its pages are decoded.
+test("an adapter that declares no payloadFormat is fetched as json", async () => {
+  // Every format the loop asked the transport for.
+  const formats: Array<string | undefined> = [];
+  // Greenhouse declares no format.
+  assert.equal(greenhouseAdapter.payloadFormat, undefined);
+  // A transport that records the format and serves the fixture.
+  await collectBoardPages(greenhouseAdapter, "zomato", async (_url, _body, format) => {
+    // Recorded for the assertion.
+    formats.push(format);
+    // The usual payload.
+    return GREENHOUSE_PAYLOAD;
+  });
+  // Asked for JSON explicitly, never left undefined for the transport to guess.
+  assert.deepEqual(formats, ["json"]);
 });
 
 // A board whose API never says "last page" must not loop forever inside one Edge

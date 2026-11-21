@@ -68,6 +68,8 @@ export const SELECTABLE_ATS_PROVIDERS = [
   'ashby',
   // Workday boards are pollable since 2026-11-01 (scout adapter workday.ts).
   'workday',
+  // iCIMS tenants are pollable since 2026-11-21 (scout adapter icims.ts); the token is the tenant subdomain.
+  'icims',
 ] as const satisfies readonly AtsProvider[];
 
 /* Derived from the list, so the type and the dropdown cannot drift apart. */
@@ -195,6 +197,10 @@ export function noBoardFound(probedOn: string, realPortal: RealPortalKnowledge):
  * "re-probe later" (evidence: docs/harvest/2026-10-24-board-reprobes.md). Only rows
  * re-probed that day cite it; every other row keeps its older constant. */
 export const BOARD_PROBE_DATE_2026_10_24 = '2026-10-24' as const;
+
+/* Fourth probe: the iCIMS adapter parcel (pending item 7) read Atlassian APAC's robots.txt, sitemap
+ * and job pages live (evidence: docs/handoff/2026-11-21-peer-1-r2.md). Only rows probed that day cite it. */
+export const BOARD_PROBE_DATE_2026_11_21 = '2026-11-21' as const;
 
 export interface CompanyCooldown {
   readonly interview: string;
@@ -439,12 +445,15 @@ export const CURATED_COMPANIES: readonly SuggestedCompany[] = [
     category: 'Mid-Scale MNC',
     domain: 'Developer Collaboration / Jira / Confluence Cloud',
     location: 'Bengaluru',
-    atsProvider: 'greenhouse',
-    atsIdentifier: 'atlassian',
+    // The APAC iCIMS tenant (2026-11-21). It was greenhouse/atlassian until the iCIMS adapter existed.
+    atsProvider: 'icims',
+    // The tenant subdomain of careers-apac-atlassian.icims.com, the closed token shape icims.ts polls.
+    atsIdentifier: 'careers-apac-atlassian',
     cooldown: { interview: '6 Months', screening: 'None' },
     // Probed 2026-09-17: the `atlassian` token was fabricated; no board answered.
-    /* Probed 2026-10-23: GH and lever 404; the APAC iCIMS tenant serves the postings. */
-    verification: noBoardFound(BOARD_PROBE_DATE_2026_10_23, { confidence: 'confirmed', portal: 'icims (careers-apac-atlassian.icims.com)' }),
+    // Probed 2026-10-23: GH and lever 404; the APAC iCIMS tenant serves the postings.
+    /* Probed 2026-11-21: robots.txt allows the sitemap and job pages; the sitemap listed 34 jobs. */
+    verification: verified(BOARD_PROBE_DATE_2026_11_21, 34),
   },
   {
     name: 'MongoDB',

@@ -23,11 +23,15 @@ import { RobotsDisallowedError } from '../../../supabase/functions/_shared/http/
 // Sent on every page, unchanged from the single-fetch code it replaces, so a board
 // operator sees one consistent, contactable client.
 const REQUEST_HEADERS = {
-  // Every adapter here parses JSON.
+  // JSON boards (every adapter but iCIMS). A text board swaps this one header (TEXT_ACCEPT below).
   'Accept': 'application/json',
   // Identifies the scout and links the repo, as polite crawlers do.
   'User-Agent': 'applyy-scout/1.0 (+https://github.com/MallamTeja/applyyy)',
 };
+
+// What a text board (iCIMS: sitemap.xml, then HTML detail pages, 2026-11-21) is asked for in
+// place of JSON. Only this header differs, so the operator still sees the same client.
+const TEXT_ACCEPT = 'text/html, application/xml;q=0.9, */*;q=0.8';
 
 // The RFC 9309 product token robots groups are matched against ("applyy-scout"), derived
 // from the header we actually send so the two can never drift. Same token scout-ats uses.
@@ -96,9 +100,11 @@ function robotsStatusesFor(cache: RobotsCache): Map<string, number> {
 // boards one at a time, so "serial" already holds; this adds the gap between requests.
 // ponytail: 1 s is the low end of the approved 1–2 s. ~426 Workday pages + 64 robots GETs is
 // ~8 min of gap per run against a 12-min budget; raise it only if 429s continue at 1 s.
-export const WORKDAY_REQUEST_GAP_MS = 1_000;
+// ICIMS (2026-11-21) gets its own lane at the same gap: one page per job, all on *.icims.com.
+// Renamed from WORKDAY_REQUEST_GAP_MS when it began to cover two lanes.
+export const PACED_REQUEST_GAP_MS = 1_000;
 
-// Which pacing lane a URL belongs to: the Workday zone, or null for "never delayed".
+// Which pacing lane a URL belongs to: the Workday zone, the iCIMS zone, or null for "never delayed".
 function paceLane(url: string): string | null {
   // The hostname alone; an unparseable URL is not paced (the fetch itself will fail on it).
   let host: string;
@@ -111,7 +117,11 @@ function paceLane(url: string): string | null {
     return null;
   }
   // Every Workday tenant shares the one lane.
-  return host === 'myworkdayjobs.com' || host.endsWith('.myworkdayjobs.com') ? 'myworkdayjobs.com' : null;
+  if (host === 'myworkdayjobs.com' || host.endsWith('.myworkdayjobs.com')) return 'myworkdayjobs.com';
+  // Every iCIMS tenant shares another: a board read is one request per job on that zone.
+  if (host === 'icims.com' || host.endsWith('.icims.com')) return 'icims.com';
+  // Greenhouse, Lever, Ashby: never delayed.
+  return null;
 }
 
 // The pacer seam: awaited before every request a scout makes to a board's origin.
@@ -156,7 +166,7 @@ export function createRequestPacer(
 }
 
 // The run's pacer, module-global like RUN_ROBOTS_CACHE: one scout process = one run.
-const RUN_PACER: RequestPacer = createRequestPacer(WORKDAY_REQUEST_GAP_MS);
+const RUN_PACER: RequestPacer = createRequestPacer(PACED_REQUEST_GAP_MS);
 
 // Read every page of one board. `fetchImpl` and `robotsCache` are injected only so tests
 // can serve pages and robots.txt without a network and without sharing verdicts;
@@ -174,7 +184,8 @@ export function readBoardPages(
   pacer: RequestPacer = RUN_PACER,
 ): Promise<BoardPagesResult> {
   // The shared loop owns pagination, the cursor-stall check and the page cap.
-  return collectBoardPages(adapter, boardToken, async (pageUrl, body) => {
+  // `format` is the adapter's payloadFormat as collectBoardPages resolves it ("json" when undeclared).
+  return collectBoardPages(adapter, boardToken, async (pageUrl, body, format) => {
     // The shared robots gate (gateRobots below): a throw unless robots.txt allows this page.
     await gateRobots(pageUrl, fetchImpl, robotsCache, pacer);
     // The page itself waits its turn in the pacing lane too (Broadridge's PAGE got a 429 on 11-18).
@@ -183,10 +194,12 @@ export function readBoardPages(
     // makes it a JSON POST, because Workday's list endpoint answers GET with 400; no
     // body keeps the exact GET every other board has always had. scout-ats's
     // poll-fetch.ts applies the same rule, so the two scouts request pages alike.
+    // A text board asks for HTML/XML; a JSON board keeps the exact headers it always sent.
+    const headers = format === 'text' ? { ...REQUEST_HEADERS, 'Accept': TEXT_ACCEPT } : REQUEST_HEADERS;
     const init: RequestInit =
-      // No body: the exact pre-Workday GET init, byte for byte.
+      // No body: the exact pre-Workday GET init, byte for byte (for a JSON board).
       body === undefined
-        ? { headers: REQUEST_HEADERS }
+        ? { headers }
         // A body: POST it, declared as JSON beside the usual identity headers.
         : { method: 'POST', headers: { ...REQUEST_HEADERS, 'Content-Type': 'application/json' }, body };
     // The page; a URL fragment (Workday's cursor) is never sent by fetch.
@@ -194,6 +207,9 @@ export function readBoardPages(
     // A non-ok page THROWS rather than returning its body: an error page fed to the
     // parser could parse as an empty board (CLAUDE.md §6). scout.ts's catch records it.
     if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText} on ${pageUrl}`);
+    // The raw body for a text board (iCIMS). Only an explicit "text" gets it: a JSON board whose
+    // page is an HTML error still fails in res.json() below, never reaches its parser as text (§6).
+    if (format === 'text') return await res.text();
     // Decoded JSON for the adapter's pure parser.
     return await res.json();
   });

@@ -19,14 +19,22 @@ import type { RobotsCache } from "../../../packages/master-robots/src/index.ts";
  * request is the exact GET every other board has always received. The same rule lives
  * in worker/src/scout/board-pages.ts, so the two scouts request pages identically.
  * Third, after the test-only `robotsCache`, so existing callers and tests are unchanged.
+ *
+ * `format` (iCIMS, 2026-11-21) is the adapter's payloadFormat. "text" boards (a sitemap.xml and
+ * HTML detail pages) are asked for HTML/XML instead of JSON; absent or "json" keeps the exact
+ * headers every board had before. Fourth, so every existing caller is unchanged. The worker's
+ * board-pages.ts applies the same rule, so both scouts ask a text board for the same thing.
  */
-export function fetchBoard(url: string, robotsCache?: RobotsCache, body?: string): Promise<Response | null> {
+export function fetchBoard(url: string, robotsCache?: RobotsCache, body?: string, format?: "json" | "text"): Promise<Response | null> {
+  // What the board is asked for: HTML/XML for a text board, JSON for every other.
+  const accept = format === "text" ? "text/html, application/xml;q=0.9, */*;q=0.8" : "application/json";
   // Options spelled once; the server and the named test share them by construction.
   return httpFetch(url, {
     // Boards serve JSON. The transport sends our User-Agent identity itself
     // (DEFAULT_USER_AGENT — the same literal this call site used to hard-code).
     // A POST also declares its JSON body; a GET keeps exactly its one header.
-    headers: body === undefined ? { "Accept": "application/json" } : { "Accept": "application/json", "Content-Type": "application/json" },
+    // The Accept value above: JSON unless the adapter declared a text board.
+    headers: body === undefined ? { "Accept": accept } : { "Accept": accept, "Content-Type": "application/json" },
     // POST only when there is a body; spread so a GET carries neither key.
     ...(body === undefined ? {} : { method: "POST", body }),
     // Single attempt, this loop's pre-transport behavior: a many-board poll cannot

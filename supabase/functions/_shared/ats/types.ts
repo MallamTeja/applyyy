@@ -135,6 +135,15 @@ export interface AtsAdapter {
   // (2026-11-01): its list endpoint answers GET with 400 and takes the page window
   // only in a POST body. Pure and synchronous like `parse`.
   requestBody?(boardToken: string, pageUrl: string): string | null;
+  // How the transport decodes each page before `parse` sees it. OPTIONAL, and ABSENT MEANS
+  // "json": every board before iCIMS answers JSON, so none of them changes. iCIMS (2026-11-21)
+  // serves a sitemap.xml and HTML detail pages, so it declares "text" and receives the raw body.
+  // A closed union rather than a sniffing decoder (CLAUDE.md §6): a JSON board that suddenly
+  // answers with an HTML error page must still fail to decode, never reach its parser as text.
+  readonly payloadFormat?: "json" | "text";
+  // This board's page cap, when the shared MAX_BOARD_PAGES does not fit. OPTIONAL: absent keeps
+  // the shared cap. iCIMS needs more because each job is its own page (Atlassian: 1 + 34).
+  readonly maxPages?: number;
 }
 
 // --- shared field readers -------------------------------------------------------

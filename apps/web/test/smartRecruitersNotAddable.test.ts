@@ -51,11 +51,11 @@ before(async () => {
   h = (await import('react')).createElement;
 });
 
-test('ADDABLE_ATS_PROVIDERS is exactly greenhouse, lever, ashby, workday (no smartrecruiters)', () => {
-  // The exact set, in the order the dropdown shows it.
-  assert.deepEqual([...ADDABLE_ATS_PROVIDERS], ['greenhouse', 'lever', 'ashby', 'workday']);
+test('ADDABLE_ATS_PROVIDERS is exactly greenhouse, lever, ashby, workday, icims (no smartrecruiters)', () => {
+  // The exact set, in the order the dropdown shows it. icims added 2026-11-21.
+  assert.deepEqual([...ADDABLE_ATS_PROVIDERS], ['greenhouse', 'lever', 'ashby', 'workday', 'icims']);
   // And the polled list is the same exact set: SR is no longer polled either (2026-11-06).
-  assert.deepEqual([...SELECTABLE_ATS_PROVIDERS], ['greenhouse', 'lever', 'ashby', 'workday']);
+  assert.deepEqual([...SELECTABLE_ATS_PROVIDERS], ['greenhouse', 'lever', 'ashby', 'workday', 'icims']);
 });
 
 test('the curated catalog holds no smartrecruiters board, and every curated board is addable', () => {
@@ -96,6 +96,6 @@ test('the modal ATS filter offers exactly "all" plus the addable providers', () 
   assert.ok(select, 'no "Filter by ATS Provider" select rendered');
   // Every option value, in order.
   const values = [...select[1]!.matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
-  // The exact set: SR and workable gone, workday present.
-  assert.deepEqual(values, ['all', 'greenhouse', 'lever', 'ashby', 'workday']);
+  // The exact set: SR and workable gone, workday and icims (2026-11-21) present.
+  assert.deepEqual(values, ['all', 'greenhouse', 'lever', 'ashby', 'workday', 'icims']);
 });

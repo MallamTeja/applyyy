@@ -343,9 +343,9 @@ describe('T12: aggregator vs ATS twins', () => {
     const result = await runRemoteScout({ client, fetchJson: jobicyOnly, now: NOW, dryRun: false, force: false, log: () => {} });
     // The screener's own verdict stands.
     expect(upserted(ops)?.map((r) => [r.job_id, r.status, r.drop_reason])).toEqual([['agg-job-1', 'passed_filters', null]]);
-    // Non-vacuity: the twin read really ran, with the board slug, against the four employer ATSes only
+    // Non-vacuity: the twin read really ran, with the board slug, against the five employer ATSes only (icims since 2026-11-21)
     // (fix round 1, item 5: linkedin/manual/unknown rows are not employer-ATS twins).
-    expect(ops.filter((o) => o.table === 'jobs' && (o.method === 'neq' || (o.method === 'in' && (o.args[0] === 'company_slug' || o.args[0] === 'ats_provider')))).map((o) => [o.method, ...o.args])).toEqual([['in', 'company_slug', ['acme-labs']], ['in', 'ats_provider', ['greenhouse', 'lever', 'ashby', 'workday']]]);
+    expect(ops.filter((o) => o.table === 'jobs' && (o.method === 'neq' || (o.method === 'in' && (o.args[0] === 'company_slug' || o.args[0] === 'ats_provider')))).map((o) => [o.method, ...o.args])).toEqual([['in', 'company_slug', ['acme-labs']], ['in', 'ats_provider', ['greenhouse', 'lever', 'ashby', 'workday', 'icims']]]);
     // A clean run.
     expect(result.status).toBe('succeeded');
   });

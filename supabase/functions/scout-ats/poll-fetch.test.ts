@@ -167,3 +167,37 @@ test("a disallowed URL with a body is refused before the board is contacted", as
   // Non-vacuous: the gate really read the policy.
   assert.equal(state.robotsCalls, 1);
 });
+
+// --- text boards (iCIMS, 2026-11-21): payloadFormat "text" asks for HTML/XML ---
+
+test("a json (or undeclared) board still asks for application/json", async () => {
+  // Allow-all policy, so the request reaches the board.
+  const state = capturingFetch("User-agent: *\nAllow: /");
+  // No format argument: every pre-iCIMS caller.
+  await fetchBoard("https://boards.example.com/v1/boards/acme/jobs", new Map());
+  // An explicit "json", as collectBoardPages passes for an undeclaring adapter.
+  await fetchBoard("https://boards.example.com/v1/boards/acme/jobs", new Map(), undefined, "json");
+  // Both asked for JSON, exactly as before.
+  assert.deepEqual(state.targetInits.map((i) => (i.headers as Record<string, string>)["Accept"]), ["application/json", "application/json"]);
+});
+
+test("a text board (iCIMS) is asked for HTML/XML, still through the robots gate", async () => {
+  // Allow-all policy, so the request reaches the board.
+  const state = capturingFetch("User-agent: *\nAllow: /");
+  // An iCIMS sitemap request, as readBoardPage passes the adapter's format.
+  await fetchBoard("https://careers-apac-atlassian.icims.com/sitemap.xml", new Map(), undefined, "text");
+  // One board request, a plain GET asking for HTML/XML.
+  assert.equal(state.targetInits.length, 1);
+  assert.match((state.targetInits[0]!.headers as Record<string, string>)["Accept"]!, /^text\/html/);
+  // The gate read the policy first (condition 3: no bypass for text boards).
+  assert.equal(state.robotsCalls, 1);
+});
+
+test("a text board whose robots.txt disallows it is refused before contact", async () => {
+  // careers-amd.icims.com's recorded policy (2026-11-21).
+  const state = capturingFetch("User-agent: *\nDisallow: /");
+  // Refused by the same gate, typed.
+  await assert.rejects(() => fetchBoard("https://careers-amd.icims.com/sitemap.xml", new Map(), undefined, "text"), RobotsDisallowedError);
+  // Never contacted.
+  assert.equal(state.targetInits.length, 0);
+});

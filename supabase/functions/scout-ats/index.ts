@@ -160,12 +160,16 @@ const WATCHLIST_COLUMNS = "id, ats_provider, board_token, company_name, company_
 // One board page through the robots-gated transport, for collectBoardPages. A body (Workday) makes it a
 // JSON POST; without one it is the same GET as before. No robots cache override here. Shared by the
 // scan and the liveness sweep, so both read a board the same way.
-async function readBoardPage(pageUrl: string, body?: string): Promise<unknown> {
+// `format` (iCIMS, 2026-11-21) is the adapter's payloadFormat, resolved by collectBoardPages.
+async function readBoardPage(pageUrl: string, body?: string, format?: "json" | "text"): Promise<unknown> {
   // The gated request; a disallow or a non-ok status throws to the caller's catch.
-  const response = await fetchBoard(pageUrl, undefined, body);
+  const response = await fetchBoard(pageUrl, undefined, body, format);
   // Null is only possible under a notFound override this caller does not use; the
   // guard beats a blind non-null assertion (CLAUDE.md §6) and the catch records it.
   if (response === null) throw new Error("unexpected null response from fetchBoard");
+  // The raw body for a text board (iCIMS). Only an explicit "text" gets it: a JSON board whose page
+  // is an HTML error still fails in response.json() below, never reaches its parser as text (§6).
+  if (format === "text") return await response.text();
   // Decoded JSON for the adapter's pure parser.
   return await response.json();
 }

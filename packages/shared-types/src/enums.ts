@@ -188,6 +188,11 @@ export const ATS_PROVIDERS = [
    * and enum-parity.test.ts asserts this tuple's order against the replayed SQL.
    */
   'workday',
+  /**
+   * iCIMS careers tenants (2026-11-21, Atlassian APAC first). Discovery only; applying routes
+   * to a human. LAST because migration 20261121113000 APPENDS it after 'workday'.
+   */
+  'icims',
 ] as const;
 /** Union of every legal `jobs.ats_provider` / `company_watchlist.ats_provider` value. */
 export type AtsProvider = (typeof ATS_PROVIDERS)[number];

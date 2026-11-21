@@ -56,7 +56,8 @@ const SWEEP_CAP = 200;
 const SWEEP_READ_LIMIT = 1000;
 // The employer ATSes a twin may come from. linkedin, manual, unknown and smartrecruiters rows are not an employer's
 // own board posting, so they never make an aggregator copy redundant (fix round 1, item 5).
-const TWIN_ATS_PROVIDERS = ['greenhouse', 'lever', 'ashby', 'workday'] as const;
+// icims added 2026-11-21: an iCIMS tenant is the employer's own careers site, like a Workday one.
+const TWIN_ATS_PROVIDERS = ['greenhouse', 'lever', 'ashby', 'workday', 'icims'] as const;
 // Board slugs per twin read (D6, 2026-11-18): bounds the `in.(...)` list so a run's whole board set never builds one
 // oversized request URL. The twin key itself is a client-side fold (crossSourceKey), not a column, so the slug is the
 // narrowest filter the server can apply.

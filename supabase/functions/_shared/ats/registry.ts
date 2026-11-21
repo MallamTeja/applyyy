@@ -23,6 +23,9 @@ import { leverAdapter } from "./lever.ts";
 // moving it here is a separate parcel, so it is imported in place. Discovery only, POST paging.
 // SmartRecruiters is NOT imported: it is off (robots ruling 2026-11-01, see ADAPTERS below).
 import { workdayAdapter } from "../scout/adapters/workday.ts";
+// iCIMS lives beside Workday for the same reason (a careers-site board, discovery only). Text
+// pages: a sitemap, then one JSON-LD detail page per job (2026-11-21, pending item 7).
+import { icimsAdapter } from "../scout/adapters/icims.ts";
 // The adapter contract.
 import type { AtsAdapter, ParsedPosting } from "./types.ts";
 // The identity verdict boardRefusal acts on. Type-only: the verdict is computed by the
@@ -60,6 +63,10 @@ const ADAPTERS: ReadonlyMap<AtsProvider, AtsAdapter> = new Map([
   // that day (docs/harvest/2026-11-01-workday-coverage.md). Discovery only: applying
   // through Workday routes to a human.
   ["workday" as AtsProvider, workdayAdapter],
+  // iCIMS: one tenant host per company, read as its sitemap then one detail page per job.
+  // Registered 2026-11-21 for Atlassian APAC (robots allows the sitemap and job pages; each
+  // tenant sets its own robots, and the shared gate refuses a disallowing one). Discovery only.
+  ["icims" as AtsProvider, icimsAdapter],
 ]);
 
 // Look up the adapter for a watchlist row's provider.
@@ -116,12 +123,21 @@ export type BoardPagesResult =
 // plain GET every board used before Workday (2026-11-01). Both callers (scout-ats's
 // poll-fetch.ts, the worker's board-pages.ts) implement that same rule, so the two
 // scouts agree on how a page is requested as well as on what a complete board is.
+//
+// `format` (2026-11-21, iCIMS) tells the transport how to decode the page: the adapter's
+// declared `payloadFormat`, "json" when it declares none. Both transports read it, so a text
+// board decodes the same way in either scout. The parameter is still named for JSON
+// because every board but iCIMS is one.
 export async function collectBoardPages(
   adapter: AtsAdapter,
   boardToken: string,
-  fetchJson: (url: string, body?: string) => Promise<unknown>,
-  maxPages: number = MAX_BOARD_PAGES,
+  fetchJson: (url: string, body?: string, format?: "json" | "text") => Promise<unknown>,
+  // The adapter's own cap when it declares one (iCIMS reads one page per job), else the
+  // shared cap. A default that reads the earlier parameter, so callers pass nothing new.
+  maxPages: number = adapter.maxPages ?? MAX_BOARD_PAGES,
 ): Promise<BoardPagesResult> {
+  // Absent means JSON, so every pre-iCIMS adapter decodes exactly as before.
+  const format = adapter.payloadFormat ?? "json";
   // The first page's URL comes from the same builder single-page adapters use.
   let url = adapter.buildRequestUrl(boardToken);
   // Accumulated across pages, in page order.
@@ -136,7 +152,7 @@ export async function collectBoardPages(
     // A body the adapter cannot build fails the board BEFORE any request is sent.
     if (body === null) return { ok: false, reason: `page ${page}: request for this page could not be built` };
     // One request per page, through whatever transport the caller supplied.
-    const payload = await fetchJson(url, body);
+    const payload = await fetchJson(url, body, format);
     // Remember the first page for the identity check.
     if (page === 1) firstPayload = payload;
     // Each page is parsed on its own, by the same pure parser as a single-page board.

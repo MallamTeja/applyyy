@@ -394,3 +394,134 @@ describe('createRequestPacer', () => {
     expect(t.sleeps).toEqual([1_000, 1_000]);
   });
 });
+
+// TEXT BOARDS (iCIMS, 2026-11-21). The adapter declares payloadFormat "text": its pages are a
+// sitemap.xml and HTML detail pages. The orch's conditions, each pinned by a named test below:
+// (1) an adapter that declares nothing still JSON-decodes, and a non-JSON body for it is an
+//     error, never text; (3) every iCIMS request, sitemap and detail, passes the robots gate.
+describe('readBoardPages: text boards (iCIMS)', () => {
+  // Imported lazily so the suites above never depend on the adapter module.
+  const loadIcims = async () => (await import('../../supabase/functions/_shared/scout/adapters/icims.ts')).icimsAdapter;
+  // The Atlassian APAC tenant's origin.
+  const ORIGIN = 'https://careers-apac-atlassian.icims.com';
+  // Its robots.txt as recorded live on 2026-11-21, verbatim: job and sitemap paths are allowed.
+  const ATLASSIAN_ROBOTS = [
+    'User-agent: *', `Sitemap: ${ORIGIN}/sitemap.xml`,
+    'Disallow: /jobs/*referral', 'Disallow: /jobs/referral', 'Disallow: /jobs/*login', 'Disallow: /jobs/login',
+    'Disallow: /jobs/*candidate', 'Disallow: /jobs/candidate', 'Disallow: /jobs/reminder', 'Disallow: /connect',
+    'Disallow: /connect/*interest', 'Disallow: /connect/interest', 'Disallow: /connect/*resume', 'Disallow: /connect/resume',
+  ].join('\n');
+  // A two-job sitemap in the recorded shape.
+  const SITEMAP = `<?xml version='1.0' encoding='utf-8'?><urlset><url><loc>${ORIGIN}/jobs/intro</loc></url><url><loc>${ORIGIN}/jobs/27181/principal-forward-deployed-engineer/job</loc></url><url><loc>${ORIGIN}/jobs/26751/senior-software-engineer/job</loc></url></urlset>`;
+  // A detail page carrying the recorded JSON-LD shape for one job.
+  const detail = (id: string, title: string) =>
+    `<html><head><script type="application/ld+json">${JSON.stringify({ '@type': 'JobPosting', title, url: `${ORIGIN}/jobs/${id}/x/job`, datePosted: '2026-09-24T04:00:00.000Z', jobLocation: [{ address: { addressLocality: 'Bengaluru', addressCountry: 'IN', addressRegion: 'UNAVAILABLE' } }] })}</script></head></html>`;
+  // The tenant's pages, as fetch receives them (no fragment).
+  const PAGES: Record<string, string> = {
+    [`${ORIGIN}/sitemap.xml`]: SITEMAP,
+    [`${ORIGIN}/jobs/27181/job?in_iframe=1`]: detail('27181', 'Principal Forward Deployed Engineer'),
+    [`${ORIGIN}/jobs/26751/job?in_iframe=1`]: detail('26751', 'Senior Software Engineer'),
+  };
+  // A fetch double that serves the given robots.txt and the pages, recording each URL and its Accept header.
+  function icimsFetch(robots: string) {
+    // [url, Accept] in request order.
+    const requests: Array<[string, string | undefined]> = [];
+    // The double; real Responses, as the real fetch returns.
+    const impl = (async (url: string | URL | Request, init?: RequestInit) => {
+      // What fetch actually sends: no fragment.
+      const sent = String(url).split('#')[0]!;
+      // The header the transport chose for this request.
+      requests.push([sent, (init?.headers as Record<string, string> | undefined)?.['Accept']]);
+      // robots.txt as text/plain, so master-robots reads it as a robots file.
+      if (sent.endsWith('/robots.txt')) return robotsResponse({ status: 200, body: robots });
+      // A known page, or a 404 for anything the adapter should not have asked for.
+      return PAGES[sent] === undefined ? new Response('nope', { status: 404 }) : new Response(PAGES[sent], { status: 200, headers: { 'content-type': 'text/html' } });
+    }) as typeof fetch;
+    // Both, so each test reads what it needs.
+    return { impl, requests };
+  }
+  // A pacer that never waits, so these tests are about the transport, not the clock.
+  const noPace = { before: async () => {} };
+
+  it('reads an iCIMS board as text: robots once, the sitemap, then each detail page, asking for HTML/XML', async () => {
+    // The real adapter and the recorded robots.
+    const adapter = await loadIcims();
+    const { impl, requests } = icimsFetch(ATLASSIAN_ROBOTS);
+    // The whole board through the worker transport.
+    const result = await readBoardPages(adapter, 'careers-apac-atlassian', impl, new Map(), noPace);
+    // Both jobs, as postings with their real titles and spelled-out country.
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.postings.map((p) => [p.atsJobId, p.title, p.locationRaw])).toEqual([
+      ['27181', 'Principal Forward Deployed Engineer', 'Bengaluru, India'],
+      ['26751', 'Senior Software Engineer', 'Bengaluru, India'],
+    ]);
+    // robots.txt first and once, then every page; pages ask for text, never JSON.
+    expect(requests.map(([u]) => u)).toEqual([`${ORIGIN}/robots.txt`, ...Object.keys(PAGES)]);
+    expect(requests.slice(1).every(([, accept]) => accept !== undefined && accept.startsWith('text/html'))).toBe(true);
+  });
+
+  it('condition 3: a tenant whose robots.txt is Disallow: / (careers-amd) is refused before the sitemap is requested', async () => {
+    // careers-amd.icims.com's recorded robots.txt, served for the Atlassian origin.
+    const adapter = await loadIcims();
+    const { impl, requests } = icimsFetch('User-agent: *\nDisallow: /\n');
+    // The gate's typed refusal.
+    await expect(readBoardPages(adapter, 'careers-apac-atlassian', impl, new Map(), noPace)).rejects.toBeInstanceOf(RobotsDisallowedError);
+    // Only robots.txt was ever contacted.
+    expect(requests.map(([u]) => u)).toEqual([`${ORIGIN}/robots.txt`]);
+  });
+
+  it('condition 3: detail pages pass the gate too (a robots rule on /jobs/ stops the read after the sitemap)', async () => {
+    // A tenant allowing its sitemap but not its job pages.
+    const adapter = await loadIcims();
+    const { impl, requests } = icimsFetch('User-agent: *\nDisallow: /jobs/\n');
+    // Refused at the first detail page, by the same gate.
+    await expect(readBoardPages(adapter, 'careers-apac-atlassian', impl, new Map(), noPace)).rejects.toBeInstanceOf(RobotsDisallowedError);
+    // The sitemap was read; no job page was ever contacted.
+    expect(requests.map(([u]) => u)).toEqual([`${ORIGIN}/robots.txt`, `${ORIGIN}/sitemap.xml`]);
+  });
+
+  it('condition 1: an adapter that declares no format still sends Accept: application/json and decodes JSON', async () => {
+    // The JSON fake adapter from the top of this file declares no payloadFormat.
+    const { impl } = fakeFetch();
+    // The Accept header of every page request, for the assertion.
+    const accepts: Array<string | undefined> = [];
+    // Wrap the double to read the header the transport chose.
+    const spy = ((url: string | URL | Request, init?: RequestInit) => {
+      // Pages only: robots.txt is fetched with its own headers.
+      if (!String(url).endsWith('/robots.txt')) accepts.push((init?.headers as Record<string, string> | undefined)?.['Accept']);
+      // Delegate.
+      return impl(url);
+    }) as typeof fetch;
+    // A whole JSON board, decoded as before.
+    const result = await readBoardPages(FAKE_ADAPTER, 'acme', spy, new Map());
+    expect(result.ok && result.postings.map((p) => p.atsJobId)).toEqual(['a1', 'a2', 'b1']);
+    // Both pages asked for JSON.
+    expect(accepts).toEqual(['application/json', 'application/json']);
+  });
+
+  it('condition 1: a non-JSON body for a JSON adapter is an error, never empty text', async () => {
+    // A 200 HTML page where a JSON board's page should be (a soft-200 error page).
+    const impl = (async (url: string | URL | Request) =>
+      // No robots file, then HTML for the page.
+      String(url).endsWith('/robots.txt') ? robotsResponse(NO_ROBOTS) : new Response('<html>maintenance</html>', { status: 200 })) as typeof fetch;
+    // res.json() throws; the board is failed by scout.ts's catch, never parsed as text or empty.
+    await expect(readBoardPages(FAKE_ADAPTER, 'acme', impl, new Map())).rejects.toThrow(SyntaxError);
+  });
+
+  it('paces iCIMS requests in their own lane, across tenants of the zone', async () => {
+    // A fake clock: waits are recorded, not slept.
+    let nowMs = 0;
+    // Every wait the pacer asked for.
+    const sleeps: number[] = [];
+    // A 1 s gap, the production value.
+    const pacer = createRequestPacer(1_000, () => nowMs, async (ms) => { sleeps.push(ms); nowMs += ms; });
+    // Two tenants back to back: same zone, so the second waits the full gap.
+    await pacer.before(`${ORIGIN}/sitemap.xml`);
+    await pacer.before('https://indiacareers-symplr.icims.com/sitemap.xml');
+    // A Workday request right after is in ANOTHER lane: no wait from the iCIMS requests.
+    await pacer.before('https://acme.wd1.myworkdayjobs.com/robots.txt');
+    // Exactly one wait.
+    expect(sleeps).toEqual([1_000]);
+  });
+});
