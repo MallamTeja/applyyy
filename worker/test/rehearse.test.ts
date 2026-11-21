@@ -17,6 +17,10 @@ import type { MasterProfile } from '@applyy/shared-types';
 import { OPEN_PREGATE_PREFERENCES } from './open-pregate.ts';
 // The job shape the pre-gate reads.
 import type { AuditorJobEmbed } from '../../supabase/functions/auditor/pregate.ts';
+// The gate's reader of the hint columns: the hint tests prove the row feeds it, not just carries keys.
+import { boardHintsFromSelect } from '../../supabase/functions/_shared/screen/work-auth-gate.ts';
+// The CLI source, for the SELECT-shape pin.
+import { readFileSync } from 'node:fs';
 
 // A job today's open gates keep: a junior title, no stated experience, remote.
 const OPEN_JOB: AuditorJobEmbed = { title: 'Software Engineer', description_raw: 'Build web services.', location_raw: 'Remote', min_experience_years: null, discovered_via: null };
@@ -238,8 +242,31 @@ describe("sqlConfigReader + preGateJobFromRow (the rehearse CLI's read-only load
 
   it("preGateJobFromRow keeps the gate's fields as read and refuses a wrongly typed one", () => {
     // A live-shaped row.
-    expect(preGateJobFromRow({ title: 'SDE', description_raw: 'JD', location_raw: null, min_experience_years: '8', discovered_via: 'manual' })).toEqual({ title: 'SDE', description_raw: 'JD', location_raw: null, min_experience_years: '8', discovered_via: 'manual' });
+    // The board-hint columns read null when not selected (2026-11-21), which the gate reads as "no hints".
+    expect(preGateJobFromRow({ title: 'SDE', description_raw: 'JD', location_raw: null, min_experience_years: '8', discovered_via: 'manual' })).toEqual({ title: 'SDE', description_raw: 'JD', location_raw: null, min_experience_years: '8', discovered_via: 'manual', ats_provider: null, ashby_secondary: undefined, ashby_workplace: null, ashby_country: null });
     // A number where text belongs is a wiring fault, not "unknown".
     expect(() => preGateJobFromRow({ title: 7 })).toThrow(/title is number/);
+  });
+
+  // Peer 2 r1 gap (2026-11-21): the rehearsal's re-check must read the same Ashby hints as the auditor,
+  // or a rehearsal refuses a job the live pipeline passed on its secondary location.
+  it('preGateJobFromRow carries the Ashby board-hint columns so the gate reads them', () => {
+    // A row as `supabase db query -o json` returns it: jsonb decoded (probed live 2026-11-21).
+    const job = preGateJobFromRow({ title: 'SDE', description_raw: 'JD', location_raw: 'San Francisco', min_experience_years: null, discovered_via: null, ats_provider: 'ashby', ashby_secondary: [{ location: 'Bengaluru', address: { postalAddress: { addressCountry: 'India' } } }], ashby_workplace: 'Hybrid', ashby_country: 'United States' });
+    // The gate's own reader finds the secondary place.
+    expect(boardHintsFromSelect(job)).toEqual({ secondaryLocations: ['Bengaluru, India'], remoteHqCountry: null });
+    // A secondary list that is not a list is a wiring fault, never "no hints".
+    expect(() => preGateJobFromRow({ ats_provider: 'ashby', ashby_secondary: '[]' })).toThrow(/ashby_secondary is string/);
+  });
+
+  it('the rehearsal SELECT picks the three Ashby JSON paths under the aliases the gate reads', () => {
+    // The CLI's source: its SQL is a template string, so the shape is pinned by source.
+    const source = readFileSync(new URL('../src/cli/rehearse-assist.ts', import.meta.url), 'utf8');
+    // Each alias from its raw_payload path, the SQL spelling of BOARD_HINT_SELECT.
+    expect(source).toMatch(/j\.raw_payload->'secondaryLocations' ashby_secondary/);
+    // Text, so the gate's === "Remote" compare sees a plain string.
+    expect(source).toMatch(/j\.raw_payload->>'workplaceType' ashby_workplace/);
+    // The nested HQ country as text.
+    expect(source).toMatch(/j\.raw_payload#>>'\{address,postalAddress,addressCountry\}' ashby_country/);
   });
 });

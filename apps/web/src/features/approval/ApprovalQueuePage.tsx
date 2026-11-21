@@ -139,6 +139,10 @@ import { checkBeforeApprove } from './approveCheck';
 import type { ApproveHold } from './approveCheck';
 // Apply on approve (P1-6): asks dispatch-apply to start the applier once per approve action.
 import { requestDispatch } from './dispatchApply';
+// Bulk drop (parcel 8, 2026-11-21): the "which ticked rows may one click send" rule and the reason every row records.
+import { BULK_DROP_DETAIL, bulkDropTargets } from './bulkDrop';
+// The bar: count, Clear, and the inline-confirmed "Drop N selected".
+import { BulkDropBar } from './bulkDropBar';
 
 import './ApprovalQueuePage.css';
 
@@ -677,6 +681,9 @@ export function ApprovalQueuePage(): ReactElement {
      what is open, Bucket B tracks what is closed, so an empty set means every Bucket B row is
      open, which keeps the "a flagged row is read by default" rule. */
   const [foldedB, setFoldedB] = useState<ReadonlySet<string>>(() => new Set());
+  /* Rows Teja TICKED for a bulk drop (parcel 8, 2026-11-21). Only ids: a tick can outlive its row (settled, or hidden
+     by a search), so what a click may send is derived below from the visible rows, never read from this set alone. */
+  const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
   /* THE DOCKED AI CHAT (Teja 2026-11-06): the ONE row whose chat shows in the right-hand dock, or null.
      Page state, not DiffView state, so a cross-bucket remount keeps the dock on the same row, and so
      there can never be two chats open: the dock holds exactly this id's chat, and that chat's edits
@@ -1143,6 +1150,9 @@ export function ApprovalQueuePage(): ReactElement {
   }, [dockId, dockDiff]);
   // How many reviewable rows the view lets through, for "Showing X of Y" and the no-match state.
   const shownCount = bucketA.length + bucketBShownCount;
+  /* What "Drop N selected" sends: ticked rows the operator can SEE, Bucket B's visible rows then Bucket A, as the
+     page renders them. Hidden Bucket B rows stay out, as they do for Approve all; settled rows are gone from both. */
+  const bulkTargets = bulkDropTargets(selected, [...bucketB.filter((diff) => !bucketBFilteredOut.has(diff.applicationId)), ...bucketA].map((diff) => diff.applicationId));
 
   /* THE DOOR. Wired to the database on 2026-09-17; until then this function
      added ids to a React Set and wrote nothing, so the row vanished from the
@@ -2278,6 +2288,15 @@ export function ApprovalQueuePage(): ReactElement {
         </div>
       ) : null}
 
+      {/* BULK DROP (parcel 8, 2026-11-21): shown only while a visible row is ticked. Each row still goes through
+          settle(): one advance_application_status RPC per row as the human, outcomes reported per kind, and a row
+          that fails stays on screen and ticked, so one failure never hides the others or loses the selection. */}
+      <BulkDropBar
+        targets={bulkTargets}
+        onClear={() => setSelected(new Set())}
+        onDrop={(ids) => void settle(ids, 'dropped_filter', BULK_DROP_DETAIL)}
+      />
+
       {/* The deferred description read failed (2026-11-09). Said once, above the buckets: without it the
           pay-band chips cannot be computed and every AI chat stays locked, and both would otherwise look
           like "no warning" and "not ready" with no reason given (CLAUDE.md section 6). */}
@@ -2426,6 +2445,18 @@ export function ApprovalQueuePage(): ReactElement {
                     {/* One toolbar per row, same order in both buckets: read it, see it, then ask the AI. A named
                         group so a screen reader says which job these three buttons act on. */}
                     <div className="queue__row-tools" role="group" aria-label={`${diff.jobTitle} at ${diff.companyName}`}>
+                      {/* Tick for a bulk drop (2026-11-21). A label around the box, button-styled, so it sits in the
+                          toolbar's row and the whole chip is the hit target; the input's own name says which job. */}
+                      <label className="button button--secondary">
+                        <input
+                          type="checkbox"
+                          checked={selected.has(diff.applicationId)}
+                          onChange={() => toggle(setSelected, diff.applicationId)}
+                          aria-label={`Select ${diff.jobTitle} at ${diff.companyName} to drop`}
+                        />
+                        {/* Short visible word; the accessible name above carries the row. */}
+                        Select
+                      </label>
                       <button
                         type="button"
                         className="button button--secondary"
@@ -2596,6 +2627,18 @@ export function ApprovalQueuePage(): ReactElement {
                     </div>
                     {/* Bucket B's toolbar, same order and size. */}
                     <div className="queue__row-tools" role="group" aria-label={`${diff.jobTitle} at ${diff.companyName}`}>
+                      {/* Tick for a bulk drop (2026-11-21). A label around the box, button-styled, so it sits in the
+                          toolbar's row and the whole chip is the hit target; the input's own name says which job. */}
+                      <label className="button button--secondary">
+                        <input
+                          type="checkbox"
+                          checked={selected.has(diff.applicationId)}
+                          onChange={() => toggle(setSelected, diff.applicationId)}
+                          aria-label={`Select ${diff.jobTitle} at ${diff.companyName} to drop`}
+                        />
+                        {/* Short visible word; the accessible name above carries the row. */}
+                        Select
+                      </label>
                       <button
                         type="button"
                         className="button button--secondary"

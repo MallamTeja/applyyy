@@ -187,7 +187,8 @@ describe('the production seams always supply the re-check (the optional fields a
     // The Supabase gateway's source.
     const source = readFileSync(new URL('../src/supabase-gateway.ts', import.meta.url), 'utf8');
     // The four gate fields and the human-picked marker ride the jobs read.
-    expect(source).toMatch(/select\('id, apply_url, disappeared_at, company_name, ats_provider, title, description_raw, location_raw, min_experience_years, discovered_via'\)/);
+    // Plus the Ashby board-hint aliases (2026-11-21), from the gate's own constant so the two selects cannot drift.
+    expect(source).toMatch(/select\(`id, apply_url, disappeared_at, company_name, title, description_raw, location_raw, min_experience_years, discovered_via, \$\{BOARD_HINT_SELECT\}`\)/);
     // The key is always set (null when the job is missing), so "absent" can only be a fake.
     expect(source).toMatch(/preGateJob: preGateJobOf\(/);
     // And it loads the preferences.

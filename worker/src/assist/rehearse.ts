@@ -233,8 +233,13 @@ export function preGateJobFromRow(row: Record<string, unknown>): AuditorJobEmbed
   const years = row['min_experience_years'];
   // Wrong type: refuse.
   if (years !== null && years !== undefined && typeof years !== 'number' && typeof years !== 'string') throw new Error(`pre-gate job: min_experience_years is ${typeof years}`);
-  // The five fields.
-  return { title: text('title'), description_raw: text('description_raw'), location_raw: text('location_raw'), min_experience_years: years ?? null, discovered_via: row['discovered_via'] ?? null };
+  // The Ashby secondary list (2026-11-21): the CLI hands jsonb over decoded, so anything but a list or null is a wiring
+  // fault; a string here would read as "no hints" and silently judge the job without its secondary places.
+  const secondary = row['ashby_secondary'];
+  // Wrong shape: refuse, same as a mistyped text column.
+  if (secondary !== null && secondary !== undefined && !Array.isArray(secondary)) throw new Error(`pre-gate job: ashby_secondary is ${typeof secondary}, expected a list`);
+  // The five fields, then the board-hint columns the gate's boardHintsFromSelect reads (same as the gateway's preGateJobOf).
+  return { title: text('title'), description_raw: text('description_raw'), location_raw: text('location_raw'), min_experience_years: years ?? null, discovered_via: row['discovered_via'] ?? null, ats_provider: text('ats_provider'), ashby_secondary: secondary, ashby_workplace: text('ashby_workplace'), ashby_country: text('ashby_country') };
 }
 
 /**

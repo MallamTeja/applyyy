@@ -7,6 +7,8 @@
 // TypeScript types do not currently describe.
 import { describe, expect, it } from 'vitest';
 import { createSupabaseGateway, type SupabaseLike } from '../src/supabase-gateway.ts';
+// The gate's own reader of the hint aliases: the test proves the claimed row feeds it, not just carries keys.
+import { boardHintsFromSelect } from '../../supabase/functions/_shared/screen/work-auth-gate.ts';
 
 /** Builds a fake client that records the calls the gateway makes. */
 function fakeClient(overrides: Partial<SupabaseLike> = {}) {
@@ -458,7 +460,7 @@ describe('createSupabaseGateway.claimApplications', () => {
     // Asked for by id, for exactly the claimed rows' jobs.
     // company_name rides the same read, so the employer costs no extra round trip.
     // The pre-gate fields ride it too (B2, P1-6), so the re-check before a live submit needs no second read.
-    expect(jobQueries).toEqual([{ columns: 'id, apply_url, disappeared_at, company_name, ats_provider, title, description_raw, location_raw, min_experience_years, discovered_via', column: 'id', ids: ['job-1'] }]);
+    expect(jobQueries).toEqual([{ columns: 'id, apply_url, disappeared_at, company_name, title, description_raw, location_raw, min_experience_years, discovered_via, ats_provider, ashby_secondary:raw_payload->secondaryLocations, ashby_workplace:raw_payload->workplaceType, ashby_country:raw_payload->address->postalAddress->addressCountry', column: 'id', ids: ['job-1'] }]);
   });
 
   // B2 (P1-6, 2026-11-05): the re-check judges the job with the values the database holds.
@@ -476,6 +478,28 @@ describe('createSupabaseGateway.claimApplications', () => {
     const [row] = await gateway.claimApplications('applier:run-1', 5);
     // Verbatim: the gate reads exactly these.
     expect(row !== undefined && 'preGateJob' in row ? row.preGateJob : 'missing').toEqual({ title: 'Software Engineer', description_raw: 'Requires 8+ years.', location_raw: 'Pune, India', min_experience_years: 8, discovered_via: ['scout-ats'] });
+  });
+
+  // Peer 2 r1 gap (2026-11-21): the re-check dropped ats_provider and the Ashby aliases, so its work-auth gate
+  // always saw NO_BOARD_HINTS and could refuse a job the auditor had passed on its secondary location.
+  it('carries the Ashby board-hint aliases onto preGateJob so the re-check gate reads the same hints as the auditor', async () => {
+    // An Ashby job whose only India signal is a secondary location.
+    const { client } = claimClient(
+      // The claimed row, real wire shape.
+      [{ id: 'app-1', job_id: 'job-1', tailored_profile: null }],
+      // The job row as PostgREST returns the BOARD_HINT_SELECT aliases (JSON already decoded).
+      { data: [{ id: 'job-1', apply_url: 'https://jobs.ashbyhq.com/acme/1', disappeared_at: null, company_name: 'Acme', ats_provider: 'ashby', title: 'Software Engineer', description_raw: 'JD', location_raw: 'San Francisco', min_experience_years: null, discovered_via: null, ashby_secondary: [{ location: 'Bengaluru', address: { postalAddress: { addressCountry: 'India' } } }], ashby_workplace: 'Hybrid', ashby_country: 'United States' }], error: null },
+    );
+    // The gateway under test.
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+    // One claim.
+    const [row] = await gateway.claimApplications('applier:run-1', 5);
+    // The embed the re-check hands to the gate.
+    const job = row !== undefined && 'preGateJob' in row ? row.preGateJob : null;
+    // Present at all: a missing job would be a different bug.
+    expect(job).not.toBeNull();
+    // The gate's own reader finds the secondary place: the hints survived the claim.
+    expect(boardHintsFromSelect(job!)).toEqual({ secondaryLocations: ['Bengaluru, India'], remoteHqCountry: null });
   });
 
   // THE PROVIDER HALF OF THE WORKDAY GUARD (2026-11-01): apply-one parks a row whose job is

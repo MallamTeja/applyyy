@@ -57,6 +57,8 @@ import type { FilterRuleRow, JobInsert, JobRow } from "../contracts/shared-types
 // via the orchestrator, plan B). It is still upstream of the approval gate and inside the insert guard's allowlist, so
 // the hole described above stays closed. Every reader of this union must now say what it does with a held row:
 // the scouts insert it as is; the screener (screener/queue.ts) leaves the row where it is.
+// UPDATED 2026-11-21 (W1): nothing produces 'discovered' here since 2026-11-18 and the held fields are gone. The member
+// stays only because screener/queue.ts (another owner) still names it; narrow the union together with that reader.
 export type ScreenedInsertStatus = "passed_filters" | "dropped_filter" | "discovered";
 
 // One `applications` row, born already carrying its verdict.
@@ -119,11 +121,8 @@ export interface ScreenedBatchPlan {
   // look identical from outside. These are what make the difference observable.
   readonly passedCount: number;
   readonly droppedCount: number;
-  // HELD: ALWAYS EMPTY since 2026-11-18 (a blank-description row is now born passed_filters, Teja 21:46 IST). Kept
-  // only for worker/src/scout/remote-run.ts, which still reads it; remove both together. Never counted as a pass.
-  readonly held: readonly string[];
-  // The held list's length, beside the other two counters.
-  readonly heldCount: number;
+  // NO held/heldCount (deleted 2026-11-21, W1): they counted blank-description rows parked at 'discovered' (the
+  // 2026-11-12 hold). Since 2026-11-18 such a row is born passed_filters, so passedCount + droppedCount cover the batch.
 }
 
 // Adapt a row the Scout or Screener runner reads into the narrow shape the cascade reads.
@@ -215,9 +214,6 @@ export function planScreenedApplications(
   // A Set, because nine rules over fifty jobs would otherwise repeat the same
   // "title_blocklist has no blocked_titles configured" fifty times and bury the signal.
   const warnings = new Set<string>();
-  // No producer since 2026-11-18 (the hold is gone). Kept only because worker/src/scout/remote-run.ts still reads
-  // held/heldCount; delete both with that reader (outside this parcel).
-  const held: string[] = [];
 
   // One pass over the batch; the cascade short-circuits internally on the first drop.
   for (const entry of entries) {
@@ -312,11 +308,8 @@ export function planScreenedApplications(
     dropped,
     warnings: [...warnings],
     // Derived rather than counted separately, so the counts can never disagree with the
-    // rows actually planned. Held rows are neither passes nor drops (2026-11-12).
-    passedCount: inserts.length - dropped.length - held.length,
+    // rows actually planned. Every row is a pass or a drop (the 2026-11-12 hold is gone).
+    passedCount: inserts.length - dropped.length,
     droppedCount: dropped.length,
-    // The held list and its count.
-    held,
-    heldCount: held.length,
   };
 }

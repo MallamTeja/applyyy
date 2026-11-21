@@ -34,6 +34,9 @@ import type { ClaimedApplication } from './apply-one.ts';
 import type { AuditorJobEmbed } from '../../supabase/functions/auditor/pregate.ts';
 // The config loader, moved to _shared in 7a98b79.
 import { loadPreGatePreferences, type ConfigReader } from '../../supabase/functions/_shared/pregate-config-loader.ts';
+// The auditor's and matcher's board-hint embed (ats_provider + three Ashby JSON paths), reused so the re-check selects
+// exactly what the gate's boardHintsFromSelect reads; a hand-copied list would drift from it.
+import { BOARD_HINT_SELECT } from '../../supabase/functions/_shared/screen/work-auth-gate.ts';
 
 /** What a Supabase-shaped client must offer. Deliberately minimal. */
 export interface SupabaseLike {
@@ -297,7 +300,10 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
         // fronted on careers.company.com is recognisable only by this column, not its URL.
         // B2 (P1-6, 2026-11-05): the four pre-gate fields and the human-picked marker ride it too, so the
         // re-check before a live submit judges the job with no second read.
-        await client.from('jobs').select('id, apply_url, disappeared_at, company_name, ats_provider, title, description_raw, location_raw, min_experience_years, discovered_via').in('id', jobIds),
+        // 2026-11-21: plus BOARD_HINT_SELECT (it carries ats_provider), so the re-check's work-auth gate sees the Ashby
+        // secondary/remote-HQ hints the auditor judged with; without them it read NO_BOARD_HINTS and could refuse a job
+        // the auditor passed on its secondary location.
+        await client.from('jobs').select(`id, apply_url, disappeared_at, company_name, title, description_raw, location_raw, min_experience_years, discovered_via, ${BOARD_HINT_SELECT}`).in('id', jobIds),
         'claimApplications: read jobs.apply_url',
       ) as Array<{ id: string; apply_url: string | null; disappeared_at?: string | null; company_name?: string | null; ats_provider?: AtsProvider | null } & Partial<AuditorJobEmbed>> | null;
       // Keyed by job id so each claimed row finds its URL in one lookup.
@@ -710,6 +716,7 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
 function preGateJobOf(job: (Partial<AuditorJobEmbed> & { id: string }) | undefined): AuditorJobEmbed | null {
   // No job row: the re-check refuses the row (job_unreadable).
   if (job === undefined) return null;
-  // The five fields the auditor's pre-gate reads.
-  return { title: job.title ?? null, description_raw: job.description_raw ?? null, location_raw: job.location_raw ?? null, min_experience_years: job.min_experience_years ?? null, discovered_via: job.discovered_via ?? null };
+  // The five fields the auditor's pre-gate reads, null-defaulted;
+  // then the board-hint columns AS HELD (absent stays absent), since boardHintsFromSelect validates their unknown shapes itself.
+  return { title: job.title ?? null, description_raw: job.description_raw ?? null, location_raw: job.location_raw ?? null, min_experience_years: job.min_experience_years ?? null, discovered_via: job.discovered_via ?? null, ats_provider: job.ats_provider, ashby_secondary: job.ashby_secondary, ashby_workplace: job.ashby_workplace, ashby_country: job.ashby_country };
 }

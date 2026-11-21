@@ -504,12 +504,10 @@ test("no-description: a technical title with no description is born passed_filte
   );
   // Born in the Ready to tailor lane, with no drop reason.
   assert.deepEqual(planned.inserts, [{ job_id: "wd-1", status: "passed_filters", drop_reason: null }]);
-  // Nothing held: the hold no longer exists.
-  assert.deepEqual(planned.held, []);
   // Not a drop: nothing for the drop log.
   assert.equal(planned.dropped.length, 0);
   // Counters agree with the rows: one pass.
-  assert.deepEqual([planned.passedCount, planned.droppedCount, planned.heldCount], [1, 0, 0]);
+  assert.deepEqual([planned.passedCount, planned.droppedCount], [1, 0]);
 });
 
 // The shape that passes is a non-empty string after trimming. A lenient truthiness read would
@@ -578,7 +576,7 @@ test("T12: an ATS board row sharing company and title with an applied ATS job is
   assert.deepEqual([planned.inserts[0]!.status, planned.inserts[0]!.drop_reason ?? null], ["passed_filters", null]);
 });
 
-// --- held: no description, not judgeable yet (2026-11-12) ---------------------------------------------------
+// --- no description (held 2026-11-12, a pass since 2026-11-18; the held fields deleted 2026-11-21, W1) ------------
 // Teja via the orchestrator (17:30 IST, plan B): 668 Workday rows in 3 days had an EMPTY description and were dropped
 // as tech_gate_unclassified. Missing data must not become an answer (CLAUDE.md section 6), so a blank description
 // with a title the gate passes OR cannot classify is HELD. A title the gate clearly rejects still drops by its own code.
@@ -608,17 +606,15 @@ test("no-description: a blank description still meets the cascade (a title_block
   assert.deepEqual([planned.inserts[0]!.status, planned.inserts[0]!.drop_reason], ["dropped_filter", "title_blocklist"]);
 });
 
-test("held: a blank description with a title a TITLE RULE rejects still drops by that rule's code", () => {
+test("no-description: a blank description with a title a TITLE RULE rejects still drops by that rule's code", () => {
   // A seniority title (Rule 1): the gate's verdict is about the title, which is there to judge.
   const planned = planScreenedApplications([{ jobId: "wd-s", row: { ...BASE_ROW, title: "AVP Software Engineer", description_raw: null } }], [], BASE_CONTEXT, TECH_PREFS);
-  // Dropped by the rule, not held.
+  // Dropped by the rule.
   assert.deepEqual(planned.inserts, [{ job_id: "wd-s", status: "dropped_filter", drop_reason: "title_seniority" }]);
-  // Nothing held.
-  assert.equal(planned.heldCount, 0);
 });
 
-test("held: a mixed batch counts passed, dropped and held apart, and they sum to the rows", () => {
-  // One of each: a pass (text present), an exclusion drop, a hold.
+test("no-description: a mixed batch counts passed and dropped, and they sum to the rows", () => {
+  // A pass with text, an exclusion drop, and a blank-text row (a pass since 2026-11-18).
   const planned = planScreenedApplications([
     // A recognised title with text.
     { jobId: "p", row: { ...BASE_ROW, fingerprint: "fp-p", title: "Software Engineer", description_raw: "Build React apps." } },
@@ -627,8 +623,18 @@ test("held: a mixed batch counts passed, dropped and held apart, and they sum to
     // A recognised title without text.
     { jobId: "h", row: { ...BASE_ROW, fingerprint: "fp-h", title: "Software Engineer", description_raw: "  " } },
   ], [], BASE_CONTEXT, TECH_PREFS);
-  // The blank one is a pass now (2026-11-18), so two passes, one drop, none held.
-  assert.deepEqual([planned.passedCount, planned.droppedCount, planned.heldCount], [2, 1, 0]);
-  // And the held list stays empty.
-  assert.deepEqual(planned.held, []);
+  // The blank one is a pass now (2026-11-18), so two passes and one drop.
+  assert.deepEqual([planned.passedCount, planned.droppedCount], [2, 1]);
+  // Every row is a pass or a drop: the counters sum to the batch.
+  assert.equal(planned.passedCount + planned.droppedCount, planned.inserts.length);
+});
+
+// W1 (2026-11-21): held/heldCount are deleted. They answered "how many blank-description rows were parked at
+// 'discovered'?" (the 2026-11-12 hold); since 2026-11-18 no row is held, so passedCount/droppedCount answer the whole
+// batch. A closed key set, so a revived field (or a new one) has to be added here on purpose.
+test("the plan carries exactly inserts, dropped, warnings and the two counters", () => {
+  // Any batch: the shape does not depend on the rows.
+  const planned = planScreenedApplications([{ jobId: "k", row: { ...BASE_ROW, title: "Software Engineer", description_raw: null } }], [], BASE_CONTEXT, TECH_PREFS);
+  // The positive shape, sorted so key order is not the assertion.
+  assert.deepEqual(Object.keys(planned).sort(), ["droppedCount", "dropped", "inserts", "passedCount", "warnings"].sort());
 });

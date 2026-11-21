@@ -130,8 +130,12 @@ async function main(): Promise<void> {
   // 2. Everything the checks and the rehearsal read, in one SELECT, owner-scoped (system_settings
   // holds two accounts; an unfiltered read once answered for the wrong one, CLAUDE.md §6).
   // Task 3: plus the five job fields the live re-check judges (title, JD, location, experience, discovered_via).
+  // 2026-11-21: plus the Ashby board hints under BOARD_HINT_SELECT's aliases, in SQL spelling (this is raw SQL, not a
+  // PostgREST select): the list as jsonb, the two scalars as text so the gate's === "Remote" compare sees a plain string.
   const [row] = select(`select a.status, a.user_id, a.tailored_profile, j.apply_url, j.company_name, j.ats_provider,
       j.title, j.description_raw, j.location_raw, j.min_experience_years, j.discovered_via,
+      j.raw_payload->'secondaryLocations' ashby_secondary, j.raw_payload->>'workplaceType' ashby_workplace,
+      j.raw_payload#>>'{address,postalAddress,addressCountry}' ashby_country,
       (select count(*) from system_settings s where s.user_id = a.user_id) n_settings,
       (select system_enabled from system_settings s where s.user_id = a.user_id) sys_on,
       (select auto_apply_on_approve from system_settings s where s.user_id = a.user_id) auto_on,
