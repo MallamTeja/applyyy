@@ -134,6 +134,19 @@ describe('parseLeftQueue', () => {
     assert.deepEqual([first(rows).source, first(rows).stage, first(rows).code, first(rows).reason], [null, null, null, null]);
   });
 
+  // B (2026-11-21): the approval gate writes {"drop_reason": "rejected at approval gate"}; reading only reason/detail
+  // showed "No reason was recorded" on 4 live rows. RED ON REVERT: code is null without the fallback.
+  it('reads detail.drop_reason as the code when detail.reason is absent, and reason wins when both exist', () => {
+    // The approval-gate note shape.
+    const gate = first(mod.parseLeftQueue([app(A, 'dropped_filter')], [change(A, 'awaiting_approval', 'dropped_filter', '2026-11-06T09:00:00Z'), note(A, '2026-11-06T09:00:00Z', { drop_reason: 'rejected at approval gate' })]));
+    // The recorded reason now reaches the row.
+    assert.equal(gate.code, 'rejected at approval gate');
+    // Both present: the specific reason code is kept, as before.
+    const both = first(mod.parseLeftQueue([app(A, 'dropped_filter')], [change(A, 'awaiting_approval', 'dropped_filter', '2026-11-06T09:00:00Z'), note(A, '2026-11-06T09:00:00Z', { reason: 'posting_stale', drop_reason: 'work_auth' })]));
+    // reason first.
+    assert.equal(both.code, 'posting_stale');
+  });
+
   it('gives nulls when the note detail fields are not non-empty strings', () => {
     // Numbers, empty strings and nulls are not usable text.
     const rows = mod.parseLeftQueue([app(A, 'failed')], [
@@ -191,12 +204,33 @@ describe('parseLeftQueue', () => {
 
 describe('reopenTarget', () => {
   it('sends failed to needs_verification', () => {
-    // The one offered move.
-    assert.equal(mod.reopenTarget('failed'), 'needs_verification');
+    // The one offered move, for a failure that is not the tailor's.
+    assert.equal(mod.reopenTarget({ status: 'failed', code: 'unanswerable_question' }), 'needs_verification');
+    // No code recorded: still offered, as before.
+    assert.equal(mod.reopenTarget({ status: 'failed', code: null }), 'needs_verification');
   });
   it('offers nothing for any other status', () => {
     // Every other status, dropped_filter included, gets no button.
-    for (const s of statuses) if (s !== 'failed') assert.equal(mod.reopenTarget(s as never), null, s);
+    for (const s of statuses) if (s !== 'failed') assert.equal(mod.reopenTarget({ status: s as never, code: null }), null, s);
+  });
+  // C (2026-11-21): a tailor failure never produced a valid resume, so needs_verification (check it by hand and
+  // apply) would send Teja to apply with nothing to send. RED ON REVERT: the old rule offered it for every failed row.
+  it('offers nothing for a failed row the tailor failed (no valid resume ever existed)', () => {
+    // Both tailor failure reasons (supabase/functions/_shared/tailor/persist.ts TailorFailureReason).
+    for (const code of ['tailor_validation_failed', 'tailor_input_unusable']) assert.equal(mod.reopenTarget({ status: 'failed', code }), null, code);
+  });
+});
+
+// A (2026-11-21): the section is for jobs that left WITHOUT being applied. An applied job the employer later
+// rejected (or that moved on to screening, an OA, an interview or an offer) is done, not "left".
+describe('LIVE_OR_DONE_STATUSES', () => {
+  it('holds every post-apply status, so an applied-then-rejected job is not listed as left', () => {
+    // RED ON REVERT: the old list stopped at applied, so 3 live rows at rejected showed as "left".
+    for (const s of ['applied', 'employer_screening', 'oa_pending', 'interview', 'offer', 'rejected']) assert.ok(mod.LIVE_OR_DONE_STATUSES.includes(s as never), s);
+  });
+  it('still lists the statuses that really mean "left without applying"', () => {
+    // These must stay readable by the section.
+    for (const s of ['failed', 'dropped_filter', 'dropped_duplicate', 'passed_filters']) assert.ok(!mod.LIVE_OR_DONE_STATUSES.includes(s as never), s);
   });
 });
 

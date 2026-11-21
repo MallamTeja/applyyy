@@ -40,7 +40,7 @@ function actorWords(actor: string, stage: string | null): string {
   return `the ${actor}`;
 }
 
-/* The reason line: the sentence, else the code as words, else an honest blank. */
+/* The reason line: the sentence, else the code as words, else an honest blank. Also the group key (2026-11-21). */
 function reasonWords(row: LeftQueueRow): string {
   // The human sentence wins.
   if (row.reason !== null) return row.reason;
@@ -93,14 +93,16 @@ function LeftQueueItem(props: {
           </>
         ) : null}
       </p>
-      {/* Why, in the best words on file. */}
-      <p className="left-queue__reason">
-        {reasonWords(row)}
-        {/* Which script or screen wrote it, muted, when known. */}
-        {row.stage !== null ? <> <span className="identifier">{row.stage}</span></> : null}
-        {/* The source, when it adds something the stage did not. */}
-        {row.source !== null && row.source !== row.stage ? <> <span className="identifier">{row.source}</span></> : null}
-      </p>
+      {/* Which script or screen wrote it, muted, when known. The reason sentence itself is the group heading
+          (2026-11-21), so it is not repeated on every row. */}
+      {row.stage !== null || row.source !== null ? (
+        <p className="left-queue__reason">
+          {/* The stage, when known. */}
+          {row.stage !== null ? <span className="identifier">{row.stage}</span> : null}
+          {/* The source, when it adds something the stage did not. */}
+          {row.source !== null && row.source !== row.stage ? <> <span className="identifier">{row.source}</span></> : null}
+        </p>
+      ) : null}
       {/* A way back exists only for some statuses; none means no button and no empty space. */}
       {target !== null ? (
         /* The confirm opens in place of the button, as on the other queues. */
@@ -148,13 +150,20 @@ export function LeftQueueSection(props: {
   readonly locked: (id: string) => boolean;
   // True after an unknown outcome on this id.
   readonly frozen: (id: string) => boolean;
-  // The status a Re-open sends this status to, or null for no button; passed in so the view owns no rule.
-  readonly reopenTarget: (status: ApplicationStatus) => ApplicationStatus | null;
+  // The status a Re-open sends this row to, or null for no button; passed in so the view owns no rule. Takes the
+  // row (2026-11-21) because a tailor failure is told apart by its code, not its status.
+  readonly reopenTarget: (row: LeftQueueRow) => ApplicationStatus | null;
   // Called only from the inline confirm's Confirm.
   readonly onReopen: (row: LeftQueueRow, to: ApplicationStatus) => void;
 }): ReactElement {
   // Destructured once for readability below.
   const { read, locked, frozen, reopenTarget, onReopen } = props;
+  /* Grouped by reason (2026-11-21: 51 rows in one flat list hid the pattern). The rows arrive newest first
+     (parseLeftQueue), so a Map in first-seen order puts the group with the newest row first, and keeps each
+     group's rows newest first. */
+  const groups = new Map<string, LeftQueueRow[]>();
+  // Only a ready read has rows to group.
+  for (const row of read.kind === 'ready' ? read.rows : []) groups.set(reasonWords(row), [...(groups.get(reasonWords(row)) ?? []), row]);
   // The summary says the count only when it is known, and says an unreadable list is unreadable.
   const title = read.kind === 'ready' ? `Left your queue (${read.rows.length})` : read.kind === 'error' ? 'Left your queue (could not read)' : 'Left your queue';
   return (
@@ -175,11 +184,21 @@ export function LeftQueueSection(props: {
         /* Only after a successful read. */
         <p className="panel__clear">Nothing has left your queue.</p>
       ) : (
-        /* One line per job. */
+        /* One group per reason, one line per job inside it. */
         <ul className="left-queue__list">
-          {read.rows.map((row) => (
-            /* Keyed by application id, so a row's confirm follows it. */
-            <LeftQueueItem key={row.id} row={row} locked={locked(row.id)} frozen={frozen(row.id)} target={reopenTarget(row.status)} onReopen={onReopen} />
+          {[...groups].map(([reason, rows]) => (
+            /* Keyed by the reason, unique by construction of the Map. */
+            <li key={reason}>
+              {/* The shared reason, said once, with how many jobs left for it. */}
+              <p className="left-queue__reason"><strong>{reason}</strong> ({rows.length})</p>
+              {/* The jobs, newest first. */}
+              <ul className="left-queue__list">
+                {rows.map((row) => (
+                  /* Keyed by application id, so a row's confirm follows it. */
+                  <LeftQueueItem key={row.id} row={row} locked={locked(row.id)} frozen={frozen(row.id)} target={reopenTarget(row)} onReopen={onReopen} />
+                ))}
+              </ul>
+            </li>
           ))}
         </ul>
       )}

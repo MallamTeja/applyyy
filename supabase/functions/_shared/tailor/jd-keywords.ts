@@ -223,7 +223,9 @@ function appearsInDecoded(keyword: string, decoded: string): boolean {
   if (entry) return entry.pattern.test(decoded);
   // Another spelling of a vocabulary term ("Microsoft Azure", "Postgres", "Amazon Web Services") uses
   // that term's curated pattern, so a skill name and a posting that spell one technology two ways agree.
-  const canonical = canonicalSkillTerm(keyword);
+  // CASE-KEPT lookup (2026-11-21): canonicalSkillTerm went case-blind for skill names, but this matcher keeps its old
+  // behaviour exactly, so a lowercase keyword still falls through to the escaped fallback below as it always did.
+  const canonical = termForWholeName(keyword, CASE_KEPT_PATTERNS);
   // Found: matched exactly as the term itself would be.
   if (canonical !== null) return VOCABULARY_BY_TERM.get(canonical)!.pattern.test(decoded);
   // A one-letter language uses its own stricter pattern (see LETTER_LANGUAGES); exact key, so "c" falls through.
@@ -243,12 +245,26 @@ function appearsInDecoded(keyword: string, decoded: string): boolean {
  * which files a requested skill under the master's own entry for it.
  */
 export function canonicalSkillTerm(name: string): string | null {
+  // CASE-BLIND (2026-11-21): a skill name is a whole name, never prose, so exact()'s guard against English words
+  // ("go to", "the rest of") has nothing to guard here. Case-sensitive, "azure" read as unknown and the chat added both
+  // "azure" and "Microsoft Azure" (peer 1's find). The canonical casing comes back either way.
+  return termForWholeName(name, CASE_BLIND_PATTERNS);
+}
+
+// Every vocabulary pattern with the "i" flag added, built once, in vocabulary order, for canonicalSkillTerm only.
+const CASE_BLIND_PATTERNS: readonly RegExp[] = SKILL_VOCABULARY.map(({ pattern }) => (pattern.flags.includes("i") ? pattern : new RegExp(pattern.source, `${pattern.flags}i`)));
+// The vocabulary's own patterns, case rules intact, for the prose matcher (appearsInDecoded).
+const CASE_KEPT_PATTERNS: readonly RegExp[] = SKILL_VOCABULARY.map(({ pattern }) => pattern);
+
+/* The term of the first vocabulary entry whose pattern (from `patterns`, index-aligned with SKILL_VOCABULARY)
+ * consumes the whole trimmed name, or null. One body for both case modes, so they cannot drift apart. */
+function termForWholeName(name: string, patterns: readonly RegExp[]): string | null {
   // Surrounding spaces are not part of a name.
   const trimmed = name.trim();
   // The first entry whose pattern consumes the whole name.
-  const entry = SKILL_VOCABULARY.find((candidate) => candidate.pattern.exec(trimmed)?.[0] === trimmed);
+  const index = patterns.findIndex((pattern) => pattern.exec(trimmed)?.[0] === trimmed);
   // Its canonical spelling, or none.
-  return entry?.term ?? null;
+  return index === -1 ? null : SKILL_VOCABULARY[index]!.term;
 }
 
 /**

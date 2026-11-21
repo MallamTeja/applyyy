@@ -43,8 +43,14 @@ export type LeftQueueRead =
   | { readonly kind: 'error'; readonly message: string }
   | { readonly kind: 'ready'; readonly rows: readonly LeftQueueRow[] };
 
-/* The statuses that mean "still live or done": a row at one of these is NOT in the section. */
-export const LIVE_OR_DONE_STATUSES: readonly ApplicationStatus[] = ['approved', 'applying', 'needs_verification', 'blocked_needs_human', 'applied'];
+/* The statuses that mean "still live or done": a row at one of these is NOT in the section. Done includes every
+   status AFTER applied (2026-11-21): an applied job the employer then rejected, or that moved on to screening, an
+   OA, an interview or an offer, was applied, so it never "left" the queue (3 live rejected rows were listed). */
+export const LIVE_OR_DONE_STATUSES: readonly ApplicationStatus[] = ['approved', 'applying', 'needs_verification', 'blocked_needs_human', 'applied', 'employer_screening', 'oa_pending', 'interview', 'offer', 'rejected'];
+
+/* The failure codes the TAILOR writes (supabase/functions/_shared/tailor/persist.ts TailorFailureReason): such a row
+   never had a valid resume, so sending it to needs_verification ("check it by hand and apply") has nothing to apply. */
+const TAILOR_FAILURE_CODES: ReadonlySet<string> = new Set(['tailor_validation_failed', 'tailor_input_unusable']);
 
 // The page's shared client; null when the build has no Supabase config.
 import { supabase } from '../../data/supabase';
@@ -59,7 +65,7 @@ import { rowLabel } from '../health/RecoveryQueue';
 const KNOWN: ReadonlySet<string> = new Set(APPLICATION_STATUSES);
 // The only shape an application id has; anything else never reaches an `in` filter.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// Bounds the applications read; far above the real count (13 at 2026-11-07).
+// Bounds the applications read; far above the real count (51 measured on 2026-11-21; re-count, never trust this).
 const READ_CAP = 200;
 // Bounds the events read: a few events per application, so 1000 covers READ_CAP rows with room.
 const EVENTS_CAP = 1000;
@@ -68,12 +74,18 @@ export const LEFT_QUEUE_APPS_SELECT = 'id, status, updated_at, jobs:job_id(title
 // The events read's columns: all the parse needs to pair a change with its note. Exported for the test.
 export const LEFT_QUEUE_EVENTS_SELECT = 'application_id, event_type, agent, from_status, to_status, created_at, detail';
 
-/* The status a Re-open sends a row to, or null when it offers no button. failed -> needs_verification only. */
-export function reopenTarget(status: ApplicationStatus): ApplicationStatus | null {
+/* The status a Re-open sends a row to, or null when it offers no button. failed -> needs_verification only, and
+   never for a tailor failure (2026-11-21): the row is read whole, because the status alone cannot say whether a
+   resume ever existed. */
+export function reopenTarget(row: Pick<LeftQueueRow, 'status' | 'code'>): ApplicationStatus | null {
   // The one move we want to offer.
   const target: ApplicationStatus = 'needs_verification';
+  // The status, read once.
+  const status = row.status;
   // Only failed gets it; every other status (dropped_filter included) gets no button.
   if (status !== 'failed') return null;
+  // A tailor failure: no valid resume was ever made, so there is nothing to check by hand and apply.
+  if (row.code !== null && TAILOR_FAILURE_CODES.has(row.code)) return null;
   // Re-check against the graph, so a future edge change cannot silently make the button wrong.
   return screenMoves(status).includes(target) && heldReason(status, target) === null ? target : null;
 }
@@ -163,7 +175,9 @@ export function parseLeftQueue(apps: unknown, events: unknown): readonly LeftQue
       // How it left.
       leftAt: left === null ? null : (left.created_at as string), leftFrom: from, actor: text(left?.agent),
       // Why it left, from the paired note only.
-      source: text(d.source), stage: text(d.stage), code: text(d.reason), reason: text(d.detail),
+      // The code falls back to drop_reason (2026-11-21): the approval gate writes {"drop_reason": "rejected at approval
+      // gate"} and nothing else, so 4 live rows read "No reason was recorded" although one was.
+      source: text(d.source), stage: text(d.stage), code: text(d.reason) ?? text(d.drop_reason), reason: text(d.detail),
     });
   }
   // Newest exit first; unknown times last. Array.sort is stable, so ties keep read order.

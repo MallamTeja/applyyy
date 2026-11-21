@@ -48,8 +48,8 @@ const row = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-// A fake target rule: only failed has a way back, so the test never calls the real (parallel-built) one.
-const fakeTarget = (status: string) => (status === 'failed' ? 'needs_verification' : null);
+// A fake target rule: only failed has a way back, so the test never calls the real one. Takes the row (2026-11-21).
+const fakeTarget = (r: { status: string }) => (r.status === 'failed' ? 'needs_verification' : null);
 
 // Renders the section for a read, with optional lock/frozen predicates.
 function view(read: unknown, over: { locked?: (id: string) => boolean; frozen?: (id: string) => boolean } = {}): string {
@@ -108,6 +108,25 @@ describe('LeftQueueSection', () => {
     assert.match(view({ kind: 'ready', rows: [row({ reason: null })] }), /posting stale/);
     // Neither.
     assert.match(view({ kind: 'ready', rows: [row({ reason: null, code: null })] }), /No reason was recorded\./);
+  });
+
+  // D (2026-11-21): 51 rows in one flat list hid the pattern (46 by Teja or his scripts). Grouped by reason, the
+  // newest group first, each with its count. RED ON REVERT: the flat list has no group headings.
+  it('groups the rows by reason, newest group first, each heading with its count', () => {
+    // Two stale postings (the newer one first, as the parse sorts) and one approval-gate drop in between.
+    const html = view({ kind: 'ready', rows: [
+      row({ id: 'r1', leftAt: '2026-11-07T09:00:00+00:00' }),
+      row({ id: 'r2', leftAt: '2026-11-06T09:00:00+00:00', reason: null, code: 'rejected at approval gate' }),
+      row({ id: 'r3', leftAt: '2026-11-05T09:00:00+00:00' }),
+    ] });
+    // Two groups, in order of their newest row, each with its count.
+    const staleAt = html.indexOf('The posting was gone when the liveness check ran.</strong> (2)');
+    // The second group's heading, after the first.
+    const gateAt = html.indexOf('rejected at approval gate</strong> (1)');
+    // Both headings present, newest group first.
+    assert.ok(staleAt >= 0 && gateAt > staleAt, html);
+    // The sentence is said once, in the heading, not again on each row.
+    assert.equal(html.split('The posting was gone when the liveness check ran.').length - 1, 1);
   });
 
   it('offers no Re-open for a row with no target', () => {

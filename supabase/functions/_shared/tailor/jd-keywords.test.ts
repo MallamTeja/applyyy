@@ -234,6 +234,45 @@ test("canonicalSkillTerm maps only a name a vocabulary pattern matches whole", (
   assert.equal(canonicalSkillTerm("Dagster"), null);
 });
 
+// 2026-11-21 (peer 1's find): the chat asked for "azure", canonicalSkillTerm returned null because the Azure pattern is
+// exact() (case-sensitive, so "the azure sky" in prose is not the cloud), and the two-line room then added BOTH "azure"
+// and "Microsoft Azure". A skill NAME is a whole name, never prose, so the lookup is case-blind and returns the
+// canonical casing. Red on revert of the case-blind lookup.
+test("canonicalSkillTerm is case-blind on a whole name: azure, AZURE and Microsoft azure are all Azure", () => {
+  // The three spellings the chat produced or could produce.
+  assert.equal(canonicalSkillTerm("azure"), "Azure");
+  assert.equal(canonicalSkillTerm("AZURE"), "Azure");
+  assert.equal(canonicalSkillTerm("Microsoft azure"), "Azure");
+  // The other exact() terms the same way: a lowercase whole name still names the technology.
+  assert.equal(canonicalSkillTerm("aws"), "AWS");
+  assert.equal(canonicalSkillTerm("amazon web services"), "AWS");
+  assert.equal(canonicalSkillTerm("golang"), "Go");
+  // Case-blind is not looser: a name that only CONTAINS a term still maps to nothing.
+  assert.equal(canonicalSkillTerm("aws lambda"), null);
+  assert.equal(canonicalSkillTerm("azure devops"), null);
+});
+
+// The exact() terms are the only entries whose lookup changed (every word() pattern was already case-insensitive), so
+// they are the only ones that could now be swallowed by an earlier entry. Each must come back as itself in any case.
+test("canonicalSkillTerm: every exact() term maps to itself in any case (no entry swallows another)", () => {
+  // The case-sensitive entries of the vocabulary, as written in jd-keywords.ts.
+  const exactTerms = ["Go", "Spring", "Express", "REST", "Spark", "Helm", "AWS", "Azure", "AI", "LLM", "RAG"];
+  // Its own, lower and upper case.
+  for (const term of exactTerms) for (const spelling of [term, term.toLowerCase(), term.toUpperCase()]) assert.equal(canonicalSkillTerm(spelling), term, spelling);
+});
+
+// The case-blind lookup is for skill NAMES only. keywordAppearsIn scans prose, where exact() exists so "go to market"
+// and "the rest of" are not Go and REST. Pinned so the name fix cannot leak into the posting matcher.
+test("keywordAppearsIn keeps the exact() rule in prose: Go and REST are not credited by English words", () => {
+  // The canonical term over prose: case-sensitive as before.
+  assert.equal(keywordAppearsIn("Go", "we go to market fast"), false);
+  assert.equal(keywordAppearsIn("REST", "the rest of the team"), false);
+  // A lowercase keyword over prose behaves exactly as before 2026-11-21 (the escaped, case-insensitive fallback).
+  assert.equal(keywordAppearsIn("azure", "deploy on azure"), true);
+  // And the capitalised technology is still found.
+  assert.equal(keywordAppearsIn("Azure", "deploy on Azure"), true);
+});
+
 // AI_VOCABULARY_TERMS (2026-11-10, T13) is a second list beside the vocabulary; this keeps it from drifting. Each term must
 // be one the extractor really emits, or shapeSkillGroups would wait for a term that can never arrive.
 test("AI_VOCABULARY_TERMS: every AI term is a vocabulary term the extractor emits", () => {
