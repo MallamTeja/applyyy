@@ -1358,3 +1358,131 @@ test("a failed usage write never fails the Gemini call", { timeout: 10000 }, asy
     assert.ok(Date.now() - started < 3000, "a hung usage write must be cut off by its timeout");
   }
 });
+
+// --- CHAT RESILIENCE (tailor pending #6, 2026-11-21) ---------------------------------------
+//
+// Two measured failures: key 11 took 49 consecutive 429s with no cooldown (Google sent no
+// retry_after), and a streamed chat attempt could sit silent for the whole 15 s attempt budget
+// before the loop tried another key. Both fakes answer the way the real dependency does:
+// supabase-js returns `{ data, error }`, and a 429 is a Response, never a throw (§5).
+
+test("pause: the failover loop reports a 60 s pause for the third 429 in a row and rotates to the next key", async () => {
+  // Every RPC, so the 429's report can be read back.
+  const rpcCalls: Array<{ fn: string; args: unknown }> = [];
+  // Claims hand out 1, 2, 3...
+  let claimed = 0;
+  // The streak table says key 1 already failed twice; usage inserts succeed.
+  const db = {
+    // claim_gemini_key hands out the next index; report_gemini_result just records.
+    rpc: (fn: string, args?: unknown) => (rpcCalls.push({ fn, args }), Promise.resolve({ data: fn === "claim_gemini_key" ? ++claimed : null, error: null })),
+    // gemini_key_state answers the streak read; gemini_usage accepts the usage row.
+    from: (_table: string) => ({
+      // The streak read chain, `{ data, error }` like supabase-js.
+      select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: { consecutive_failures: 2 }, error: null }) }) }),
+      // The usage log insert.
+      insert: () => Promise.resolve({ error: null }),
+    }),
+  } as unknown as Parameters<typeof claimKey>[0];
+  // Which keys the loop tried, in order.
+  const keys: number[] = [];
+  const outcome = await callGeminiWithFailover(db, {
+    // Instant pacer and sleeps, so only the 429 logic is measured.
+    readKey: keysFrom({ 1: "k1", 2: "k2" }),
+    pacer: new GeminiPacer({ minIntervalMs: 0, clock: createVirtualClock(1000) }),
+    sleep: async () => {},
+    execute: async (_k, keyIndex) => {
+      // Recorded before answering.
+      keys.push(keyIndex);
+      // Key 1: the measured live 429, a per-minute quota with NO retry-after header or RetryInfo.
+      if (keyIndex === 1) {
+        // The body Google sent on 2026-11-20 (trimmed), with no details array.
+        const errorBody = { error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "Quota exceeded for quota metric 'API requests' and limit 'Request limit per minute for a region'" } };
+        return { ok: false, status: 429, statusText: "Too Many Requests", errorBody, rawResponse: new Response(JSON.stringify(errorBody), { status: 429 }) };
+      }
+      // Key 2 answers.
+      return { ok: true, data: { ok: 1 } };
+    },
+  });
+  // The chat still gets its answer, from the next key.
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(keys, [1, 2]);
+  // The 429 report for key 1 carries the pause, so claim_gemini_key skips it for a minute on EVERY instance.
+  const report = rpcCalls.find((c) => c.fn === "report_gemini_result" && (c.args as { p_key_index: number }).p_key_index === 1);
+  assert.equal((report?.args as { p_retry_after_seconds: number | null }).p_retry_after_seconds, 60);
+});
+
+// One complete SSE answer, as Google streams it: text plus a finishReason on the last chunk.
+const SSE_DONE = 'data: {"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]}\n\n';
+
+test("first chunk: a 200 stream that stays silent is cut after firstChunkTimeoutMs and the next key answers", async () => {
+  const rig = transientRig();
+  // How many fetches ran.
+  let fetches = 0;
+  const outcome = await generateGeminiContent(rig.db, {
+    ...rig.base,
+    maxRetries: 1,
+    // The whole attempt could last 5 s; the first-chunk timer must fire long before that.
+    timeoutMs: 5000,
+    firstChunkTimeoutMs: 20,
+    prompt: { systemInstruction: "s", userContent: "u" },
+    // Streaming on.
+    onText: () => {},
+    fetchSeam: async (_input, init) => {
+      // Counted per attempt.
+      fetches += 1;
+      // Real fetch ties the body to the signal: an abort errors the pending read.
+      const signal = init?.signal;
+      // Attempt 1: headers arrive, then nothing, until the signal fires.
+      if (fetches === 1) {
+        // A body that never enqueues on its own.
+        const body = new ReadableStream<Uint8Array>({ start(c) { signal?.addEventListener("abort", () => c.error(signal.reason)); } });
+        return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }
+      // Attempt 2: a normal stream.
+      return new Response(SSE_DONE, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    },
+  });
+  // Answered by the second key.
+  assert.equal(outcome.ok, true);
+  assert.equal(fetches, 2);
+  // The silent attempt is logged as a timeout (the usage log's "timeout" bucket keys on that prefix).
+  const errors = reportsOf(rig).filter((r) => !r.p_success).map((r) => r.p_error ?? "");
+  assert.equal(errors.length, 1);
+  assert.match(errors[0]!, /^network error: timeout: no first chunk after 20ms/);
+});
+
+test("first chunk: a stream whose first bytes arrive in time is not cut by the first-chunk timer", async () => {
+  const rig = transientRig();
+  // The encoder for the timed pieces.
+  const encoder = new TextEncoder();
+  const outcome = await generateGeminiContent(rig.db, {
+    ...rig.base,
+    maxRetries: 0,
+    timeoutMs: 5000,
+    // Longer than the 5 ms first byte, shorter than the 80 ms total.
+    firstChunkTimeoutMs: 40,
+    prompt: { systemInstruction: "s", userContent: "u" },
+    onText: () => {},
+    // First bytes at 5 ms, the answer finishes at 80 ms: past the first-chunk limit, so a timer
+    // that was not cleared on the first bytes would cut a healthy answer.
+    fetchSeam: async (_input, init) => {
+      // Real fetch ties the body to the signal; without this a fired timer would be invisible here.
+      const signal = init?.signal;
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          // An abort errors the pending read, as it does on a real response body.
+          signal?.addEventListener("abort", () => c.error(signal.reason));
+          // A keep-alive comment line: bytes, but no event yet.
+          setTimeout(() => c.enqueue(encoder.encode(": ping\n")), 5);
+          // Then the whole answer, and the end of the stream.
+          setTimeout(() => { c.enqueue(encoder.encode(SSE_DONE)); c.close(); }, 80);
+        },
+      });
+      return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    },
+  });
+  // One attempt, one answer.
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.attempts, 1);
+});

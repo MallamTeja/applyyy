@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 // Extension-suffixed specifier for Deno/Node convergence. `SupabaseClient` is a
 // type-only import inside pool.ts, so it is erased and `node --test` never has to
 // resolve the `jsr:` specifier.
-import { claimKey, discoverConfiguredKeyIndices, parseRetryAfterSeconds, reportResult } from "./pool.ts";
+import { claimKey, cooldownFor429, discoverConfiguredKeyIndices, parseRetryAfterSeconds, RATE_LIMIT_PAUSE_AFTER, RATE_LIMIT_PAUSE_SECONDS, reportResult } from "./pool.ts";
 
 // A stand-in for the Supabase client.
 //
@@ -355,3 +355,84 @@ test("discovers all 20 keys in exact numeric order up to key 20", () => {
   assert.deepEqual([...discovered], Array.from({ length: 20 }, (_, i) => i + 1));
 });
 
+
+// --- PAUSE A KEY AFTER CONSECUTIVE 429s (tailor pending #6, 2026-11-21) ----------------
+//
+// THE MEASURED BUG: on 2026-11-20 key 11 took 49 consecutive 429s ("Request limit per minute for a
+// region") with cooldown_until still NULL, because Google sent no usable retry_after and the SQL sets
+// a cooldown ONLY when one is given. So the pool kept handing out a key the API was refusing.
+
+// A fake that answers the streak read the way supabase-js does: `{ data, error }`, never a throw (§5).
+function streakClient(row: { data: unknown; error: { message: string } | null }, queried: unknown[] = []) {
+  return {
+    // `db.from('gemini_key_state')` — the table name is recorded so a wrong table cannot pass.
+    from(table: string) {
+      // Recorded first, so a test can assert which table and key were read.
+      queried.push(table);
+      return {
+        // The column list is irrelevant to the fake; the chain shape is what matters.
+        select() {
+          return {
+            // The key filter; its value is recorded so a test can assert the right key was read.
+            eq(column: string, value: unknown) {
+              // Kept beside the table name.
+              queried.push(`${column}=${String(value)}`);
+              return {
+                // One row or none, exactly as `.maybeSingle()` resolves.
+                maybeSingle: () => Promise.resolve(row),
+              };
+            },
+          };
+        },
+      };
+    },
+    // Partial client, cast only inside this helper.
+  } as unknown as Parameters<typeof claimKey>[0];
+}
+
+test("pause: a 429 that carries its own retry_after keeps the server's value and reads no streak", async () => {
+  // Everything the fake was asked for.
+  const queried: unknown[] = [];
+  // The server spoke: 37 s.
+  const seconds = await cooldownFor429(streakClient({ data: { consecutive_failures: 40 }, error: null }, queried), 11, 37);
+  // Believe the server, never the streak rule.
+  assert.equal(seconds, 37);
+  // No extra round trip on the path where the answer is already known.
+  assert.deepEqual(queried, []);
+});
+
+test("pause: the third 429 in a row with no retry_after pauses the key for the 60 s RPM window", async () => {
+  // Everything the fake was asked for.
+  const queried: unknown[] = [];
+  // Two failures already stored; this 429 (not yet reported) is the third.
+  const seconds = await cooldownFor429(streakClient({ data: { consecutive_failures: 2 }, error: null }, queried), 11, null);
+  // Paused for one per-minute quota window.
+  assert.equal(seconds, RATE_LIMIT_PAUSE_SECONDS);
+  // The window Google named in the measured error is one minute.
+  assert.equal(RATE_LIMIT_PAUSE_SECONDS, 60);
+  // The streak was read from the shared table for THIS key, not some other one.
+  assert.deepEqual(queried, ["gemini_key_state", "key_index=11"]);
+});
+
+test("pause: the first and second 429 with no retry_after set no cooldown", async () => {
+  // Streaks of 0 and 1 stored: this 429 makes 1 or 2, below the threshold of 3.
+  for (const stored of [0, 1]) {
+    // No retry_after from the server.
+    const seconds = await cooldownFor429(streakClient({ data: { consecutive_failures: stored }, error: null }), 4, null);
+    // A single blip must not idle a working key.
+    assert.equal(seconds, null, `stored streak ${stored}`);
+  }
+  // The threshold the two cases above sit under.
+  assert.equal(RATE_LIMIT_PAUSE_AFTER, 3);
+});
+
+test("pause: an unreadable or malformed streak invents no cooldown", async () => {
+  // A read error, the way supabase-js reports one: `{ data: null, error }`.
+  assert.equal(await cooldownFor429(streakClient({ data: null, error: { message: "permission denied" } }), 4, null), null);
+  // No row for that key (RLS hid it, or the key was never seeded).
+  assert.equal(await cooldownFor429(streakClient({ data: null, error: null }), 4, null), null);
+  // A non-number streak: shape-checked, never coerced (Number("") is 0, §6).
+  assert.equal(await cooldownFor429(streakClient({ data: { consecutive_failures: "9" }, error: null }), 4, null), null);
+  // A client that has no `from` chain at all (an old test double) must not crash the call.
+  assert.equal(await cooldownFor429({} as unknown as Parameters<typeof claimKey>[0], 4, null), null);
+});

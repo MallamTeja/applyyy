@@ -253,19 +253,26 @@ describe("auditorPreGateDrop reads the Ashby hint columns (pending R)", () => {
 // W2: the history set the auditor builds from the screener's own applicationHistory() read.
 describe("auditorAppliedKeys", () => {
   test("W2: keys are built from every history row with a provider and an id", () => {
-    // Two keyed rows and one id-less row.
-    const result = auditorAppliedKeys({ error: null, rows: [{ ats_provider: "greenhouse", ats_job_id: "5150422" }, { ats_provider: "lever", ats_job_id: "abc" }, { ats_provider: "greenhouse", ats_job_id: null }] });
+    // Two keyed rows (one committed, one queued) and one id-less row.
+    const result = auditorAppliedKeys({ error: null, rows: [{ ats_provider: "greenhouse", ats_job_id: "5150422", committed: true }, { ats_provider: "lever", ats_job_id: "abc", committed: false }, { ats_provider: "greenhouse", ats_job_id: null, committed: true }] }, "committed_and_queued");
     // Read.
     assert.equal(result.ok, true);
     // Exactly the two keyed rows, built as the screener builds them.
     assert.deepEqual(result.ok ? [...result.keys].sort() : null, [atsJobKeyOf("greenhouse", "5150422"), atsJobKeyOf("lever", "abc")].sort());
   });
 
+  test("W2 regate: committed_only leaves queued rows out, so a queue row can never match its own history entry", () => {
+    // The same three rows: the queued lever row is the queue row itself as the history read returns it.
+    const result = auditorAppliedKeys({ error: null, rows: [{ ats_provider: "greenhouse", ats_job_id: "5150422", committed: true }, { ats_provider: "lever", ats_job_id: "abc", committed: false }] }, "committed_only");
+    // Only the committed posting is a key.
+    assert.deepEqual(result.ok ? [...result.keys] : null, [atsJobKeyOf("greenhouse", "5150422")]);
+  });
+
   test("W2: a failed or rowless history read is a refusal, never an empty set that passes every row", () => {
     // The query errored.
-    assert.equal(auditorAppliedKeys({ error: "timeout", rows: null }).ok, false);
+    assert.equal(auditorAppliedKeys({ error: "timeout", rows: null }, "committed_and_queued").ok, false);
     // No error but no rows either: malformed, not "no history".
-    assert.equal(auditorAppliedKeys({ error: null, rows: null }).ok, false);
+    assert.equal(auditorAppliedKeys({ error: null, rows: null }, "committed_only").ok, false);
   });
 });
 
@@ -282,5 +289,24 @@ describe("auditor index wiring (pending R + W2)", () => {
     assert.match(source, /supabaseScreenQueries\(db as unknown as \{ from\(table: string\): unknown \}, new Date\(\)\)\.applicationHistory\(\)/);
     // Each tailored row is checked against it.
     assert.match(source, /auditorAlreadyAppliedDrop\(row\.jobs as unknown as AuditorJobEmbed \| null, appliedKeys\)/);
+  });
+
+  test("W2 regate: regate_queue reads committed-only history, refuses an unread one, and stamps the verdict's own code", async () => {
+    // node:fs, imported here so the module stays importable elsewhere.
+    const { readFileSync } = await import("node:fs");
+    // index.ts beside this file, independent of the cwd.
+    const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    // The regate branch alone: from its mode check to its own response.
+    const regate = source.slice(source.indexOf(`searchParams.get("mode") === "regate_queue"`), source.indexOf(`mode: "regate_queue"`));
+    // The branch was found (a missing marker would slice to an empty or wrong string).
+    assert.ok(regate.length > 0, "regate_queue branch not found in index.ts");
+    // History is scoped to committed rows, so a queue row cannot match itself.
+    assert.match(regate, /auditorAppliedKeys\([^;]*"committed_only"\)/);
+    // An unread history stops the sweep.
+    assert.match(regate, /failRun\(503, "history_unreadable"/);
+    // The stamp writes the code the verdict carries, never a fixed work_auth.
+    assert.match(regate, /update\(\{ drop_reason: code \}\)/);
+    // The event detail carries the same code.
+    assert.match(regate, /p_detail: \{ reason: code, stage: "auditor_queue_regate"/);
   });
 });

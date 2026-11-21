@@ -210,7 +210,9 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
   }
 
   // THE APPROVAL-QUEUE RE-GATE (2026-11-11, regate-queue.ts): `?mode=regate_queue` runs today's work-auth gate
-  // over rows already waiting for Teja, and does nothing else. postscreen-drain.yml calls it once per drain.
+  // over rows already waiting for Teja. Since 2026-11-21 it also drops copies of a committed ATS posting (W2) and
+  // reports rows over the experience ceiling without moving them (D9b). It does nothing else.
+  // postscreen-drain.yml calls it once per drain.
   if (new URL(req.url).searchParams.get("mode") === "regate_queue") {
     // Today's gate config; a failed read stops the run before any row moves (never "no config, pass all").
     const config = await loadPreGatePreferences(db as unknown as ConfigReader);
@@ -227,20 +229,26 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
       .in("status", ["awaiting_approval", "approved"]);
     // An unread queue is a failed run, never "nothing to drop".
     if (queueError) return await failRun(503, "queue_unreadable", queueError.message);
+    // W2 (2026-11-21): today's history, through the screener's own query, COMMITTED rows only (the queue rows are the
+    // queued history rows, so including them would match each row to itself; see AppliedKeyScope in pregate.ts).
+    const committed = auditorAppliedKeys(await supabaseScreenQueries(db as unknown as { from(table: string): unknown }, new Date()).applicationHistory(), "committed_only");
+    // An unread history stops the sweep: an empty set would keep every copy (never a silent pass, CLAUDE.md §6).
+    if (!committed.ok) return await failRun(503, "history_unreadable", committed.reason);
     // The sweep, with the two writes it may make.
-    const report = await regateQueue((queue ?? []) as unknown as QueueRow[], config.preferences, {
+    const report = await regateQueue((queue ?? []) as unknown as QueueRow[], config.preferences, committed.keys, {
       // drop_reason first, only while the row is still awaiting approval at the stamp we read.
-      async stampDropReason(id, expectedUpdatedAt) {
+      async stampDropReason(id, expectedUpdatedAt, code) {
         // Zero rows back means someone moved or edited it since the read.
-        // The reason the DB trigger requires before the auditor may take this edge (20261111220000).
-        const { data, error } = await db.from("applications").update({ drop_reason: "work_auth" })
+        // The verdict's code: the DB trigger lets the auditor take this edge only for work_auth or already_applied
+        // (20261111220000, widened by 20261121110000).
+        const { data, error } = await db.from("applications").update({ drop_reason: code })
           // Still waiting, and untouched since our read: Teja's own action always wins over the sweep.
           .eq("id", id).eq("status", "awaiting_approval").eq("updated_at", expectedUpdatedAt).select("updated_at");
         // The new stamp, or null when nothing matched.
         return { updatedAt: (data?.[0]?.updated_at as string | undefined) ?? null, error: error?.message ?? null };
       },
-      // The move; the DB lets the auditor take this edge only with a work_auth drop_reason (20261111220000).
-      async dropRow(id, updatedAt, reason) {
+      // The move; the DB lets the auditor take this edge only with a work_auth or already_applied drop_reason.
+      async dropRow(id, updatedAt, code, reason) {
         // The stamp guard refuses (PT409) if anything wrote the row after our reason write.
         const { error } = await db.rpc("advance_application_status", {
           // The row.
@@ -249,8 +257,8 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
           p_to_status: "dropped_filter",
           // The agent the edge and the trigger name.
           p_agent: "auditor",
-          // The gate's words, so the event log says which place failed.
-          p_detail: { reason: "work_auth", stage: "auditor_queue_regate", detail: reason },
+          // The verdict's code and words, so the event log says which gate fired and why.
+          p_detail: { reason: code, stage: "auditor_queue_regate", detail: reason },
           // OUR write's stamp: anything after it makes this refuse (PT409).
           p_expected_updated_at: updatedAt,
         });
@@ -352,7 +360,7 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
   // W2 (2026-11-21): today's application history, read once and only when a `tailored` row will be checked. The
   // screener's own query, so the set the auditor checks is exactly the set the screener checks at insert time.
   // The cast: the port takes any `from`-shaped client; supabase-js's generic builder overflows tsc against it (TS2589).
-  const historyKeys = needsGate ? auditorAppliedKeys(await supabaseScreenQueries(db as unknown as { from(table: string): unknown }, new Date()).applicationHistory()) : null;
+  const historyKeys = needsGate ? auditorAppliedKeys(await supabaseScreenQueries(db as unknown as { from(table: string): unknown }, new Date()).applicationHistory(), "committed_and_queued") : null;
   // A failed read stops the run before any row moves: an empty set would pass every retitled copy.
   if (historyKeys !== null && !historyKeys.ok) return await failRun(503, "history_unreadable", historyKeys.reason);
   // The set itself; empty only when no row needs it (needsGate false), in which case the loop never reads it.

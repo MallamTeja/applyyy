@@ -73,7 +73,8 @@ export function auditorPreGateDrop(job: AuditorJobEmbed | null, preferences: Pre
    is inserted, so a retitled copy of an applied job inserted BEFORE the original was applied (Canonical 111d1ff4 vs
    8e9d58ce) reached the queue. The auditor is the last agent before a human, so it asks again against today's
    history. `appliedKeys` is built by the caller from the screener's own applicationHistory() read (committed and
-   awaiting_approval rows); a `tailored` row is never in it, so a row cannot match itself. */
+   awaiting_approval rows); a `tailored` row is never in it, so a row cannot match itself. The queue re-gate
+   (regate-queue.ts, 2026-11-21) passes committed rows only, for the same reason. */
 export type AuditorAlreadyAppliedDrop = { readonly code: "already_applied"; readonly reason: string } | null;
 
 // The verdict for one row's job against the history keys.
@@ -97,7 +98,15 @@ export interface AppliedHistoryKeyRow {
   readonly ats_provider: string | null;
   // jobs.ats_job_id of the history row's job.
   readonly ats_job_id: string | null;
+  // True for approved and later (ApplicationHistoryRow.committed); false for an awaiting_approval row.
+  readonly committed: boolean;
 }
+
+/* Which history rows become keys; required, so no caller gets a scope by default (CLAUDE.md section 6).
+   - committed_and_queued: the main run. Its rows are `tailored`, never in the history, so a queued copy counts too.
+   - committed_only: the approval-queue re-gate (2026-11-21). Its rows ARE the queued history rows, so a queued key
+     would match the row itself and drop every keyed row in the queue. */
+export type AppliedKeyScope = "committed_and_queued" | "committed_only";
 
 // The history read's result: the screener's ScreenQueryResult shape, restated as the two fields used here.
 export interface AppliedHistoryResult {
@@ -109,13 +118,15 @@ export interface AppliedHistoryResult {
 
 // The keys `auditorAlreadyAppliedDrop` checks against, or a refusal. A failed or rowless read must stop the run: an
 // empty set would pass every row, which is the fail-open CLAUDE.md section 6 names (W2, 2026-11-21).
-export function auditorAppliedKeys(result: AppliedHistoryResult): { readonly ok: true; readonly keys: ReadonlySet<string> } | { readonly ok: false; readonly reason: string } {
+export function auditorAppliedKeys(result: AppliedHistoryResult, scope: AppliedKeyScope): { readonly ok: true; readonly keys: ReadonlySet<string> } | { readonly ok: false; readonly reason: string } {
   // An error, or no rows array at all (supabase-js returns [] for "none", never null on success).
   if (result.error !== null || !Array.isArray(result.rows)) return { ok: false, reason: `applications history query failed: ${result.error ?? "no rows returned"}` };
-  // Every keyed row, queued or committed, exactly as the screener's context.ts builds appliedAtsJobKeys.
+  // Every keyed row in scope; committed_and_queued matches the screener's context.ts appliedAtsJobKeys.
   const keys = new Set<string>();
   // One pass over the history.
   for (const row of result.rows) {
+    // The re-gate's own rows are queued: skip queued rows there (strict `!== true`, so a missing flag adds nothing).
+    if (scope === "committed_only" && row.committed !== true) continue;
     // Null for an id-less or aggregator row, which can never match.
     const key = atsJobKeyOf(row.ats_provider, row.ats_job_id);
     // Kept only when there is an identity to match on.

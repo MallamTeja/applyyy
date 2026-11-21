@@ -1829,6 +1829,11 @@ export async function handleResumeAssist(req: Request, deps: AssistDeps): Promis
     generation: { maxOutputTokens: MAX_OUTPUT_TOKENS, thinkingLevel: THINKING_LEVEL },
     // Fail fast (2026-11-18): live waits of 42 s and 67.5 s ended in "AI is busy". 15 s per attempt, not 20 s.
     timeoutMs: 15_000,
+    // Streaming path only (2026-11-21, tailor pending #6): an attempt with no response bytes after 8 s is
+    // cut and the next key tried, instead of sitting silent for all 15 s. Thinking is "low", so a healthy
+    // attempt starts streaming well inside it; a slow but streaming answer still gets the full 15 s.
+    // ponytail: unmeasured guess (the DB stores no time-to-first-chunk); tune from live logs.
+    firstChunkTimeoutMs: 8_000,
     // Two retries ride out a same-minute 503 on both models (13:17, 2026-11-05); more would bill patience the operator no longer has.
     maxRetries: 2,
     // Short gaps between attempts, and the first 503 switches to the fallback model with no sleep (client contract A).

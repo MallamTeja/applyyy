@@ -32,6 +32,8 @@ import {
   claimKey,
   reportResult,
   parseRetryAfterSeconds,
+  // Turns a 429 with no retry_after into a pause once the key's shared streak says it keeps failing.
+  cooldownFor429,
   type KeyClaim,
   type KeyReader,
   denoKeyReader,
@@ -511,8 +513,11 @@ export async function callGeminiWithFailover<T>(
       // `??`) on statusText: HTTP/2 yields "", which would leave "HTTP 429: " bare.
       const errorText = withGoogleError(`HTTP 429: ${execResult.statusText || "Too Many Requests"}`, execResult.errorBody);
 
+      // The server's retry_after, or a 60 s pause on the 3rd 429 in a row without one: key 11 took
+      // 49 consecutive 429s on 2026-11-20 with no cooldown because Google sent no delay (pool.ts).
+      const cooldownSeconds = await cooldownFor429(db, keyIndex, retryAfterSeconds);
       // Tagged so a 429 names the model whose quota ran out (quotas are per model).
-      await reportResult(db, keyIndex, false, retryAfterSeconds, withModel(errorText, currentModel));
+      await reportResult(db, keyIndex, false, cooldownSeconds, withModel(errorText, currentModel));
 
       options.onKeyRotated?.({
         fromKeyIndex: keyIndex,
@@ -819,6 +824,12 @@ export interface GenerateGeminiOptions {
   // last chunk that carried them. A failure before the first chunk is today's status; a failure
   // mid-stream (dropped connection, malformed chunk, no finishReason) is transient (status 0).
   readonly onText?: (accumulatedText: string) => void;
+  // FIRST-CHUNK TIMEOUT (2026-11-21, resume-assist chat). Streaming only (ignored without onText).
+  // An attempt that has received NO response bytes this many ms after it started is aborted as a
+  // timeout (status 0, transient), so the loop moves to the next key instead of waiting out the
+  // whole `timeoutMs`. Cleared on the first bytes, so a slow but streaming answer keeps the full
+  // `timeoutMs`. Absent = no such timer, the exact behaviour every other caller had before.
+  readonly firstChunkTimeoutMs?: number;
   // Forwarded to the failover loop; see GeminiFailoverOptions.onAttempt.
   readonly onAttempt?: (info: GeminiAttemptInfo) => void;
   // Forwarded to the failover loop; see GeminiFailoverOptions.interactive.
@@ -833,6 +844,8 @@ export interface GenerateGeminiOptions {
 async function readGeminiStream(
   body: ReadableStream<Uint8Array> | null,
   onText: (accumulatedText: string) => void,
+  // Called once, when the first bytes of the body arrive; the executor stops its first-chunk timer here.
+  onFirstBytes: () => void = () => {},
 ): Promise<GeminiResponseBody | { readonly failure: string }> {
   // A 200 with no body cannot be an answer.
   if (body === null) return { failure: "stream had no body" };
@@ -908,6 +921,8 @@ async function readGeminiStream(
     const { done, value: bytes } = await reader.read();
     // Closed by the server: leave the loop and let the caller check for a finishReason.
     if (done) break;
+    // Any bytes at all prove the stream is alive (a keep-alive comment counts); idempotent for the caller.
+    onFirstBytes();
     // Append the decoded bytes to whatever partial line was left.
     buffer += decoder.decode(bytes, { stream: true });
     // Every complete line in the buffer is fed; the remainder waits for more bytes.
@@ -1069,6 +1084,14 @@ export async function generateGeminiContent(
       // Streaming only when the caller asked for it; otherwise the exact URL every caller used before.
       const endpoint = options.onText !== undefined ? "streamGenerateContent?alt=sse" : "generateContent";
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${attemptModel ?? model}:${endpoint}`;
+      // The first-chunk limit applies only to a streamed attempt that asked for one; see the option.
+      const firstChunkMs = options.onText !== undefined ? options.firstChunkTimeoutMs : undefined;
+      // Its own abort switch, so the catch can tell "no first chunk" from the total timeout.
+      const firstChunk = firstChunkMs !== undefined ? new AbortController() : undefined;
+      // Armed per attempt: a retry on the next key gets a fresh window.
+      const firstChunkTimer = firstChunk !== undefined ? setTimeout(() => firstChunk.abort(), firstChunkMs) : undefined;
+      // Disarms it; clearTimeout(undefined) is a no-op, so it is safe however often it runs.
+      const stopFirstChunkTimer = () => clearTimeout(firstChunkTimer);
       try {
         const response = await fetchFn(url, {
           method: "POST",
@@ -1076,14 +1099,19 @@ export async function generateGeminiContent(
           headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
           body: JSON.stringify(requestBody),
           // Abort a hung attempt; the rejection lands in the catch below as status 0 (transient).
-          signal: AbortSignal.timeout(timeoutMs),
+          // With a first-chunk limit, EITHER timer aborts it (AbortSignal.any: Deno and Node 20.3+).
+          signal: firstChunk !== undefined ? AbortSignal.any([AbortSignal.timeout(timeoutMs), firstChunk.signal]) : AbortSignal.timeout(timeoutMs),
         });
+
+        // Only a 200 stream waits on its first chunk. An error status already answered, so its body
+        // read must not be cut into a fake "no first chunk" that would hide the real 429 or 503.
+        if (!(response.ok && options.onText !== undefined)) stopFirstChunkTimer();
 
         // Streaming success: read the SSE body. Inside this try, so a mid-stream drop or the abort
         // timer lands in the catch below as status 0 (transient), like a failed non-streaming fetch.
         if (response.ok && options.onText !== undefined) {
-          // Parsed into the non-streaming shape, or a named failure.
-          const streamed = await readGeminiStream(response.body, options.onText);
+          // Parsed into the non-streaming shape, or a named failure; the first bytes disarm the timer.
+          const streamed = await readGeminiStream(response.body, options.onText, stopFirstChunkTimer);
           // A corrupt or truncated stream is transient: another attempt may well stream cleanly.
           if ("failure" in streamed) return { ok: false, status: 0, statusText: streamed.failure };
           return { ok: true, data: streamed };
@@ -1116,6 +1144,9 @@ export async function generateGeminiContent(
           rawResponse: response,
         };
       } catch (err) {
+        // The first-chunk switch fired: named apart from the total timeout, and still starting with
+        // "timeout" so the usage log buckets it as `timeout` and the loop treats it as transient.
+        if (firstChunk?.signal.aborted === true) return { ok: false, status: 0, statusText: `timeout: no first chunk after ${firstChunkMs}ms` };
         // AbortSignal.timeout rejects with a TimeoutError (older runtimes: AbortError); name it so
         // the log says "timeout" instead of a cryptic "The operation was aborted due to timeout".
         const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
@@ -1124,6 +1155,9 @@ export async function generateGeminiContent(
           status: 0,
           statusText: timedOut ? `timeout after ${timeoutMs}ms` : err instanceof Error ? err.message : String(err),
         };
+      } finally {
+        // A ref'd timer left running would keep the isolate (or the test runner) alive after the answer.
+        stopFirstChunkTimer();
       }
     },
   });

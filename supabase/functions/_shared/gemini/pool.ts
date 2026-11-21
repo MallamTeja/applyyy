@@ -198,6 +198,58 @@ export async function reportResult(
   if (error !== null) console.error(`[gemini-pool] report_gemini_result failed for key ${keyIndex}: ${error.message}`);
 }
 
+// PAUSE A KEY AFTER CONSECUTIVE 429s THAT CARRY NO retry_after (tailor pending #6, 2026-11-21).
+//
+// THE MEASURED BUG: on 2026-11-20 key 11 took 49 consecutive 429s ("Request limit per minute for
+// a region") with `cooldown_until` still NULL. Google sent no retry-after header and no RetryInfo,
+// `parseRetryAfterSeconds` rightly returned null, and `report_gemini_result` sets a cooldown ONLY
+// when given one. So `claim_gemini_key` kept handing out a key the API was refusing, and every chat
+// that drew it burned an attempt.
+//
+// WHY THE STREAK IS READ FROM THE DATABASE, NOT HELD IN MEMORY: Edge Functions are stateless
+// isolates (see this file's header). An in-memory counter restarts at zero in every fresh isolate
+// and would almost never reach the threshold. `gemini_key_state.consecutive_failures` is already
+// maintained by `report_gemini_result` and shared by every instance, and the resulting cooldown is
+// written to the same shared row, so the pause holds for every caller. No new table or migration.
+//
+// The streak counts ALL failures, not only 429s, so a 503 then two 429s also pauses. Accepted: a key
+// that keeps failing is worth one idle minute, and a 503 alone never reaches this function.
+
+// How many 429s in a row (this one included) before a key is paused without a server-given delay.
+// Three, so one or two blips on a healthy key never idle it.
+export const RATE_LIMIT_PAUSE_AFTER = 3;
+
+// How long that pause lasts. Sixty seconds is the window Google NAMED in the measured error
+// ("Request limit per minute"): not an invented backoff, the length of the quota it reported.
+// ponytail: fixed window; a daily-quota 429 re-pauses each minute (one wasted call per key per minute).
+export const RATE_LIMIT_PAUSE_SECONDS = 60;
+
+// The cooldown to report for a 429: the server's own retry_after when it gave one, else the pause
+// once this key's streak reaches RATE_LIMIT_PAUSE_AFTER, else null (no cooldown, as before).
+//
+// Call it BEFORE `reportResult`, because the stored streak does not yet include this 429.
+// NEVER THROWS: a failed read returns null, which is exactly the old behaviour, so this cannot make
+// a call fail that would have succeeded.
+export async function cooldownFor429(db: SupabaseClient, keyIndex: number, retryAfterSeconds: number | null): Promise<number | null> {
+  // Believe the server first: no extra round trip when the answer is already known.
+  if (retryAfterSeconds !== null) return retryAfterSeconds;
+  try {
+    // This key's stored streak. RLS scopes the row to the caller, as claim_gemini_key does.
+    const { data, error } = await db.from("gemini_key_state").select("consecutive_failures").eq("key_index", keyIndex).maybeSingle();
+    // A failed read must not invent a cooldown.
+    if (error !== null) return null;
+    // Shape-checked, never coerced: a missing row or a non-number streak means "unknown" (§6).
+    const stored = (data as { consecutive_failures?: unknown } | null)?.consecutive_failures;
+    // Only a real non-negative integer counts.
+    if (typeof stored !== "number" || !Number.isInteger(stored) || stored < 0) return null;
+    // +1 for this 429, which is not reported yet.
+    return stored + 1 >= RATE_LIMIT_PAUSE_AFTER ? RATE_LIMIT_PAUSE_SECONDS : null;
+  } catch {
+    // A client without the query chain (or a thrown transport error): same as unreadable.
+    return null;
+  }
+}
+
 // Parse a `retry_after` out of a 429 response.
 //
 // BELIEVE THE SERVER, DO NOT INVENT A BACKOFF. Google's own value is the only

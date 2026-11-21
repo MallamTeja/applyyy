@@ -253,3 +253,17 @@ test("the new message is last and the prefix before the chat is identical across
   // The first ask's text minus its instruction is the second's prefix up to the chat.
   assert.equal(second.slice(0, second.indexOf("CHAT SO FAR:")), first.slice(0, first.lastIndexOf("INSTRUCTION: ")));
 });
+
+
+// --- first-chunk timeout (tailor pending #6, 2026-11-21) --------------------------------
+
+test("the streamed chat gives up on a silent attempt after 8 s with no first chunk, not the whole 15 s", async () => {
+  // Streaming path: the only path the first-chunk timer acts on.
+  const streamed = deps(ok(ANSWER));
+  // Called and drained, so the call has run.
+  await (await handleResumeAssist(post(true), streamed)).text();
+  // 8 s to the first byte: thinking is "low", so a healthy attempt starts streaming well before it.
+  assert.equal(streamed.calls[0]?.firstChunkTimeoutMs, 8_000);
+  // The total attempt budget is unchanged, so a slow but streaming answer still has 15 s.
+  assert.equal(streamed.calls[0]?.timeoutMs, 15_000);
+});
