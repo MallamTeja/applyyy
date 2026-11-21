@@ -118,9 +118,20 @@ const SOFT_HEADING = /^\W*(?:(?:examples|some|other|additional|bonus|nice)\s+(?:
 // "Minimum requirements" right after its "Preferred ..." sentence is the case this exists for.
 const HARD_HEADING = /^\W*(?:minimum|basic|required|requirements|must[- ]haves?|what you(?:'|’)ll need|what we(?:'|’)re looking for|qualifications|you have|about you|who you are)\b/i;
 
-// Titles Teja keeps whatever the JD asks (2026-11-01): interns, juniors (junior security
-// included), new grads and campus programmes. Their JDs often carry generic years boilerplate.
+// Entry-level titles: interns, juniors (junior security included), new grads and campus programmes.
+// Two rulings, newest wins:
+//   2026-11-01 (Teja): kept "whatever the JD asks", because their JDs carry generic years boilerplate.
+//   2026-11-21 14:30 (Teja, on Point72 06c55b79 "Junior Business Analyst" asking 4+ years): "yeah it need to drop".
+// So the title now only lifts the ceiling for a hard minimum UNDER ENTRY_LEVEL_HARD_FLOOR years.
 const ENTRY_LEVEL_TITLE = /\b(?:intern|interns|internship|junior|jr\.?|new grad(?:uate)?|graduate|campus|entry[- ]level|trainee|apprentice(?:ship)?|fresher|early[- ]career)\b/i;
+
+// The hard years at which an entry-level title stops protecting a JD (Teja 2026-11-21). Below it the
+// "1-2 years" boilerplate the 11-01 ruling was about still keeps; at or above it the posting is not junior.
+const ENTRY_LEVEL_HARD_FLOOR = 3;
+
+// "4+ years of experience or equivalent": a soft bar, honoured ONLY for an entry-level title. Applied to
+// every title it would let a senior posting's hard minimum leak through, so it stays scoped (11-21).
+const OR_EQUIVALENT_AFTER = /\bor (?:the )?equivalent\b/i;
 
 // Zero-width characters a board pasted into "2​+ years" (live, 2026-11-01). Removed
 // before matching, or the plus would detach from the number.
@@ -133,8 +144,9 @@ const toYears = (token: string): number => WORD_NUMBERS[token.toLowerCase()] ?? 
 // The highest HARD minimum years the posting demands, or null when it states none.
 // Null is the common case and always means keep.
 export function requiredExperienceYears(title: string, description: string | null): number | null {
-  // Entry-level roles are kept outright, before any text is read.
-  if (ENTRY_LEVEL_TITLE.test(title)) return null;
+  // Entry-level titles are READ like any other since 2026-11-21 (no early return); only the verdict at the
+  // end differs. The flag also scopes the "or equivalent" softening below to these titles.
+  const entryLevel = ENTRY_LEVEL_TITLE.test(title);
   // The running answer; null until a hard requirement is seen.
   let need: number | null = null;
   // Record a candidate minimum, ignoring company-history numbers and keeping the highest.
@@ -212,13 +224,20 @@ export function requiredExperienceYears(title: string, description: string | nul
         if (SOFT_BEFORE.test(before)) continue;
         // "3+ years ... is a plus" is a wish.
         if (SOFT_AFTER.test(after)) continue;
+        // "4+ years ... or equivalent" is a wish on an entry-level title only (see OR_EQUIVALENT_AFTER).
+        if (entryLevel && OR_EQUIVALENT_AFTER.test(after)) continue;
         // A hard, plausible minimum.
         take(years);
       }
     }
   }
+  // An entry-level title keeps a hard minimum under the floor (11-01 ruling, narrowed 11-21). `need` is read
+  // through a local typed copy because TS narrows the closure-assigned `let` to `null` here.
+  const found: number | null = need;
+  // Under the floor: the junior boilerplate case, kept as "no stated requirement".
+  if (entryLevel && found !== null && found < ENTRY_LEVEL_HARD_FLOOR) return null;
   // The highest hard minimum, or null when the posting asked for none.
-  return need;
+  return found;
 }
 
 // filter_rules.config.max_years by SHAPE: a finite, non-negative number (or a numeric string,

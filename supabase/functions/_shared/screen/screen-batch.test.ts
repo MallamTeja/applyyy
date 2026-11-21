@@ -164,12 +164,29 @@ test("experience: the cascade's experience_ceiling drops a '5+ years' JD at max_
   assert.deepEqual(planned.inserts, [{ job_id: "exp-1", status: "dropped_filter", drop_reason: "experience_ceiling" }]);
 });
 
-// And the same JD on an intern title is kept (Teja's 11-01 ruling).
-test("experience: an intern title with a '5+ years' JD passes the ceiling", () => {
+// The same JD on an intern title. Two rulings, newest wins:
+//   2026-11-01 (Teja): entry-level titles kept "whatever the JD asks".
+//   2026-11-21 14:30 (Teja, Point72 06c55b79 "Junior Business Analyst", 4+ years): "yeah it need to drop".
+// So an intern title now drops at 3+ hard years (was: passed under 11-01).
+test("experience: an intern title with a '5+ years' JD drops at the ceiling (11-21 ruling)", () => {
   const planned = planScreenedApplications(
     // An intern title.
     [{ jobId: "exp-2", row: { ...BASE_ROW, title: "Software Engineering Intern", description_raw: "5+ years of experience" } }],
     // The same ceiling.
+    [rule("experience_ceiling", { max_years: 1 })],
+    BASE_CONTEXT,
+    OPEN_PREFS,
+  );
+  // Born dropped under the cascade rule's own name, like any other title asking 3+ years.
+  assert.deepEqual(planned.inserts, [{ job_id: "exp-2", status: "dropped_filter", drop_reason: "experience_ceiling" }]);
+});
+
+// The 11-01 half that still stands: an intern title asking UNDER 3 hard years is kept, above the ceiling.
+test("experience: an intern title with a '2+ years' JD still passes the ceiling (11-01 ruling, under 3)", () => {
+  const planned = planScreenedApplications(
+    // The same intern title, the junior boilerplate the 11-01 ruling was about.
+    [{ jobId: "exp-3", row: { ...BASE_ROW, title: "Software Engineering Intern", description_raw: "2+ years of experience" } }],
+    // The same ceiling: 2 > 1 would drop any non-entry title.
     [rule("experience_ceiling", { max_years: 1 })],
     BASE_CONTEXT,
     OPEN_PREFS,

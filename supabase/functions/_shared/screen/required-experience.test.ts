@@ -16,6 +16,20 @@ import { experienceCeilingMaxYears, requiredExperienceYears, screenRequiredExper
 // A neutral title, so title-based exemptions never mask a description test.
 const SWE = "Software Engineer";
 
+// Point72 06c55b79 "Access and Identity Management - Junior Business Analyst" (India), excerpted verbatim from the
+// live jobs.description_raw (2026-11-21): the requirements block, and the company line whose "30 years" is history.
+const POINT72_JD = [
+  "What’s required",
+  "",
+  "• 4+ years of experience as a Business Analyst supporting Access & Identity Management (AIM) and Identity Governance & Administration (IGA) initiatives",
+  "",
+  "• Hands‑on experience with SailPoint, JIRA (case management and workflows), Splunk, Confluence/Wiki tools, and SQL",
+  "",
+  "About Point72",
+  "",
+  "Point72 is a leading global alternative investment firm led by Steven A. Cohen. Building on more than 30 years of investing experience, Point72 seeks to deliver superior returns for its investors through fundamental and systematic investing strategies across asset classes and geographies.",
+].join("\n");
+
 describe("requiredExperienceYears: hard minimums are read", () => {
   // The 11-04 incident: a range reads as its lower bound.
   it("Axiad '6-8 years of hands-on software development experience' is 6", () => {
@@ -164,18 +178,54 @@ describe("requiredExperienceYears: boilerplate and soft wording are NOT requirem
   });
 });
 
-describe("requiredExperienceYears: entry-level titles are exempt (Teja's 11-01 ruling)", () => {
+// Two rulings, newest wins:
+//   2026-11-01 (Teja): "Titles Teja keeps whatever the JD asks": interns, juniors, new grads, campus programmes.
+//   2026-11-21 14:30 (Teja, on Point72 06c55b79 "Junior Business Analyst" asking 4+ years): "yeah it need to drop".
+// So an entry-level title still keeps a JD whose HARD minimum is under 3 years (the generic "1-2 years"
+// boilerplate the 11-01 ruling was about), but 3 or more hard years drops like any other title.
+describe("requiredExperienceYears: entry-level titles keep under 3 hard years (11-01), drop at 3+ (11-21)", () => {
   // An intern posting that boilerplates years is still a fresher job.
   it("'Software Engineering Intern' with '2+ years of experience' is null", () => {
     assert.equal(requiredExperienceYears("Software Engineering Intern", "2+ years of experience with Python."), null);
   });
-  // Junior roles, including junior security, are kept.
+  // Junior roles, including junior security, are kept under 3 years.
   it("'Junior Security Engineer' with '2+ years of experience' is null", () => {
     assert.equal(requiredExperienceYears("Junior Security Engineer", "2+ years of experience in security."), null);
   });
-  // Campus graduate programmes are kept.
-  it("Point72 'Campus Graduate Program' is null", () => {
-    assert.equal(requiredExperienceYears("2027 Software Engineer - Campus Graduate Program", "3+ years of experience."), null);
+  // UPDATED 2026-11-21: was null under the 11-01 ruling; 3 hard years now drops even on a campus title.
+  it("Point72 'Campus Graduate Program' with '3+ years of experience' is 3 (drops since 11-21)", () => {
+    assert.equal(requiredExperienceYears("2027 Software Engineer - Campus Graduate Program", "3+ years of experience."), 3);
+  });
+  // THE CASE THAT CHANGED THE RULING: Point72's live JD (06c55b79), its requirement line verbatim.
+  it("Point72 06c55b79 'Junior Business Analyst' with '4+ years of experience as a Business Analyst' is 4", () => {
+    assert.equal(requiredExperienceYears("Access and Identity Management - Junior Business Analyst", POINT72_JD), 4);
+  });
+  // ...and it drops through the matcher's twin of the cascade rule, as experience_ceiling.
+  it("Point72 06c55b79 drops as experience_ceiling at max_years 1", () => {
+    assert.deepEqual(
+      screenRequiredExperience({ title: "Access and Identity Management - Junior Business Analyst", description: POINT72_JD, minExperienceYears: null }, 1),
+      { drop: true, code: "experience_ceiling", reason: "JD requires 4 years, ceiling is 1" },
+    );
+  });
+  // Every entry-level word in the title gets the same rule (graduate, entry-level, intern).
+  it("'Graduate Software Engineer' / 'Entry-Level Analyst' / 'Data Intern' with '5+ years of experience' are 5", () => {
+    for (const title of ["Graduate Software Engineer", "Entry-Level Analyst", "Data Intern"]) {
+      assert.equal(requiredExperienceYears(title, "5+ years of experience in data."), 5, title);
+    }
+  });
+  // Soft wording still keeps an entry-level title, whatever the number.
+  it("an entry-level title keeps soft years: 'preferred', 'nice to have', 'or equivalent'", () => {
+    for (const jd of ["4+ years of experience preferred.", "Nice to have: 4+ years of experience.", "4+ years of experience or equivalent."]) {
+      assert.equal(requiredExperienceYears("Junior Data Analyst", jd), null, jd);
+    }
+  });
+  // A range starting below 3 keeps an entry-level title ("2-5 years" asks for 2).
+  it("an entry-level title keeps a range starting below 3: '2-5 years of experience'", () => {
+    assert.equal(requiredExperienceYears("Junior Developer", "2-5 years of experience in Java."), null);
+  });
+  // "or equivalent" softens ONLY an entry-level title: a senior posting's hard bar must not leak.
+  it("'or equivalent' does NOT soften a non-entry title: 'Software Engineer' + '5+ years ... or equivalent' is 5", () => {
+    assert.equal(requiredExperienceYears(SWE, "5+ years of experience or equivalent."), 5);
   });
 });
 
@@ -258,7 +308,7 @@ describe("requiredExperienceYears: P1 #7 leaks", () => {
   it("title 'Software Engineer - 4 year degree required' is null", () => {
     assert.equal(requiredExperienceYears("Software Engineer - 4 year degree required", null), null);
   });
-  // Keep: an entry-level title stays exempt whatever its years say.
+  // Keep: an entry-level title with a programme length (not a work requirement, and under 3 anyway; 11-21 rule).
   it("title 'Graduate Engineer (2 year programme)' is null", () => {
     assert.equal(requiredExperienceYears("Graduate Engineer (2 year programme)", null), null);
   });
