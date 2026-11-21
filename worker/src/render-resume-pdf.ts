@@ -23,6 +23,9 @@ import type { Page } from 'playwright';
 import type { ResolvedResume } from '@applyy/shared-types';
 import { renderResumeHtml } from '@applyy/resume-template';
 
+// The type of page.pdf()'s argument, so the shared options are checked against Playwright's API.
+type PageOptions = NonNullable<Parameters<Page['pdf']>[0]>;
+
 /** What to render, and the page to render it on. */
 export interface RenderResumePdfInput {
   // The frozen `ResolvedResume` from `applications.tailored_profile`. Fully
@@ -45,6 +48,32 @@ export interface RenderedResume {
   readonly sha256: string;
 }
 
+/**
+ * The ONE set of page.pdf() options for a resume, shared by the submit path below and
+ * cli/resume-pages.ts, so the page-count measuring stick and the submitted artifact can
+ * never be rendered with different geometry.
+ */
+export const RESUME_PDF_OPTIONS = {
+  // A4 because the target market is India; US Letter would clip the right
+  // edge on any printer Teja or a recruiter actually uses.
+  format: 'A4',
+  // The template's own print stylesheet decides the margins, so Playwright
+  // must not add a second set on top of them.
+  margin: { top: '0', right: '0', bottom: '0', left: '0' },
+  // Background colours and rules are part of the approved design; without
+  // this the PDF silently differs from the preview the human signed off.
+  printBackground: true,
+  // NO header or footer template. Chromium's default footer stamps the DATE
+  // and the page URL into every page, which would (a) put "localhost" on a
+  // document sent to an employer and (b) make the bytes differ every day,
+  // destroying the determinism the approval guarantee depends on.
+  displayHeaderFooter: false,
+  // The template's print stylesheet owns the page: `@page { size: A4; margin: 14mm }`
+  // (packages/resume-template/src/print-styles.ts). Without this flag Chromium may use
+  // `format` and its own geometry instead, and calibration would only pass by accident.
+  preferCSSPageSize: true,
+} as const satisfies PageOptions;
+
 export async function renderResumePdf(input: RenderResumePdfInput): Promise<RenderedResume> {
   // The SAME function the approval preview calls. Not a copy, not a variant.
   const html = renderResumeHtml(input.resume);
@@ -54,22 +83,8 @@ export async function renderResumePdf(input: RenderResumePdfInput): Promise<Rend
   // chance of the browser resolving something else off disk beside it.
   await input.page.setContent(html, { waitUntil: 'domcontentloaded' });
 
-  const bytes = await input.page.pdf({
-    // A4 because the target market is India; US Letter would clip the right
-    // edge on any printer Teja or a recruiter actually uses.
-    format: 'A4',
-    // The template's own print stylesheet decides the margins, so Playwright
-    // must not add a second set on top of them.
-    margin: { top: '0', right: '0', bottom: '0', left: '0' },
-    // Background colours and rules are part of the approved design; without
-    // this the PDF silently differs from the preview the human signed off.
-    printBackground: true,
-    // NO header or footer template. Chromium's default footer stamps the DATE
-    // and the page URL into every page, which would (a) put "localhost" on a
-    // document sent to an employer and (b) make the bytes differ every day,
-    // destroying the determinism the approval guarantee depends on.
-    displayHeaderFooter: false,
-  });
+  // The shared options, so the CLI measures exactly what is submitted.
+  const bytes = await input.page.pdf(RESUME_PDF_OPTIONS);
 
   // ---- Two corrections applied to Chromium's raw output --------------------
   //

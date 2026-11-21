@@ -18,7 +18,9 @@
 // render, submit, then upload what was actually sent.
 import { afterAll, beforeAll, expect, test } from 'vitest';
 import { chromium, type Browser } from 'playwright';
-import { renderResumePdf } from '../src/render-resume-pdf.ts';
+import { RESUME_PDF_OPTIONS, renderResumePdf } from '../src/render-resume-pdf.ts';
+// Reads the CLI's source: it is a top-level script and cannot be imported without launching Chromium.
+import { readFileSync } from 'node:fs';
 import { extractPdfText } from '../src/ats-parse-check.ts';
 // The typed fixture. It replaces an inline literal that was cast past the
 // compiler with `as unknown as` and had drifted into a shape the renderer has
@@ -244,3 +246,52 @@ test('hands back a plain Uint8Array, not a Node Buffer', async () => {
     await page.close();
   }
 }, 120_000);
+
+// ---- preferCSSPageSize: the @page rule is the page geometry, not Playwright's default --------
+// The template's print stylesheet (packages/resume-template/src/print-styles.ts) declares
+// `@page { size: A4; margin: 14mm }` and says the worker MUST pass preferCSSPageSize: true.
+// Without it Chromium is free to use the `format` option instead of the stylesheet, and the
+// one-page calibration passed only because today's Chromium happens to apply the @page margin
+// anyway. These two tests pin the flag at both call sites, so a Chromium upgrade cannot quietly
+// move the page geometry away from what the preview showed.
+
+test('renderResumePdf asks Chromium to honour the stylesheet @page size (preferCSSPageSize)', async () => {
+  // A real page, so the render runs end to end exactly as at submit time.
+  const page = await browser.newPage();
+  // The options each page.pdf() call received, captured without changing what the call does.
+  const seen: unknown[] = [];
+  // The real method, kept so the wrapper still produces the genuine PDF bytes.
+  const realPdf = page.pdf.bind(page);
+  // Record the options, then defer to the real Chromium call.
+  page.pdf = async (options) => {
+    // Captured for the assertion below.
+    seen.push(options);
+    // The real render; the post-processing in renderResumePdf still runs on true bytes.
+    return realPdf(options);
+  };
+  // Closed even when an assertion fails.
+  try {
+    // The one production entry point for the submitted PDF.
+    await renderResumePdf({ resume, page });
+    // Exactly one PDF render per resume: a second call would mean a second, unpinned geometry.
+    expect(seen).toHaveLength(1);
+    // The flag itself: the stylesheet's @page decides size and margins.
+    expect(seen[0]).toMatchObject({ preferCSSPageSize: true });
+    // And the shared constant is what was passed, so the CLI below cannot drift from it.
+    expect(seen[0]).toEqual(RESUME_PDF_OPTIONS);
+  } finally {
+    // Released either way.
+    await page.close();
+  }
+}, 120_000);
+
+test('cli/resume-pages measures with the same page.pdf options as the submit path', () => {
+  // The CLI is a top-level script (it launches Chromium on import), so it is pinned by its source:
+  // the positive shape "page.pdf(RESUME_PDF_OPTIONS)", never the absence of some other literal.
+  const source = readFileSync(new URL('../src/cli/resume-pages.ts', import.meta.url), 'utf8');
+  // Its one pdf call passes the shared constant, so the measuring stick matches what is submitted.
+  expect(source).toMatch(/page\.pdf\(RESUME_PDF_OPTIONS\)/);
+  // And it renders through no second, hand-written options literal. Counted as CALLS
+  // (`await page.pdf(`), because the file's header comment names page.pdf() in prose.
+  expect(source.match(/await page\.pdf\(/g)).toHaveLength(1);
+});

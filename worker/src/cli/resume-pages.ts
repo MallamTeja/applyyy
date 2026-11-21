@@ -9,13 +9,14 @@
 // re-measure of the 11 two-page rows after the template deploy (2026-11-07). Each line is one
 // row: its id, status, the typography step renderResumeHtml picked, the model's verdict at the
 // minimum (fitsOnePage), and the real page count from Chromium's page.pdf() via pdf.js.
-// Uses the same HTML and the same page.pdf() options as renderResumePdf, but NOT renderResumePdf
+// Uses the same HTML and the same page.pdf() options (RESUME_PDF_OPTIONS) as renderResumePdf, but NOT renderResumePdf
 // itself: that one throws on a two-page resume (the submit gate), and here the count is the point.
 import { readFileSync } from 'node:fs';
 import { chromium } from 'playwright';
 import type { ResolvedResume } from '@applyy/shared-types';
 import { articleOf, fitsOnePage, flowOf, pickStepIndex, renderResumeHtml } from '@applyy/resume-template';
-import { countPdfPages } from '../render-resume-pdf.ts';
+// The page counter and the shared page.pdf() options, so this measures exactly what is submitted.
+import { countPdfPages, RESUME_PDF_OPTIONS } from '../render-resume-pdf.ts';
 
 // The rows file: `supabase db query --json` output, { rows: [...] }.
 const path = process.argv[2];
@@ -46,8 +47,8 @@ try {
     const html = renderResumeHtml(row.tailored_profile);
     // Same call and options as renderResumePdf.
     await page.setContent(html, { waitUntil: 'domcontentloaded' });
-    // A4, no Playwright margins, backgrounds, no header/footer.
-    const pdf = await page.pdf({ format: 'A4', margin: { top: '0', right: '0', bottom: '0', left: '0' }, printBackground: true, displayHeaderFooter: false });
+    // The submit path's own options (A4, stylesheet @page via preferCSSPageSize, no header/footer).
+    const pdf = await page.pdf(RESUME_PDF_OPTIONS);
     // One JSON line per row.
     console.log(JSON.stringify({
       // Which row.
