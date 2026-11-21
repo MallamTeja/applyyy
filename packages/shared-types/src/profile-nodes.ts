@@ -436,6 +436,14 @@ export interface TailoredBullet {
   ref: NodeId;
   /** The rewording. Must be a rewording of the referenced bullet — same facts, JD-matched language. The Auditor checks this; the type only guarantees a real bullet is being reworded. */
   text: string;
+  /**
+   * AI-WRITTEN BULLET (Teja, 2026-11-18 21:47: "AI writes the bullets"; tailor #5 parcel 1, 2026-11-21). Every master
+   * bullet id the text draws on. It must contain `ref` and only bullets under the same parent node. Present = the text
+   * is the model's own wording and the validator checks provenance instead of the word list: every number and tech name
+   * must appear in these bullets, and every number in the `ref` bullet must be kept. Absent = the old reword rules.
+   * Optional and copied AS HELD (absent stays absent), so stored tailor_refs from before still rebuild unchanged.
+   */
+  sources?: DocumentOrdered<NodeId>;
 }
 
 /**
@@ -446,10 +454,17 @@ export interface TailoredSkill {
   ref: NodeId;
 }
 
-/** A selected experience entry. Carries no company or role text — those come from the master by ref, so an employer cannot be renamed. */
+/** A selected experience entry. Carries no company text and no free role text — those come from the master by ref, so an employer cannot be renamed; the one exception is an allow-listed `role_title` (below). */
 export interface TailoredExperience {
   ref: NodeId;
   bullets: DocumentOrdered<TailoredBullet>;
+  /**
+   * The printed role title, picked per job (Teja, 2026-11-18 21:47 + the allow-list ruled 21:55). Valid only for an
+   * experience the allow-list names (`EXPERIENCE_TITLE_ALLOW_LIST` in supabase/functions/_shared/tailor/validator.ts,
+   * today the Aczen internship), and only with a title from that list: background checks compare titles with HR
+   * records, so free text here is refused. The validator prints it as the resolved `role`. Absent = the master's role.
+   */
+  role_title?: string;
 }
 
 /** A selected education entry. Same reasoning as TailoredExperience. */
