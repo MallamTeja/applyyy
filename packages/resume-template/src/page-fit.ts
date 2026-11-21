@@ -144,7 +144,8 @@ type FlowItem =
   // `boldWords`: how many leading words are set bold inside an otherwise regular line (a skill label).
   | { readonly kind: 'text'; readonly text: string; readonly style: TextStyle; readonly indentMm: number; readonly extraPt: number; readonly extraMm: number; readonly boldWords?: number }
   // The flex entry head: a title and a no-wrap date on one row.
-  | { readonly kind: 'head'; readonly title: string; readonly dates: string; readonly titleStyle: TextStyle }
+  // `hangMm`: the hanging indent a split title's wrapped lines sit in (print-styles .resume__split .resume__entry-title).
+  | { readonly kind: 'head'; readonly title: string; readonly dates: string; readonly titleStyle: TextStyle; readonly hangMm?: number }
   // A vertical margin in mm at gapScale 1 (scaled by the step), or in em of the summary <p>'s own font.
   | { readonly kind: 'margin'; readonly mm: number; readonly bodyEm?: number }
   // The .resume__split flex row: each column is its own flow, laid out side by side at an equal share of the width.
@@ -152,6 +153,11 @@ type FlowItem =
 
 // The .resume__split flex gap: a FIXED 5mm in print-styles.ts, not scaled by the rung's gapScale.
 const SPLIT_GAP_MM = 5;
+
+// The hanging indent on split titles and run-in achievements (render-qa D3, 2026-11-21): print-styles sets
+// padding-left 3mm + text-indent -3mm, FIXED (not scaled by the rung). The model narrows EVERY line by it,
+// line 1 included, which over-counts by at most one line per entry: the safe direction for a fit check.
+const HANG_MM = 3;
 
 /** Decode the five entities escapeHtml writes, so widths are measured on the printed text. */
 function decodeEntities(text: string): string {
@@ -354,7 +360,9 @@ export function flowOf(articleHtml: string, inSplit = false): readonly FlowItem[
       const dates = textOf(/<span class="resume__entry-dates">([\s\S]*?)<\/span>/.exec(inner)?.[1] ?? '');
       // One flow item for the row.
       // Inside the split row the title is the smaller .resume__split rule, so the model reads that size too.
-      flow.push({ kind: 'head', title, dates, titleStyle: inSplit ? STYLE.splitTitle : STYLE.entryTitle });
+      // Inside the split the title also hangs by HANG_MM, so its wrapped lines are measured narrower.
+      // A cert's '(Issuer)' span is regular weight since 2026-11-21 but stays measured with the bold table: wider, never short.
+      flow.push({ kind: 'head', title, dates, titleStyle: inSplit ? STYLE.splitTitle : STYLE.entryTitle, hangMm: inSplit ? HANG_MM : 0 });
       continue;
     }
     // Every remaining element with content is a leaf.
@@ -373,8 +381,8 @@ export function flowOf(articleHtml: string, inSplit = false): readonly FlowItem[
     if (cls === 'resume__entry-subtitle') { flow.push({ kind: 'margin', mm: 0.4 }, text(t, inSplit ? STYLE.splitDetail : STYLE.subtitle)); continue; }
     // A grade or description line: 0.6mm above.
     if (cls === 'resume__entry-detail') { flow.push({ kind: 'margin', mm: 0.6 }, text(t, inSplit ? STYLE.splitDetail : STYLE.detail)); continue; }
-    // A run-in achievement line (2026-11-12): one 9pt text box, no margins of its own.
-    if (cls === 'resume__runin') { flow.push(text(t, STYLE.runin)); continue; }
+    // A run-in achievement line (2026-11-12): one 9pt text box, no margins of its own, narrowed by the hang (D3).
+    if (cls === 'resume__runin') { flow.push({ kind: 'text', text: t, style: STYLE.runin, indentMm: HANG_MM, extraPt: 0, extraMm: 0 }); continue; }
     // A skills line, then 1mm. Its label's words are measured bold, the skills regular, as printed.
     if (cls === 'resume__skill-group') {
       // The label's printed text, from its own span (the renderer always emits one).
@@ -438,7 +446,8 @@ export function flowHeight(flow: readonly FlowItem[], step: TypographyStep, widt
       // The dates' width, plus the 4mm flex gap when there are dates.
       const datesWidth = item.dates === '' ? 0 : runWidth(item.dates, STYLE.dates, datesSize) + 4 * MM;
       // Title lines in what is left of the row (at least one line even when empty).
-      const titleLines = Math.max(1, lineCount(item.title, item.titleStyle, titleSize, width - datesWidth));
+      // Less the hanging indent inside the split row (0 elsewhere).
+      const titleLines = Math.max(1, lineCount(item.title, item.titleStyle, titleSize, width - datesWidth - (item.hangMm ?? 0) * MM));
       // The taller of the two columns.
       height += Math.max(titleLines * titleSize * step.lineHeight, datesSize * step.lineHeight);
       continue;
@@ -507,6 +516,8 @@ body { font-size: ${pt(10.5)}; line-height: ${s.lineHeight}; }
 .resume__summary { font-size: ${pt(9.5)}; }
 .resume__split .resume__entry-title { font-size: ${pt(9.5)}; }
 .resume__split .resume__entry-detail, .resume__split .resume__entry-subtitle { font-size: ${pt(9)}; }
+.resume__split .resume__entry { margin-bottom: ${mm(1.2)}; }
+.resume__runin { font-size: ${pt(9)}; }
 ${s.paragraphEm === 1 ? '' : `.resume__summary { margin: ${s.paragraphEm}em 0; }
 `}`;
 }

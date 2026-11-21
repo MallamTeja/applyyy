@@ -90,6 +90,20 @@ export function clampZoom(zoom: number): number {
 // The template's closing </head>, the one place a preview-only stylesheet can go.
 const HEAD_CLOSE = '</head>';
 
+// The margin in mm of the last `@page { ... margin: Nmm ... }` rule in a rendered document.
+// The template always declares its rung-0 margin and a later fit rung may override it, so the
+// last declaration is the one Chromium prints with. A document with none (not this template's
+// output) falls back to the rung-0 margin, the inset the frame used before this existed.
+function printedPageMarginMm(html: string): number {
+  // Every @page margin in document order, as positive finite numbers only: a shape that does not
+  // parse (a NaN, a 0) is dropped rather than painted as `padding:NaNmm` (§6).
+  const margins = [...html.matchAll(/@page\s*\{[^}]*?margin:\s*([0-9.]+)mm/g)]
+    .map((match) => Number(match[1]))
+    .filter((mm) => Number.isFinite(mm) && mm > 0);
+  // The last wins the cascade; none means the template's own base value.
+  return margins.length > 0 ? margins[margins.length - 1]! : TYPOGRAPHY_LADDER[0]!.pageMarginMm;
+}
+
 // The resume as a sheet of paper scaled by `zoom`, for the FRAME ONLY. Downloads keep
 // using `preview.html`, so neither file the operator saves carries any of this.
 //
@@ -98,15 +112,21 @@ const HEAD_CLOSE = '</head>';
 // WHY CSS `zoom`, not transform: zoom changes layout size, so the frame's scrollbar
 // matches the shrunken page; a transform leaves the full-size scroll height behind.
 // WHY width/padding on body: on screen the body would otherwise stretch to the frame and
-// rewrap the text; 210mm with the @page's 14mm inset (border-box, set by the template)
+// rewrap the text; 210mm with the @page's inset (border-box, set by the template)
 // reproduces the printed line breaks.
+// WHY THE INSET IS READ FROM THE DOCUMENT (2026-11-21, tailor pending #4): it was a fixed 14mm,
+// the rung-0 margin, but a dense resume prints at a fit rung whose @page margin is 7-12mm
+// (page-fit.ts TYPOGRAPHY_LADDER). The frame then wrapped lines narrower than the PDF did.
 export function zoomedPreviewHtml(html: string, zoom: number): string {
   // NaN, Infinity or a non-positive zoom would print `zoom:NaN`, which the browser drops
   // silently; refusing it here makes the wrong value unrepresentable in the frame (§6).
   if (!Number.isFinite(zoom) || zoom <= 0) return html;
+  // The inset the PDF prints with: the margin of the LAST @page rule, because the rung's CSS
+  // follows the base sheet and wins the cascade exactly the same way in print.
+  const inset = printedPageMarginMm(html);
   // The style lives in the head, after the template's own sheet, so it wins on equal specificity.
   // `data-preview-zoom` names it, so a test can find it without matching prose.
-  const style = `<style data-preview-zoom>@media screen{html{zoom:${zoom}}body{width:210mm;min-height:297mm;padding:14mm}}</style>`;
+  const style = `<style data-preview-zoom>@media screen{html{zoom:${zoom}}body{width:210mm;min-height:297mm;padding:${inset}mm}}</style>`;
   // The renderer always emits </head>; without one, show the document unzoomed rather
   // than splice a style into an unknown shape - a full-size preview is still the right resume.
   return html.includes(HEAD_CLOSE) ? html.replace(HEAD_CLOSE, `${style}${HEAD_CLOSE}`) : html;

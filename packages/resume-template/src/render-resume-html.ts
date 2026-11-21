@@ -295,7 +295,12 @@ ${renderBullets(entry.bullets)}
  * union stops being sufficient and the two named wrappers below take over; that
  * is why they exist as wrappers instead of the switch calling this directly.
  */
-function renderUndatedEntry(entry: ResolvedAchievement | ResolvedCertification): string {
+// `issuer`: a certification's issuing body, printed after the name as "(Issuer)" in its own
+// regular-weight span, OUTSIDE the anchor (render-qa D2, 2026-11-21). null for achievements and for
+// a cert with no issuer. A parameter rather than a label rewrite, because the old "Name (Issuer)"
+// label put the issuer inside the bold title AND inside the link, so a credential link turned the
+// whole line blue and underlined while an unlinked neighbour printed black.
+function renderUndatedEntry(entry: ResolvedAchievement | ResolvedCertification, issuer: string | null = null): string {
   // NO DATES ROW, and deliberately not an empty `<span class="resume__entry-dates">`
   // standing in for one. The contract carries no date for these because the real
   // document writes them undated, so printing an empty slot would be the renderer
@@ -320,8 +325,12 @@ function renderUndatedEntry(entry: ResolvedAchievement | ResolvedCertification):
   const titleHtml = single === undefined
     ? escapeHtml(entry.label)
     : `<a href="${safeHref(single.url)}">${escapeHtml(entry.label)}</a>`;
+  // The issuer after the name: one SPACE then an inline span, so an extractor still reads the one
+  // line "Name (Issuer)" (ats-parse.test.ts) while print-styles sets the span in regular weight.
+  const issuerHtml = issuer === null ? '' : ` <span class="resume__cert-issuer">(${escapeHtml(issuer)})</span>`;
+  // The head row, identical in shape to every other entry kind's (see the comment above).
   const head = `<div class="resume__entry-head">
-<h3 class="resume__entry-title">${titleHtml}</h3>
+<h3 class="resume__entry-title">${titleHtml}${issuerHtml}</h3>
 </div>`;
   // `description` follows renderEducation's grade_display pattern exactly: its
   // own detail line when present, and NOTHING at all when null or empty.
@@ -397,9 +406,10 @@ function renderCertification(entry: ResolvedCertification): string {
   // No issuer: render untouched. Appending would print "Name ()", the dangling
   // separator renderUndatedEntry's own comment warns against.
   if (issuer === null) return renderUndatedEntry(entry);
-  // The label carries the issuer, and the description is cleared so the detail line
-  // is not printed twice. The label is still escaped once, inside renderUndatedEntry.
-  return renderUndatedEntry({ ...entry, label: `${entry.label} (${issuer})`, description: null });
+  // The issuer rides on the title line as its own span (D2, 2026-11-21: only the NAME is bold
+  // and linked), and the description is cleared so the detail line is not printed twice.
+  // renderUndatedEntry escapes both the label and the issuer exactly once.
+  return renderUndatedEntry({ ...entry, description: null }, issuer);
 }
 
 /**

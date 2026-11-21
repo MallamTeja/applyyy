@@ -79,8 +79,10 @@ piles up (52 deploy/gate worktrees had accumulated by then; the classifier block
 `docs/status/2026-11-09-supabase-cli-v3.md`.
 
 ```powershell
-# Bash: export exactly the committed tree of <sha> into a fresh folder (no .git, no peers' edits)
-mkdir -p "$TEMP/applyyy-export-<sha>" && git archive <sha> | tar -x -C "$TEMP/applyyy-export-<sha>"
+# Bash: export exactly the committed tree of <sha> into a fresh folder (no .git, no peers' edits).
+# cygpath is required: Git Bash $TEMP is "C:\...", and tar reads "C:" as a remote host -> empty export (2026-11-21).
+# set -o pipefail before any `deploy ... | tail` loop, or a failed deploy reads as success and the chain runs on.
+D="$(cygpath -u "$TEMP")/applyyy-export-<sha>"; mkdir -p "$D" && git archive <sha> | tar -x -C "$D"
 # copy supabase/.temp/{project-ref,pooler-url,linked-project.json,postgres-version} into it, then deploy FROM it
 $env:SUPABASE_ACCESS_TOKEN = $null   # the user env var belongs to the WRONG account
 supabase functions deploy <fn> --project-ref xynqxekcqizwhtskzqrq --use-api --import-map supabase/functions/deno.json

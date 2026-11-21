@@ -420,7 +420,8 @@ describe('renderResumeHtml — achievements and certifications (undated sections
     assert.match(html, /<div class="resume__entry-detail">national finals, 300\+ teams<\/div>/);
     // Certifications changed on 2026-11-10: the issuer now prints inline as "Name (Issuer)"
     // (see the CERT INLINE suite), so the present description is asserted on the title line.
-    assert.match(html, /<h3 class="resume__entry-title">Meta Back-End Developer Professional Certificate \(Coursera\)<\/h3>/);
+    // Since 2026-11-21 (render-qa D2) it is its own regular-weight span after the name.
+    assert.match(html, /<h3 class="resume__entry-title">Meta Back-End Developer Professional Certificate <span class="resume__cert-issuer">\(Coursera\)<\/span><\/h3>/);
   });
 
   it('NON-VACUITY TWIN: a null description prints no detail line and no separator', () => {
@@ -565,9 +566,9 @@ describe('renderCertification — issuer inline on the title line (2026-11-10)',
   it('prints a certification as "Name (Issuer)" on ONE line, with no separate issuer line', () => {
     // The cert's own markup, so a detail line under another entry cannot satisfy or fail this.
     const cert = entryHtml(html, 'cert_meta_backend');
-    // The positive shape: the issuer sits inside the title, in parentheses.
+    // The positive shape: the issuer sits inside the title, in parentheses (its own span since 2026-11-21, D2).
     assert.ok(
-      cert.includes('<h3 class="resume__entry-title">Meta Back-End Developer Professional Certificate (Coursera)</h3>'),
+      cert.includes('<h3 class="resume__entry-title">Meta Back-End Developer Professional Certificate <span class="resume__cert-issuer">(Coursera)</span></h3>'),
       'the issuer is not inline on the cert title line',
     );
     // And the second line is gone: that line is the height this change exists to save.
@@ -598,9 +599,9 @@ describe('renderUndatedEntry — certification and achievement links (2026-11-01
     }));
     // The cert's entry, alone.
     const cert = entryHtml(html, 'cert_meta_backend');
-    // The title (label plus inline issuer) is wrapped in the credential href.
+    // The cert NAME is wrapped in the credential href; the issuer follows OUTSIDE the anchor (D2, 2026-11-21).
     assert.ok(
-      cert.includes('<h3 class="resume__entry-title"><a href="https://coursera.org/verify/ABC123">Meta Back-End Developer Professional Certificate (Coursera)</a></h3>'),
+      cert.includes('<h3 class="resume__entry-title"><a href="https://coursera.org/verify/ABC123">Meta Back-End Developer Professional Certificate</a> <span class="resume__cert-issuer">(Coursera)</span></h3>'),
       'the lone credential link did not become the cert title anchor',
     );
     // The old own-line link is gone: that line is the space this change buys.
@@ -639,7 +640,7 @@ describe('renderUndatedEntry — certification and achievement links (2026-11-01
       cert: [{ id: 'lnk_bad', label: 'Credential', url: 'javascript:alert(1)' }],
     }));
     // Collapsed href on the title anchor (a lone link rides on the title since 2026-11-12).
-    assert.ok(entryHtml(html, 'cert_meta_backend').includes('<a href="#">Meta Back-End Developer Professional Certificate (Coursera)</a>'));
+    assert.ok(entryHtml(html, 'cert_meta_backend').includes('<a href="#">Meta Back-End Developer Professional Certificate</a>'));
     // And the payload is nowhere in the document.
     assert.equal(html.includes('javascript:'), false);
   });

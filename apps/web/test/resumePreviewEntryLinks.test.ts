@@ -58,7 +58,9 @@ describe('masterAsResume carries cert and achievement links', () => {
     const html = renderResumeHtml(masterAsResume(storedMaster() as never, 9));
     // Clickable: since 2026-11-12 a cert's LONE link is its title anchor ("Name (Issuer)"),
     // not a separate "Credential" line (Teja: "compress this, create more space").
-    assert.ok(html.includes('<a href="https://www.credly.com/badges/example">Machine Learning (IBM SkillsBuild)</a>'));
+    // Since 2026-11-21 (render-qa D2) the anchor wraps the NAME only: the issuer follows outside the
+    // anchor and outside the bold, in its own regular-weight span, so it is never blue or underlined.
+    assert.ok(html.includes('<a href="https://www.credly.com/badges/example">Machine Learning</a> <span class="resume__cert-issuer">(IBM SkillsBuild)</span>'));
     // And the separate link label no longer prints: that line is the space bought.
     assert.equal(html.includes('>Credential</a>'), false);
   });

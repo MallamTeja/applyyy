@@ -344,6 +344,27 @@ body {
   /* Same weight as the entry titles it replaces. */
   font-weight: 700;
 }
+
+/* A certification's "(Issuer)" after its name (render-qa D2, 2026-11-21). Only the NAME is
+   bold and linked; the issuer is supporting text, so it drops back to the regular weight and
+   sits outside the anchor, never blue. */
+.resume__cert-issuer {
+  /* Regular, not the h3's inherited 700. */
+  font-weight: 400;
+}
+
+/* HANGING INDENT (render-qa D3, 2026-11-21): a wrapped cert or achievement line used to restart
+   flush-left under its own first word, so the eye could not tell where one entry ended. The
+   padding moves every line in by 3mm and the negative text-indent pulls line 1 back to the
+   column edge, so only the continuation lines hang. Fixed mm, not scaled by the fit rung, like
+   the bullet list's 4.5mm padding. page-fit.ts HANG_MM models it (it must equal 3 here). */
+.resume__split .resume__entry-title,
+.resume__runin {
+  /* Every line starts 3mm in... */
+  padding-left: 3mm;
+  /* ...except the first, pulled back to the edge. Equal and opposite, or line 1 drifts. */
+  text-indent: -3mm;
+}
 `;
 
 /**
