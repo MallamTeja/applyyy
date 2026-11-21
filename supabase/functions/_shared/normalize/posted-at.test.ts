@@ -229,3 +229,29 @@ test("remote_feed: junk dates are derived from first sighting, never exact and n
     assert.deepEqual(extractPostedAt({ source: "remote_feed", published }, ESTABLISHED_BOARD), { postedAt: FIRST_SEEN.toISOString(), postedAtSource: "derived" });
   }
 });
+
+// iCIMS (2026-11-21): the JSON-LD JobPosting's `datePosted`, read as strict ISO 8601 only.
+// The date is display/sort only (Teja: never drop or skip a job by age), but a wrong
+// `exact` date still misorders the queue, so the reader refuses anything it cannot vouch for.
+test("icims: the live Atlassian datePosted (UTC datetime) is exact", () => {
+  // Verbatim shape from the live Atlassian JSON-LD (icims.test.ts fixture).
+  assert.deepEqual(extractPostedAt({ source: "icims", datePosted: "2026-09-24T04:00:00.000Z" }, ESTABLISHED_BOARD), { postedAt: "2026-09-24T04:00:00.000Z", postedAtSource: "exact" });
+});
+
+test("icims: a date-only, an offset datetime and an offset-less datetime are all exact, in UTC", () => {
+  // schema.org allows a bare Date; it means the start of that day, read as UTC.
+  assert.equal(extractPostedAt({ source: "icims", datePosted: "2026-09-08" }, ESTABLISHED_BOARD).postedAt, "2026-09-08T00:00:00.000Z");
+  // An explicit offset is honoured: 09:30 at -05:00 is 14:30 UTC.
+  assert.equal(extractPostedAt({ source: "icims", datePosted: "2026-09-08T09:30:00-05:00" }, ESTABLISHED_BOARD).postedAt, "2026-09-08T14:30:00.000Z");
+  // No offset is read as UTC, never as the runner's local zone (Deno and a dev laptop must agree).
+  assert.equal(extractPostedAt({ source: "icims", datePosted: "2026-09-08T09:30:00" }, ESTABLISHED_BOARD).postedAt, "2026-09-08T09:30:00.000Z");
+});
+
+test("icims: malformed or absent datePosted is never exact: it falls back to first sighting", () => {
+  // "-5" and "5" are V8 traps; 2026-02-30 and month 13 are impossible calendars V8 rolls over or
+  // half-accepts; a space separator, US order, an hour of 25, a number, junk types and pre-2000 are refused.
+  for (const datePosted of ["-5", "5", "2026-02-30", "2026-13-01", "2026-09-08 09:30:00", "09/08/2026", "2026-09-08T25:00:00Z", "2026-09-08T09:30", "", "soon", 1757323800, null, undefined, {}, "1999-12-31"]) {
+    // The shared fallback: our own sighting, labelled derived on an established board.
+    assert.deepEqual(extractPostedAt({ source: "icims", datePosted }, ESTABLISHED_BOARD), { postedAt: FIRST_SEEN.toISOString(), postedAtSource: "derived" }, `input ${JSON.stringify(datePosted)}`);
+  }
+});

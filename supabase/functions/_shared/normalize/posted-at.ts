@@ -60,7 +60,10 @@ export type PostedAtInput =
   // worker/src/scout/remote-feeds.ts): a genuine publish date, but the TYPE varies by feed
   // (ISO-shaped string, epoch seconds or epoch milliseconds), so the raw value is passed in
   // and judged here rather than in a per-feed local copy of this policy (2026-10-24).
-  | { readonly source: "remote_feed"; readonly published: unknown };
+  | { readonly source: "remote_feed"; readonly published: unknown }
+  // iCIMS (2026-11-21): the JSON-LD JobPosting `datePosted`, a genuine publish date that
+  // schema.org types as an ISO 8601 Date or DateTime. Raw value in, judged strictly below.
+  | { readonly source: "icims"; readonly datePosted: unknown };
 
 // Milliseconds in a day, named so the relative-date arithmetic below reads as
 // arithmetic rather than as a magic constant.
@@ -218,7 +221,47 @@ function readSourceDate(
       // A genuine publish date.
       return { date, confidence: "exact" };
     }
+    // iCIMS publishes a true date in its JSON-LD, which must be strict ISO 8601.
+    case "icims": {
+      // The strict reader: a non-string or any off-shape string is null, never a guess.
+      const date = parseStrictIso8601(input.datePosted);
+      // Absent, malformed, impossible or pre-2000: no verdict, so the caller uses its sighting.
+      if (date === null || date.getTime() < EARLIEST_REMOTE_POSTING) return null;
+      // A genuine publish date.
+      return { date, confidence: "exact" };
+    }
   }
+}
+
+// Strict ISO 8601 as schema.org's Date/DateTime: "YYYY-MM-DD", or that plus "THH:MM:SS",
+// optional fraction, optional "Z" or "±HH:MM". Groups: 1 year, 2 month, 3 day, 4 hour,
+// 5 minute, 6 second, 7 fraction, 8 zone. Seconds are required in a datetime: JSON-LD
+// serialisers always emit them, and accepting "T09:30" would widen the shape for no live row.
+const ISO_8601 = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})?)?$/;
+
+// Shape first, calendar second, parse last (CLAUDE.md §6). `new Date` alone is the lenient
+// reader this refuses to trust: V8 reads "-5" as 2001 and rolls "2026-02-30" into March.
+function parseStrictIso8601(raw: unknown): Date | null {
+  // Only a string can be ISO 8601; numbers, objects and absence carry no date here.
+  if (typeof raw !== "string") return null;
+  // The whole string must be the shape, anchored at both ends.
+  const m = ISO_8601.exec(raw);
+  // Off-shape (space separator, US order, prose, empty): refused.
+  if (m === null) return null;
+  // The calendar parts; the regex guarantees they are digit runs.
+  const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  // A real calendar day: build it in UTC and require it did not roll over (Feb 30, month 13).
+  const calendar = new Date(Date.UTC(year, month - 1, day));
+  // Any component that moved means the input named a day that does not exist.
+  if (calendar.getUTCFullYear() !== year || calendar.getUTCMonth() !== month - 1 || calendar.getUTCDate() !== day) return null;
+  // A bare date is that day's start in UTC, already built.
+  if (m[4] === undefined) return calendar;
+  // Clock bounds: hour 0-23, minute and second 0-59 (no leap second: none is ever posted).
+  if (Number(m[4]) > 23 || Number(m[5]) > 59 || Number(m[6]) > 59) return null;
+  // No zone means UTC, so the runner's local zone can never shift the stored instant.
+  const parsed = new Date(m[8] === undefined ? `${raw}Z` : raw);
+  // The shape is valid ISO, so this is a backstop for an offset like "+99:00" V8 refuses.
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 // The earliest believable remote-feed publish date. An epoch like 5 survives

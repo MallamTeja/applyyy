@@ -30,6 +30,8 @@ import {
   httpJson,
   httpText,
 } from "./index.ts";
+// The "robots.txt did not answer" refusal (D5, 2026-11-21), from its own module.
+import { RobotsUnavailableError } from "./robots-unavailable.ts";
 // The gate's cache type, so each robots test can hold its own isolated verdict cache —
 // the transport's module-level default cache outlives a test and would make later
 // tests inherit earlier verdicts for the same origin.
@@ -560,6 +562,55 @@ describe("robots gate", () => {
     // Non-vacuity: the gate really did consult robots.txt (zero would mean the test
     // passed by some other refusal, not by the policy).
     assert.equal(state.robotsCalls, 1);
+  });
+
+  // D5 drift #1 (2026-11-21): the edge scout must treat a robots.txt that did not ANSWER
+  // (429/5xx) the way the worker does since eb56d28e: still refused, never fetched, but a
+  // distinct type so the caller can skip the failure count. 403 and a Disallow are answers.
+  test("REGRESSION D5: a robots.txt 429 is RobotsUnavailableError (status 429) and the board is never contacted", async () => {
+    // Cloudflare's 429 with no Retry-After, as Workday answered on 11-18 (62 of 64 boards).
+    const state = stubFetch([() => new Response("{}", { status: 200 })], () => new Response("", { status: 429 }));
+    // Caught so the fields can be asserted, not only the type.
+    const outcome = await httpFetch("https://example.test/wday/cxs/t/s/jobs", freshCache()).then(() => null, (err: unknown) => err);
+    // The skip type, carrying the robots status for the caller's log line.
+    assert.ok(outcome instanceof RobotsUnavailableError);
+    assert.equal(outcome.status, 429);
+    // Still a refusal for any caller that only knows the parent type (fail closed, §6).
+    assert.ok(outcome instanceof RobotsDisallowedError);
+    // THE LOAD-BEARING ASSERTION: the board itself was never fetched.
+    assert.equal(state.calls, 0);
+    // Non-vacuity: robots.txt really was asked.
+    assert.equal(state.robotsCalls, 1);
+  });
+
+  test("D5: a robots 5xx is unavailable too, and a CACHE HIT keeps the status (two boards, one origin)", async () => {
+    // Greenhouse boards share boards-api.greenhouse.io, so the second board is a cache hit.
+    const state = stubFetch([() => new Response("{}", { status: 200 })], () => new Response("", { status: 503 }));
+    // One cache for both calls, as one scout-ats run holds.
+    const shared = freshCache();
+    // Both boards read their outcome.
+    const first = await httpFetch("https://example.test/a", shared).then(() => null, (err: unknown) => err);
+    const second = await httpFetch("https://example.test/b", shared).then(() => null, (err: unknown) => err);
+    // Both are the skip type with the real status, the second without a new robots fetch.
+    assert.ok(first instanceof RobotsUnavailableError && first.status === 503);
+    assert.ok(second instanceof RobotsUnavailableError && second.status === 503);
+    // One robots fetch for the origin (cached), zero board fetches.
+    assert.deepEqual([state.robotsCalls, state.calls], [1, 0]);
+  });
+
+  test("D5: a robots 403 and a published Disallow stay plain refusals, NOT unavailable", async () => {
+    // 403 is the host's answer ("refused-by-host"), so it must still count as a failure.
+    stubFetch([() => new Response("{}", { status: 200 })], () => new Response("", { status: 403 }));
+    // The outcome of a 403.
+    const forbidden = await httpFetch("https://example.test/x", freshCache()).then(() => null, (err: unknown) => err);
+    // A refusal, but not the skip type.
+    assert.ok(forbidden instanceof RobotsDisallowedError && !(forbidden instanceof RobotsUnavailableError));
+    // The policy fixture: a real Disallow is an answer too.
+    stubFetch([() => new Response("{}", { status: 200 })], policy);
+    // The outcome of a Disallow.
+    const disallowed = await httpFetch("https://example.test/private/x", freshCache()).then(() => null, (err: unknown) => err);
+    // Same: refused and counted.
+    assert.ok(disallowed instanceof RobotsDisallowedError && !(disallowed instanceof RobotsUnavailableError));
   });
 
   test("an allowed path under the same policy still goes through", async () => {

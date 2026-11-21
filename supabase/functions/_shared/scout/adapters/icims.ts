@@ -289,10 +289,9 @@ export const icimsAdapter: AtsAdapter = {
       employmentType: classifyEmploymentType(typeText) === "unknown" ? classifyEmploymentType(title) : classifyEmploymentType(typeText),
       // The structured flag wins; the location prose is the fallback.
       workArrangement: classifyWorkArrangement(locationRaw, remote),
-      // datePosted is a genuine ISO publish date. The remote_feed variant is reused because it
-      // is exactly the strict ISO-shape reader this needs; a dedicated "icims" variant would need
-      // a posted-at.ts change outside this parcel (flagged in docs/handoff/2026-11-21-peer-1-r2.md).
-      postedAtInput: { source: "remote_feed", published: job["datePosted"] },
+      // datePosted is a genuine ISO 8601 publish date. posted-at.ts's own "icims" variant
+      // judges it strictly (2026-11-21); the raw value goes in so the policy lives there, not here.
+      postedAtInput: { source: "icims", datePosted: job["datePosted"] },
       // The JobPosting as served, for replaying a parser fix over history.
       rawPayload: job,
     };

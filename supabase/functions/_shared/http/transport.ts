@@ -37,6 +37,8 @@
 import { BotProtectionError, HttpError, NetworkError, RetryAfterTooLongError, RobotsDisallowedError } from "./errors.ts";
 // The one pure, exhaustively-testable piece of wire-format handling.
 import { parseRetryAfterMs } from "./retry-after.ts";
+// The "robots.txt did not answer" refusal and its status test, shared with the worker scout (D5).
+import { RobotsUnavailableError, isUnknownRobotsStatus } from "./robots-unavailable.ts";
 // The robots.txt gate, by RELATIVE path exactly as scout-web/index.ts already imports it
 // (a bare '@applyy/master-robots' specifier would need a package.json entry and a
 // lockfile write). Gating lives HERE because this is the one function every Deno fetch
@@ -299,6 +301,27 @@ function attemptSignal(timeoutMs: number, callerSignal: AbortSignal | undefined)
 // real answer, 5min for a failure.
 const defaultRobotsCache: RobotsCache = new Map();
 
+// The last robots.txt HTTP status per origin, per verdict cache (same design as the worker's
+// board-pages.ts). Keyed by the cache object so it lives exactly as long as the verdicts it
+// explains: a cache hit still finds the status of the fetch that filled the cache. WeakMap,
+// so a test's throwaway cache takes its statuses with it.
+const ROBOTS_STATUS_BY_CACHE = new WeakMap<RobotsCache, Map<string, number>>();
+
+// This cache's status record, created on first use.
+function robotsStatusesFor(cache: RobotsCache): Map<string, number> {
+  // The existing record, if this cache has fetched before.
+  let statuses = ROBOTS_STATUS_BY_CACHE.get(cache);
+  // First use of this cache: start an empty record.
+  if (statuses === undefined) {
+    // A fresh per-origin map.
+    statuses = new Map();
+    // Tied to the cache's lifetime.
+    ROBOTS_STATUS_BY_CACHE.set(cache, statuses);
+  }
+  // The record to read and write.
+  return statuses;
+}
+
 export async function httpFetch(
   url: string,
   options: HttpRequestOptions = {},
@@ -325,16 +348,51 @@ export async function httpFetch(
     // master-robots' default, so `exactOptionalPropertyTypes` never sees an undefined.
     // The shared isolate cache is safe across policies: it holds the host's answer, and
     // the policy is applied to that answer on every call.
+    // The verdict cache in use, named once: the status record below is keyed by it.
+    const cache = options.robots?.cache ?? defaultRobotsCache;
+    // The origin robots.txt lives at, which is the key master-robots caches under too.
+    const origin = new URL(url).origin;
+    // This cache's per-origin robots.txt statuses (see ROBOTS_STATUS_BY_CACHE).
+    const statuses = robotsStatusesFor(cache);
     const verdict = await checkRobots(url, productToken, {
       // The caller's cache, or the isolate's.
-      cache: options.robots?.cache ?? defaultRobotsCache,
+      cache,
       // The caller's reading of a 401, or the strict one.
       policy: options.robots?.policy ?? "strict",
+      // The robots.txt GET, unchanged except that its HTTP status is recorded from the real
+      // response. master-robots folds a 429 and a timeout into one 'indeterminate' source with
+      // only a prose reason, and §6 says never ask a message what happened.
+      fetcher: async (robotsUrl: string, init: { signal: AbortSignal; headers: Record<string, string> }) => {
+        // Forget the previous status first, so a fetch that THROWS leaves no stale 429 behind.
+        statuses.delete(origin);
+        // BARE GLOBAL fetch, late-bound, for the same reason as the attempt loop below: tests
+        // replace globalThis.fetch.
+        const response = await fetch(robotsUrl, init);
+        // Recorded before master-robots classifies it.
+        statuses.set(origin, response.status);
+        // Unchanged, for master-robots to read.
+        return response;
+      },
     });
-    // Anything but an explicit allow refuses — 'wait' included, mirroring scout-web's
-    // own gate: a transport that slept here would spend an Edge Function's wall clock
-    // on one slow host's robots rate limit. crawlDelayMs on an allow is deliberately
-    // NOT enforced here: pacing across requests is the caller's loop, not one call's.
+    // A 'wait' is a 429 with a short readable Retry-After: unknown for now. Refused (this
+    // transport never sleeps on robots), but as the skip type, so a scout does not count it.
+    if (verdict.kind === "wait") {
+      // No status needed: a 'wait' is a 429 by construction.
+      throw new RobotsUnavailableError(url, "wait", verdict.reason, null, null);
+    }
+    // The status behind an 'indeterminate' refusal, when the robots.txt GET returned one. A
+    // cache hit made no fetch, so the status of the fetch that filled the cache is still here.
+    const robotsStatus = statuses.get(origin);
+    // A 429 (no or over-long Retry-After) or a 5xx: policy unknown, so the skip type. A thrown
+    // fetch (timeout, DNS) has no status and stays a plain refusal, as in the worker.
+    if (verdict.kind === "refuse" && verdict.source === "indeterminate" && robotsStatus !== undefined && isUnknownRobotsStatus(robotsStatus)) {
+      // Still refused: robots is never treated as "allowed" on an unknown answer.
+      throw new RobotsUnavailableError(url, "refuse", verdict.reason, verdict.source, robotsStatus);
+    }
+    // Anything but an explicit allow refuses, mirroring scout-web's own gate: a transport
+    // that slept here would spend an Edge Function's wall clock on one slow host's robots
+    // rate limit. crawlDelayMs on an allow is deliberately NOT enforced here: pacing across
+    // requests is the caller's loop, not one call's.
     if (verdict.kind !== "allow") {
       throw new RobotsDisallowedError(url, verdict.kind, verdict.reason, verdict.kind === "refuse" ? verdict.source : null);
     }

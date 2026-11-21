@@ -161,8 +161,8 @@ test("a detail page becomes one posting from its JSON-LD JobPosting", () => {
   // HTML stripped to text.
   assert.match(p.descriptionRaw ?? "", /Working at Atlassian/);
   assert.doesNotMatch(p.descriptionRaw ?? "", /<p>/);
-  // A genuine ISO publish date, judged by the shared strict ISO reader.
-  assert.deepEqual(p.postedAtInput, { source: "remote_feed", published: "2026-09-24T04:00:00.000Z" });
+  // A genuine ISO publish date, handed to posted-at.ts's own strict "icims" reader.
+  assert.deepEqual(p.postedAtInput, { source: "icims", datePosted: "2026-09-24T04:00:00.000Z" });
 });
 
 test("a real region and FULL_TIME are kept (symplr)", () => {

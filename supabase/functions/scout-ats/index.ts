@@ -16,6 +16,8 @@ import { queueBoards, queueReadComplete, resolveScoutMode, SWEEP_QUEUE_STATUSES 
 // The board fetch, through the robots-gated shared transport (111791c closed every
 // httpFetch path; this import closes the one bare `fetch(` that remained here).
 import { fetchBoard } from "./poll-fetch.ts";
+// The "robots.txt did not answer" refusal the board catch skips uncounted (D5, shared with the worker's semantics).
+import { RobotsUnavailableError } from "../_shared/http/robots-unavailable.ts";
 // The SSRF-guarded posting-page fetch for feed liveness; Deno-only, so kept out of poll-fetch.ts.
 import { fetchPage } from "./page-fetch.ts";
 // Feed liveness (2026-11-07): in-flight rows with no ATS are retired when their own page says 404/410.
@@ -1179,6 +1181,25 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
       });
     } catch (fetchErr: unknown) {
       const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+      // ROBOTS DID NOT ANSWER (429/5xx; D5 drift #1, 2026-11-21): the board was never fetched
+      // (robots honoured), and nothing is written to company_watchlist: not the failure count, not
+      // last_polled_at, so it sorts first next run. Same rule as the worker since eb56d28e. Counting
+      // it let one Scan during a Workday Cloudflare 429 push boards to the worker's 5-failure rest.
+      // A real Disallow or a 403 is the parent type and falls through to the counted failure below.
+      if (fetchErr instanceof RobotsUnavailableError) {
+        // "skipped", so gate.ts does not count it as an attempted (failed) board.
+        summaries.push({
+          board: board.board_token,
+          provider: board.ats_provider,
+          status: "skipped",
+          fetched: 0,
+          inserted: 0,
+          // Names 429 vs 5xx for the run's response.
+          error: `robots.txt unavailable (HTTP ${fetchErr.status ?? "429 Retry-After"}), retry next run, failure count unchanged: ${msg}`,
+        });
+        // Next board; nothing written for this one.
+        continue;
+      }
       // The same failed-poll update as every other failure path.
       await db.from("company_watchlist").update(failureMark(board, now)).eq("id", board.id);
 
