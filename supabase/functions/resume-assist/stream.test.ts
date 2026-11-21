@@ -267,3 +267,23 @@ test("the streamed chat gives up on a silent attempt after 8 s with no first chu
   // The total attempt budget is unchanged, so a slow but streaming answer still has 15 s.
   assert.equal(streamed.calls[0]?.timeoutMs, 15_000);
 });
+
+// --- the live note never claims a change (tailor pending #5 P0, 2026-11-21) ----------------------------------
+
+test("the streamed note drops change claims while it is still being written, like the final note does", async () => {
+  // The model claims a change, then says something true; the claim must never reach the screen, not even for a moment.
+  const answer = JSON.stringify({ note: "I added Kafka to Tools. Kafka is in the job.", ops: [] });
+  // Half the note, then the whole answer.
+  const d = deps(ok(answer), (o) => {
+    // Mid-sentence, the claim already complete.
+    o.onText?.('{"note":"I added Kafka to Tools. Kaf');
+    // Done.
+    o.onText?.(answer);
+  });
+  // Opted in.
+  const events = await lines(await handleResumeAssist(post(true), d));
+  // Every note line, in order.
+  const notes = events.filter((e) => e.type === "note").map((e) => e.text);
+  // Only the true sentence, as it grew.
+  assert.deepEqual(notes, ["Kaf", "Kafka is in the job."]);
+});

@@ -22,7 +22,11 @@ import { test } from "node:test";
 // Strict, because "byte-identical" is exactly the kind of claim loose equality ruins.
 import assert from "node:assert/strict";
 // Explicit .ts extension for Deno/Node convergence.
-import { buildTailorPrompt, buildBulletRewritePrompt, UNTRUSTED_FENCE_OPEN, UNTRUSTED_FENCE_CLOSE } from "./prompt.ts";
+import { buildTailorPrompt, buildBulletRewritePrompt, TAILOR_RESPONSE_SCHEMA, TAILOR_TEMPERATURE, UNTRUSTED_FENCE_OPEN, UNTRUSTED_FENCE_CLOSE } from "./prompt.ts";
+// The allow-list the role_title options come from, imported so the test and the prompt share one source.
+import { EXPERIENCE_TITLE_ALLOW_LIST } from "./validator.ts";
+// Reads tailor/index.ts as text: the Deno entrypoint cannot be imported under node.
+import { readFileSync } from "node:fs";
 // The validator is property 3's enforcement.
 import { validateTailoredProfile } from "./validator.ts";
 // aa's contract, through this stream's single re-export module.
@@ -592,4 +596,100 @@ test("summary variants: a master without variants gets the unchanged prompt and 
   assert.equal("summary_variant" in (before.responseSchema as { properties: object }).properties, false);
   // Identical either way.
   assert.deepEqual(empty, before);
+});
+
+// --- tailor #5 parcel 3 (2026-11-21): the producer side of AI-written bullets, the Aczen title and the per-JD summary ---
+//
+// Live basis (plan §1/§3, keep7 33 ideals): 85% of summaries copied a master variant verbatim, the prompt never saw the
+// extracted JD keywords (they were computed after the call), and bullets could only reuse their own master words. The
+// validator committed in e1f4b520 now checks provenance, so the prompt asks for it. A prompt is still not a control:
+// every rule below is enforced by validator.ts; these tests pin that the PRODUCER asks for what the reader checks.
+
+// The posting used below; its vocabulary terms are Docker and PostgreSQL.
+const REQ_JD = "We need Docker and PostgreSQL experience for our backend team.";
+
+test("the job's extracted requirements are listed inside the untrusted fence, never in the trusted region", () => {
+  // Built with a posting that names two vocabulary terms.
+  const prompt = buildTailorPrompt({ master: MASTER, masterVersion: PINNED_VERSION, jobDescription: REQ_JD, jobTitle: "Backend Intern", company: "Acme" });
+  // The text between the fences.
+  const fenced = prompt.userContent.slice(prompt.userContent.indexOf(UNTRUSTED_FENCE_OPEN), prompt.userContent.indexOf(UNTRUSTED_FENCE_CLOSE));
+  // Docker, from jd-keywords' own extraction, on one labelled, comma-separated line.
+  assert.match(fenced, /\nextracted_requirements: (?:[^\n]*, )?Docker(?:, [^\n]*)?\n/);
+  // And PostgreSQL in the same line.
+  assert.match(fenced, /\nextracted_requirements: [^\n]*PostgreSQL/);
+  // Never in the trusted region: posting-derived text stays data (the byte-identity tests above rely on it).
+  assert.equal(prompt.systemInstruction.includes("extracted_requirements:"), false);
+  // A posting with no vocabulary term says so, rather than an empty line a model may read as "no requirements at all".
+  const none = buildTailorPrompt({ master: MASTER, masterVersion: PINNED_VERSION, jobDescription: "Friendly team.", jobTitle: "Intern", company: "Acme" });
+  // The explicit marker.
+  assert.match(none.userContent, /\nextracted_requirements: \(none found; read the description\)\n/);
+});
+
+test("the policy asks for a requirement-to-evidence step, a new per-JD summary with a real metric, a fictional worked example and a self-check", () => {
+  // The trusted region.
+  const policy = buildTailorPrompt({ master: MASTER, masterVersion: PINNED_VERSION, jobDescription: REQ_JD, jobTitle: "Backend Intern", company: "Acme" }).systemInstruction;
+  // The step, before any choice.
+  assert.match(policy, /REQUIREMENT-TO-EVIDENCE \(do this before choosing anything\)/);
+  // A gap stays a gap.
+  assert.match(policy, /A requirement with no master evidence stays unaddressed/);
+  // The summary rule's measurable parts (plan §5 P2, Teja's per-JD summary ruling).
+  for (const part of ["always return `summary`", "2-3 sentences", "at least 2 of the job's requirements", "at least 1 real metric copied exactly", "Never copy a master summary or summary variant word for word"]) assert.ok(policy.includes(part), part);
+  // The example is marked fictional, so its facts are never read as the candidate's.
+  assert.match(policy, /WORKED EXAMPLE \(FICTIONAL: its names, refs and numbers belong to no candidate; never copy them\)/);
+  // Every ref in the example is in a namespace no master uses.
+  const example = policy.slice(policy.indexOf("WORKED EXAMPLE"), policy.indexOf("SELF-CHECK"));
+  // Non-vacuous: the example does cite refs.
+  assert.match(example, /ref=example_/);
+  // And none outside the example_ namespace.
+  assert.equal(/ref=(?!example_)/.test(example), false);
+  // The self-check comes last in the policy, after every rule it checks.
+  assert.ok(policy.indexOf("SELF-CHECK") > policy.indexOf("KEEP RULE"));
+});
+
+test("every bullet the schema accepts must list its master sources, and the bullet rule says what they bind", () => {
+  // The schema the model answers in.
+  const schema = TAILOR_RESPONSE_SCHEMA as unknown as { properties: Record<string, { items?: { properties?: { bullets?: { items: { properties: Record<string, unknown>; required: string[] } } } } }> };
+  // Every section that carries bullets.
+  for (const section of ["experience", "projects", "education", "achievements", "certifications"]) {
+    // Its bullet item.
+    const bullet = schema.properties[section]?.items?.properties?.bullets?.items;
+    // An array of ids.
+    assert.deepEqual(bullet?.properties.sources, { type: "array", items: { type: "string" } }, section);
+    // Required, so an AI-written bullet never arrives without the provenance the validator checks.
+    assert.deepEqual(bullet?.required, ["ref", "text", "sources"], section);
+  }
+  // The rule, in the trusted region.
+  const policy = buildTailorPrompt({ master: MASTER, masterVersion: PINNED_VERSION, jobDescription: REQ_JD, jobTitle: "Backend Intern", company: "Acme" }).systemInstruction;
+  // Own words, with sources.
+  assert.match(policy, /BULLET RULE: write each bullet in your own words for this job, and list in `sources`/);
+  // The binding part.
+  assert.match(policy, /Every number and every technology name in the text must appear in those sources; keep every number of the `ref` bullet/);
+});
+
+test("role_title is offered only from the allow-list, and only beside the experience the allow-list names", () => {
+  // The fixture's job renamed to the allow-listed id.
+  const aczen = { ...MASTER, experience: MASTER.experience.map((node, i) => (i === 0 ? { ...node, id: "exp_aczen" } : node)) };
+  // Built for it.
+  const prompt = buildTailorPrompt({ master: aczen, masterVersion: PINNED_VERSION, jobDescription: REQ_JD, jobTitle: "Backend Intern", company: "Acme" });
+  // The node line.
+  assert.ok(prompt.systemInstruction.includes("- ref=exp_aczen :: "), "the node line");
+  // Its options line, from the validator's own list (one source of truth).
+  assert.ok(prompt.systemInstruction.includes(`  role_title options (put ONE in role_title): ${EXPERIENCE_TITLE_ALLOW_LIST.exp_aczen!.join(" | ")}`));
+  // A master without that id gets no options LINE (the policy's rule text names the line, so match its exact shape).
+  assert.equal(buildTailorPrompt({ master: MASTER, masterVersion: PINNED_VERSION, jobDescription: REQ_JD, jobTitle: "Backend Intern", company: "Acme" }).systemInstruction.includes("  role_title options (put ONE in role_title): "), false);
+  // The schema closes the field to the allow-list's titles: "Data Analyst Intern" (the FamPay case) cannot be written.
+  const experience = (TAILOR_RESPONSE_SCHEMA as unknown as { properties: { experience: { items: { properties: { role_title: { enum: string[] } }; required: string[] } } } }).properties.experience.items;
+  // Exactly every allowed title, once.
+  assert.deepEqual(experience.properties.role_title.enum, [...new Set(Object.values(EXPERIENCE_TITLE_ALLOW_LIST).flat())]);
+  // Optional: an experience without options has no title to give.
+  assert.equal(experience.required.includes("role_title"), false);
+});
+
+test("the tailor samples at temperature 0.2, and tailor/index.ts passes it on the real call", () => {
+  // The value (plan §5 P2: "temperature ~0.2").
+  assert.equal(TAILOR_TEMPERATURE, 0.2);
+  // The entrypoint is Deno-only, so its wiring is read as text: the call's generation option carries the constant.
+  const source = readFileSync(new URL("../../tailor/index.ts", import.meta.url), "utf8");
+  // The one place the tailor calls Gemini.
+  assert.match(source, /generateGeminiContent\(db, \{[\s\S]*?generation: \{ temperature: TAILOR_TEMPERATURE \}[\s\S]*?\}\);/);
 });

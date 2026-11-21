@@ -50,7 +50,8 @@ function overAt(resume: ResolvedResume, rung: number): number {
 
 test('rung 0 is today\'s stylesheet: no extra CSS, so a resume that fits renders byte-identical', () => {
   // The base parameters, pinned.
-  assert.deepEqual(TYPOGRAPHY_LADDER[0], { fontScale: 1, lineHeight: 1.38, gapScale: 1, pageMarginMm: 14, paragraphEm: 1 });
+  // skillFontScale 1 (2026-11-21): the compact skills block only starts at rung 1.
+  assert.deepEqual(TYPOGRAPHY_LADDER[0], { fontScale: 1, lineHeight: 1.38, gapScale: 1, pageMarginMm: 14, paragraphEm: 1, skillFontScale: 1 });
   // And it adds nothing.
   assert.equal(stepStylesheet(0), '');
 });
@@ -260,4 +261,71 @@ test('skill line: the label is measured bold, so a long label leaves less room t
   const names = TESTING.slice(0, 5);
   // The long label never seats more than the short one.
   assert.ok(fillSkillLine('Testing, Quality Assurance & Reliability Engineering', names, 7).length <= fillSkillLine('QA', names, 7).length);
+});
+
+// ---- COMPACT SKILLS BLOCK (Teja, 2026-11-18 ruling "compact skills block") -----------------------------------
+// The skills section may set a smaller font than the body from rung 1 on (a skills-only step), and a group may
+// wrap to TWO lines. The model must count both exactly or long, never short (repo §6: a short count is a fail-open
+// that prints a two-page resume as "fits"). Real-Chromium proof: the SKILLS axis in worker/test/page-fit-calibration.test.ts.
+
+import { fillSkillLines, SKILL_GROUP_MAX_LINES } from '../src/page-fit.ts';
+
+test('skills step: rung 0 keeps skills at the body size, so the golden render stays byte-identical', () => {
+  // Rung 0 carries the base stylesheet's 10.5pt skills, unscaled.
+  assert.equal(TYPOGRAPHY_LADDER[0]!.skillFontScale, 1);
+  // And still adds no CSS at all.
+  assert.equal(stepStylesheet(0), '');
+});
+
+test('skills step: never looser rung by rung, never under the 9pt skills floor, never larger than the body', () => {
+  // Each rung.
+  TYPOGRAPHY_LADDER.forEach((step, i) => {
+    // 9pt is the smallest skills type the compact block may print (the body's floor stays 9.5pt).
+    assert.ok(10.5 * step.skillFontScale >= 8.99, `rung ${i}: skills ${10.5 * step.skillFontScale}pt`);
+    // A skills-only step shrinks skills, it never enlarges them past the body.
+    assert.ok(step.skillFontScale <= step.fontScale, `rung ${i}: skills larger than body`);
+    // Monotone: the first rung that fits is still the widest one.
+    if (i > 0) assert.ok(step.skillFontScale <= TYPOGRAPHY_LADDER[i - 1]!.skillFontScale, `rung ${i}: looser than rung ${i - 1}`);
+  });
+  // It is a real step: at least one rung sets skills smaller than its own body text.
+  assert.ok(TYPOGRAPHY_LADDER.some((s) => s.skillFontScale < s.fontScale), 'no skills-only step on the ladder');
+});
+
+test('skills step: every rung after 0 prints the skills font size its model uses', () => {
+  // Rungs 1..last.
+  for (let i = 1; i < TYPOGRAPHY_LADDER.length; i += 1) {
+    // The size the model measures skills at on this rung.
+    const pt = (10.5 * TYPOGRAPHY_LADDER[i]!.skillFontScale).toFixed(2);
+    // The CSS must say the same, or Chromium prints a different line count than modelled.
+    // The rung's 1mm skills gap, scaled the way every other gap is.
+    const gap = (1 * TYPOGRAPHY_LADDER[i]!.gapScale).toFixed(2);
+    // One rule carries both, so a later rule cannot silently override one of them.
+    assert.ok(stepStylesheet(i).includes(`.resume__skill-group { margin: 0 0 ${gap}mm 0; font-size: ${pt}pt; }`), `rung ${i}: ${stepStylesheet(i)}`);
+  }
+});
+
+test('skills step: the modelled height of a skill group uses the SKILLS size, not the body size', () => {
+  // One skill group on its own.
+  const flow = flowOf('<article><div class="resume__skill-group"><span class="resume__skill-label">Tools:</span> Git</div></article>');
+  // The last rung: the one with the smallest skills type.
+  const step = TYPOGRAPHY_LADDER[TYPOGRAPHY_LADDER.length - 1]!;
+  // One line at the skills size and the rung's leading, plus the 1mm trailing gap scaled by the rung.
+  const expected = 10.5 * step.skillFontScale * step.lineHeight + 1 * (72 / 25.4) * step.gapScale;
+  // Exact: the box model has nothing else in it.
+  assert.ok(Math.abs(flowHeight(flow, step) - expected) < 1e-6, `got ${flowHeight(flow, step)}, want ${expected}`);
+});
+
+test('two-line groups: fillSkillLines seats more than one line holds, never more than two lines at any rung', () => {
+  // Two lines are the compact-block maximum.
+  assert.equal(SKILL_GROUP_MAX_LINES, 2);
+  // The whole Testing group, ranked.
+  const two = fillSkillLines('Testing & Quality', TESTING, 9);
+  // More than the one-line fill could seat.
+  assert.ok(two.length > fillSkillLine('Testing & Quality', TESTING, 9).length, `two-line fill ${two.length}`);
+  // Never a third line, at any rung.
+  TYPOGRAPHY_LADDER.forEach((_, i) => assert.ok(skillGroupLineCount('Testing & Quality', two, i) <= 2, `rung ${i}`));
+  // Rank order untouched.
+  assert.deepEqual(two, TESTING.filter((n) => two.includes(n)));
+  // The cap still binds.
+  assert.equal(fillSkillLines('Testing & Quality', TESTING, 3).length, 3);
 });

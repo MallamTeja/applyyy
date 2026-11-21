@@ -816,6 +816,9 @@ export interface GenerateGeminiOptions {
     // "minimal", but 3.8-flash (the code default) answers it with a 400, so it is left out
     // and cannot be expressed. https://ai.google.dev/gemini-api/docs/thinking
     readonly thinkingLevel?: "low" | "medium" | "high";
+    // Sampling temperature (2026-11-21, the tailor asks for 0.2: one stable reading of the master per job).
+    // Absent = no key on the wire, so every other caller's body stays byte-identical.
+    readonly temperature?: number;
   };
   // STREAMING (2026-11-18, resume-assist chat). Set => each attempt calls
   // `:streamGenerateContent?alt=sse` and this receives candidate 0's ACCUMULATED text of the
@@ -1022,6 +1025,8 @@ export async function generateGeminiContent(
     ...(options.generation?.maxOutputTokens !== undefined ? { maxOutputTokens: options.generation.maxOutputTokens } : {}),
     // The thinking level, under the REST field generateContent reads it from.
     ...(options.generation?.thinkingLevel !== undefined ? { thinkingConfig: { thinkingLevel: options.generation.thinkingLevel } } : {}),
+    // The sampling temperature, under the REST field generateContent reads it from.
+    ...(options.generation?.temperature !== undefined ? { temperature: options.generation.temperature } : {}),
   };
   // The JSON-mode half, unchanged in shape and key order from before.
   const schemaConfig = options.prompt.responseSchema

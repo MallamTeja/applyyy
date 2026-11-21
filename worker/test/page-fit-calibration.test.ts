@@ -220,3 +220,47 @@ test('an unrenderable resume is not "fits" (fail closed)', () => {
   // Unmeasurable reads as does-not-fit.
   expect(fitsOnePage(stale)).toBe(false);
 });
+
+// ---- SKILLS AXIS (2026-11-21, compact skills block) ------------------------------------------------------------
+// Since the compact skills block (Teja, 2026-11-18) a skill group may wrap to TWO lines and the skills print at a
+// skills-only font size from rung 1 on (TYPOGRAPHY_LADDER[i].skillFontScale). Neither had a real-Chromium check:
+// the two axes above grow bullets and the split row only. This one grows two-line skill groups on top of a
+// half-full page, so a model that under-counts a wrapped group, or measures skills at a size the CSS does not
+// print, shows up as an unsafe "fits" verdict.
+
+/** Six long names per group: at every rung the group wraps onto a second line, as a compact 2-line group does. */
+function skillNames(group: number): string[] {
+  // Deterministic, varied lengths, all inside the width tables (plain ASCII).
+  return Array.from({ length: 6 }, (_, k) => `Distributed Systems Engineering Practice ${group}-${k}`);
+}
+
+/** The fixture with 4 extra bullets (most of a page of headroom left) plus `extra` two-line skill groups. */
+function grownSkills(extra: number): ResolvedResume {
+  // The bullet-grown base, so the skills axis crosses the one-page boundary inside its range.
+  const resume = grown(4);
+  // A writable view of the flat skills list (the renderer groups by category, first appearance).
+  const skills = resume.skills as unknown as { ref: string; name: string; category: string }[];
+  // Each extra group, its own category, appended after the fixture's groups.
+  for (let g = 0; g < extra; g += 1) {
+    // Its six names, refs unique per skill.
+    skillNames(g).forEach((name, k) => skills.push({ ref: `sks_${g}_${k}`, name, category: `Engineering Practice Group ${g}` }));
+  }
+  // The grown resume.
+  return resume;
+}
+
+// 0 extra groups (fits at rung 0) to 40 (over, even at the minimum), finer where the boundary sits.
+const SKILL_SIZES = [0, 4, 8, 12, 16, 20, 24, 28, 32, 40];
+
+test('SKILLS AXIS: the model never says fits when the real PDF is two pages as two-line skill groups grow', async () => {
+  // Precondition: the added groups really wrap (2+ lines modelled at rung 0), or this axis exercises nothing new.
+  expect(renderResumeHtml(grownSkills(1))).toContain('Engineering Practice Group 0:');
+  // The skills axis.
+  const { unsafe, fitsChecked, overflowsSeen } = await sweep(SKILL_SIZES, grownSkills);
+  // No unsafe verdict: a short skills count would print a two-page PDF here.
+  expect(unsafe).toEqual([]);
+  // The axis crossed the boundary from the fitting side.
+  expect(fitsChecked).toBeGreaterThan(10);
+  // And from the overflowing side.
+  expect(overflowsSeen).toBeGreaterThan(10);
+}, 240_000);

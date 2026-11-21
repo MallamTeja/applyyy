@@ -20,9 +20,13 @@ import { test } from "node:test";
 // Strict, so a missing key never compares equal to a key holding `undefined`.
 import assert from "node:assert/strict";
 // Extension-suffixed specifier so this runs under Deno and `node --test` alike.
-import { createTailorer, shapeSkillGroups, SKILLS_PER_GROUP_CAP, skillTwinKey, TAILOR_REQUIRED_ARRAY_KEYS } from "./tailorer.ts";
-// The one-line width model the shaper fills with (2026-11-12), so a test checks the same line the PDF prints.
+import { createTailorer, orderByJdRelevance, shapeSkillGroups, SKILLS_MAX_GROUPS, SKILLS_MIN_GROUPS, SKILLS_PER_GROUP_CAP, skillTwinKey, TAILOR_REQUIRED_ARRAY_KEYS } from "./tailorer.ts";
+// The one-line width model the shaper filled with until 2026-11-21; kept to prove the 2-line engine goes past it.
 import { skillGroupFitsOneLine } from "../../../../packages/resume-template/src/index.ts";
+// The 2-line engine (2026-11-21): the line counter at every rung, and the ladder itself.
+import { skillGroupLineCount, TYPOGRAPHY_LADDER } from "../../../../packages/resume-template/src/page-fit.ts";
+// The skill preference profile: the live one, and its type for the per-test profiles.
+import { SKILL_PROFILE, type SkillProfile } from "./skill-profile.ts";
 // The live HTML posting excerpt (row 76280e87), shared with the postingText suite.
 import { CIRCUITHUB_HTML } from "./posting-html.fixture.ts";
 // The schema Gemini is actually sent, and the section tuple its enum is built from —
@@ -585,17 +589,19 @@ test("skills shape: a backend posting shows its relevant groups first, topped up
   // Topped-up refs still pass the unchanged validator: only master refs are ever added.
   assert.equal(outcome.kind, "tailored");
   if (outcome.kind !== "tailored") return;
-  // 2026-11-11 ("at least 5 groups, 4+ skills, 6 for some"): Languages and DevOps lead, so they take the floor of 6,
-  // capped at their master size (5 and 2); D2 adds the model's ML group; the master's Tools group fills toward 5
-  // groups (this master holds only 4), at the floor of 4.
-  assert.deepEqual(groupSizes(outcome.resume), { Languages: 5, DevOps: 2, "Machine Learning": 2, Tools: 4 });
-  // Posting-named skills (SQL, TypeScript) before master order (Python, Go); ML's floor adds SHAP; Tools in master order.
-  assert.deepEqual(outcome.skillsAdded, ["lang-sql", "lang-ts", "lang-python", "lang-go", "dev-gcp", "ml-shap", "tool-git", "tool-jira", "tool-postman", "tool-slack"]);
-  // Nothing dropped: the ML pick now fills the third group.
+  // Re-pinned 2026-11-21 (skills engine): Languages and DevOps lead (the posting covers them), D2 adds the model's ML
+  // group, Tools fills toward 5 groups (this master holds only 4). Every group shows all it can (up to 7, two lines);
+  // Tools is 3 because Slack is on the live never-list (Teja removed it; skill-profile.ts).
+  assert.deepEqual(groupSizes(outcome.resume), { Languages: 5, DevOps: 2, "Machine Learning": 2, Tools: 3 });
+  // Added in page order: Languages' JD-mentioned TypeScript and SQL, then its core Python, then Go; DevOps' GCP; ML's SHAP;
+  // Tools' core Git and Postman, then Jira.
+  assert.deepEqual(outcome.skillsAdded, ["lang-ts", "lang-sql", "lang-python", "lang-go", "dev-gcp", "ml-shap", "tool-git", "tool-postman", "tool-jira"]);
+  // Nothing dropped: the ML pick fills the third group.
   assert.deepEqual(outcome.skillsDropped, []);
-  // The stored refs are the shaped profile, so tailor_refs re-validates to this exact resume. Grouped
-  // and ranked (2026-11-07): Languages (3 named) before DevOps (1 named), then the topped-up ML group.
-  assert.deepEqual(outcome.refs.skills.map((s) => s.ref), ["skill-node", "lang-sql", "lang-ts", "lang-python", "lang-go", "dev-docker", "dev-gcp", "ml-xgboost", "ml-shap", "tool-git", "tool-jira", "tool-postman", "tool-slack"]);
+  // The stored refs are the shaped profile, so tailor_refs re-validates to this exact resume. Inside Languages the three
+  // the posting mentions lead (a tie, so live-profile core rank orders TypeScript before SQL; Node.js is not a Languages
+  // core), then the core Python, then master order (2026-11-18 21:47: mentioned > core > the rest).
+  assert.deepEqual(outcome.refs.skills.map((s) => s.ref), ["lang-ts", "lang-sql", "skill-node", "lang-python", "lang-go", "dev-docker", "dev-gcp", "ml-xgboost", "ml-shap", "tool-git", "tool-postman", "tool-jira"]);
 });
 
 // RED 1 (review 2026-11-07; Teja: "rank by the JD"): inside a group, a skill the posting names comes
@@ -605,9 +611,10 @@ test("skills shape: inside a group, a posting-named skill ranks ahead of a model
   const outcome = await shapeOutcome([{ ref: "lang-python" }, { ref: "lang-go" }, { ref: "skill-node" }, { ref: "lang-sql" }], BACKEND_POSTING);
   assert.equal(outcome.kind, "tailored");
   if (outcome.kind !== "tailored") return;
-  // The Languages refs in page order: the posting-named (master order; TypeScript added by the leading floor of 6), then the model's two others.
+  // The Languages refs in page order (re-pinned 2026-11-21): the three the posting names first (a tie, ordered by live
+  // core rank, TypeScript before SQL, then Node.js), then the model's Python (core) and Go. Neither model pick leads.
   const languages = outcome.refs.skills.map((s) => s.ref).filter((ref) => ref.startsWith("lang-") || ref === "skill-node");
-  assert.deepEqual(languages, ["skill-node", "lang-sql", "lang-ts", "lang-python", "lang-go"]);
+  assert.deepEqual(languages, ["lang-ts", "lang-sql", "skill-node", "lang-python", "lang-go"]);
 });
 
 // Yellow (review 2026-11-07): the page orders groups by first appearance, so the shape must emit the
@@ -618,8 +625,9 @@ test("skills shape: the most relevant group comes first on the page even when th
   assert.equal(outcome.kind, "tailored");
   if (outcome.kind !== "tailored") return;
   // Group order on the resolved resume, by first appearance.
-  // Relevant groups first by relevance; the master's other groups follow (min 5 groups, 2026-11-11).
-  assert.deepEqual(Object.keys(groupSizes(outcome.resume)), ["Languages", "DevOps", "Machine Learning", "Tools"]);
+  // Relevant groups first by relevance; the master's other groups follow (min 5 groups, 2026-11-11), since 2026-11-21 in
+  // the live profile's group order (Tools before Machine Learning) rather than master order.
+  assert.deepEqual(Object.keys(groupSizes(outcome.resume)), ["Languages", "DevOps", "Tools", "Machine Learning"]);
 });
 
 // RED 2 (review 2026-11-07): the live master holds a skill named "C". A posting that names only C++ must
@@ -648,8 +656,9 @@ test("skills shape: a group the posting names is shown even when the model skipp
   const outcome = await shapeOutcome([{ ref: "skill-node" }], { ...BACKEND_POSTING, jobDescription: "Node.js backend, tickets tracked in Jira." });
   assert.equal(outcome.kind, "tailored");
   if (outcome.kind !== "tailored") return;
-  // Languages and Tools lead (floor 6, capped at 5 and 4), then the master's other groups toward 5 (2026-11-11).
-  assert.deepEqual(groupSizes(outcome.resume), { Languages: 5, Tools: 4, DevOps: 2, "Machine Learning": 2 });
+  // Languages and Tools lead (the posting covers both), then the other groups toward 5 in live-profile order (ML is a
+  // profile row, this test's "DevOps" is not). Tools is 3: Slack is never-listed (re-pinned 2026-11-21).
+  assert.deepEqual(groupSizes(outcome.resume), { Languages: 5, Tools: 3, "Machine Learning": 2, DevOps: 2 });
   // Jira leads its group because the posting names it.
   assert.equal(outcome.refs.skills.find((s) => s.ref.startsWith("tool-"))?.ref, "tool-jira");
 });
@@ -658,7 +667,9 @@ test("skills shape: a group the posting names is shown even when the model skipp
 test("skills shape: an answer that already fits comes back unchanged", async () => {
   // Every master skill, already in the shape's order (2026-11-11: 5 groups wanted, this master holds 4; Languages
   // leads with its posting-named Node.js, SQL, TypeScript first), and a posting that touches only Languages.
-  const picks = ["skill-node", "lang-sql", "lang-ts", "lang-python", "lang-go", "dev-docker", "dev-gcp", "ml-xgboost", "ml-shap", "tool-git", "tool-jira", "tool-postman", "tool-slack"].map((ref) => ({ ref }));
+  // Re-pinned 2026-11-21 to the engine's order: mentioned TypeScript/SQL/Node.js (core rank breaks the tie), core
+  // Python, Go; Tools' core Git and Postman before Jira; no Slack (never-listed, so a pick of it is always dropped).
+  const picks = ["lang-ts", "lang-sql", "skill-node", "lang-python", "lang-go", "dev-docker", "dev-gcp", "ml-xgboost", "ml-shap", "tool-git", "tool-postman", "tool-jira"].map((ref) => ({ ref }));
   const outcome = await shapeOutcome(picks, { ...BACKEND_POSTING, jobDescription: "SQL and TypeScript on Node.js services." });
   assert.equal(outcome.kind, "tailored");
   if (outcome.kind !== "tailored") return;
@@ -674,8 +685,9 @@ test("skills shape: with no relevant group, the model's own groups are kept rath
   const outcome = await shapeOutcome([{ ref: "ml-xgboost" }], { ...BACKEND_POSTING, jobDescription: "Join a friendly team." });
   assert.equal(outcome.kind, "tailored");
   if (outcome.kind !== "tailored") return;
-  // The model's ML group stays first, holding its whole master group of 2; the master's other groups follow toward 5 (2026-11-11).
-  assert.deepEqual(groupSizes(outcome.resume), { "Machine Learning": 2, Languages: 5, DevOps: 2, Tools: 4 });
+  // The model's ML group stays first, holding its whole master group of 2; the other groups follow toward 5 (2026-11-11),
+  // since 2026-11-21 in live-profile order and with Slack never-listed (Tools 3).
+  assert.deepEqual(groupSizes(outcome.resume), { "Machine Learning": 2, Languages: 5, Tools: 3, DevOps: 2 });
 });
 
 // N1 (2026-11-07): a stored HTML posting reaches the model as text. Red on revert of the postingText
@@ -856,8 +868,8 @@ test("AI group (2026-11-10): R2 the AI group takes a seat even when 5+ other gro
   assert.ok(groups.includes("AI"), `AI group missing; groups shown: ${JSON.stringify(groups)}`);
   // Still at least 5 AI skills in it.
   assert.ok(aiRefsOf(shaped.profile.skills, master).length >= 5, "AI group holds fewer than 5 skills");
-  // And the cap holds: AI took a seat, it did not add a seventh group (SKILLS_MAX_GROUPS = 6 since 2026-11-11).
-  assert.ok(groups.length <= 6, `more than 6 groups shown: ${JSON.stringify(groups)}`);
+  // And the cap holds: AI took a seat, it did not add a group past SKILLS_MAX_GROUPS (6 from 2026-11-11, 7 since 2026-11-21).
+  assert.ok(groups.length <= SKILLS_MAX_GROUPS, `more than ${SKILLS_MAX_GROUPS} groups shown: ${JSON.stringify(groups)}`);
 });
 
 // R3 RANKED: a JD-relevant AI skill is pulled in past the floor and leads the group.
@@ -901,11 +913,14 @@ test("AI group (2026-11-10): R4 control, a master with no AI category gets no AI
   const master: MasterProfile = { ...MASTER, skills: NON_AI_SKILLS };
   // Java pick, Java JD.
   const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "lang-java" }] }, master, JAVA_JD);
-  // The three JD-relevant groups, then the master's next two toward 5 (2026-11-11): no AI seat, nothing else.
-  assert.deepEqual(groupsOf(shaped.profile.skills, master), ["Languages", "Frameworks", "Databases", "DevOps & Cloud", "Testing & Quality"]);
-  // The full shaped list: every fixture group holds 4, so the leading floor of 6 caps at 4 and each group shows all 4;
-  // any change at all to the no-AI path goes red here.
-  assert.deepEqual(shaped.profile.skills.map((s) => s.ref), ["lang-java", "lang-python", "lang-ts", "lang-sql", "fw-spring", "fw-react", "fw-express", "fw-fastapi", "db-pg", "db-mysql", "db-redis", "db-mongo", "dev-docker", "dev-aws", "dev-k8s", "dev-gha", "test-junit", "test-jest", "test-pw", "test-vitest"]);
+  // The three JD-relevant groups, then the filler in live-profile order (Backend Engineering 3, DevOps & Cloud 4, Tools 7,
+  // CS Fundamentals 8) up to SKILLS_MAX_GROUPS = 7 (2026-11-21): no AI seat, nothing else.
+  assert.deepEqual(groupsOf(shaped.profile.skills, master), ["Languages", "Frameworks", "Databases", "Backend Engineering", "DevOps & Cloud", "Tools", "CS Fundamentals"]);
+  // The full shaped list (re-pinned 2026-11-21): each group shows all 4; inside it the JD-mentioned skill first, then the
+  // live core in profile order (Python, TypeScript, SQL; FastAPI; Redis, MySQL; REST APIs, Caching), then master order.
+  // Any change at all to the no-AI path goes red here.
+  // Since 2026-11-21 the filler reaches 7 groups: Tools (core Git, Postman, then master order) and CS Fundamentals (its one skill).
+  assert.deepEqual(shaped.profile.skills.map((s) => s.ref), ["lang-java", "lang-python", "lang-ts", "lang-sql", "fw-spring", "fw-fastapi", "fw-react", "fw-express", "db-pg", "db-redis", "db-mysql", "db-mongo", "be-rest", "be-cache", "be-micro", "be-design", "dev-docker", "dev-aws", "dev-k8s", "dev-gha", "tool-git", "tool-postman", "tool-jira", "tool-vscode", "cs-dsa"]);
 });
 
 // R5 KEEPS PICKS, UP TO THE LINE (2026-11-12): model picks win the line's seats over unpicked skills, but the line is
@@ -921,10 +936,11 @@ test("AI group (2026-11-12): R5 seven model-picked AI skills fill the one line f
   const ai = aiRefsOf(shaped.profile.skills, master);
   // The AI line holds the floor of 5 at least.
   assert.ok(ai.length >= 5, `AI group under its floor: ${JSON.stringify(ai)}`);
-  // Every seat went to a model pick: a pick always outranks an unpicked skill the posting never names.
-  for (const ref of ai) assert.ok(aiPicks.includes(ref), `unpicked ${ref} took a seat ahead of a model pick`);
-  // It is ONE line, by the same model the PDF is fitted with.
-  assert.ok(skillGroupFitsOneLine("AI", ai.map((ref) => master.skills.find((s) => s.id === ref)!.name)), "the AI group wraps");
+  // Re-pinned 2026-11-21 (core + JD fill): the live AI core seats first whatever the model picked, so a pick no longer
+  // outranks a core skill; every core skill the master holds is on the line.
+  for (const name of SKILL_PROFILE.groups.find((g) => g.category === "AI")!.core) assert.ok(ai.includes(aiId(name)), `core ${name} missing`);
+  // At most two printed lines (the compact skills block), by the same model the PDF is fitted with, at most 7.
+  assert.ok(ai.length <= SKILLS_PER_GROUP_CAP && TYPOGRAPHY_LADDER.every((_, i) => skillGroupLineCount("AI", ai.map((ref) => master.skills.find((s) => s.id === ref)!.name), i) <= 2), "the AI group passes two lines");
   // Every pick that lost its seat is reported dropped, none silently.
   assert.deepEqual(shaped.dropped.filter((ref) => aiPicks.includes(ref)), aiPicks.filter((ref) => !ai.includes(ref)), "a pick past the line was not reported");
 });
@@ -935,8 +951,14 @@ test("AI group (2026-11-10): R6 a backend JD saying caching and APIs does not pr
   const master = aiMaster(AI_SKILL_NAMES_V32);
   // Generic words that ARE vocabulary terms elsewhere (caching, APIs, monitoring, agents), and no AI term at all.
   const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "lang-java" }] }, master, "Java backend: caching, REST APIs, agents and monitoring.");
-  // With no AI term in the posting, the group is simply the first 5 in master order.
-  assert.deepEqual(aiRefsOf(shaped.profile.skills, master), AI_SKILL_NAMES_V32.slice(0, 5).map(aiId));
+  // The AI group on the page.
+  const ai = aiRefsOf(shaped.profile.skills, master);
+  // THE RULE UNDER TEST: neither generic-word match takes a seat on its strength. Prompt Caching (14th) never seats.
+  assert.equal(ai.includes(aiId("Prompt Caching")), false, "caching promoted Prompt Caching");
+  // Re-pinned 2026-11-21: with no AI term in the posting, the live AI core leads in profile order, then master order fills
+  // until two lines are full (cap 10 since 14:41; long names stop it at 9, skipping the ones that would add a third line);
+  // LLM Applications is the twin of the master's LLM/SLM API Integration, so only the kept spelling shows.
+  assert.deepEqual(ai, ["AI Agents & Workflows", "RAG Pipelines", "Prompt Engineering", "Context Engineering", "Tool Calling & Guardrails", "LLM/SLM API Integration", "Multi-Agent Systems", "Prompt Injection Protection", "Quantization"].map(aiId));
 });
 
 // Review finding 2b (2026-11-10): five model picks the posting never names must not keep out an AI skill it does name.
@@ -953,10 +975,12 @@ test("AI group (2026-11-10): R7 five unnamed model AI picks still let the JD-nam
   const ai = aiRefsOf(shaped.profile.skills, master);
   // RAG Pipelines is in and leads (since 2026-11-12 the picks follow it only as far as the ONE line reaches).
   assert.equal(ai[0], aiId("RAG Pipelines"), `the JD-named RAG Pipelines does not lead: ${JSON.stringify(ai)}`);
-  // The picks follow in their master order, a prefix of the five, so the line is the best seats, not a random subset.
-  assert.deepEqual(ai.slice(1), firstEight.slice(0, ai.length - 1).map(aiId).filter((ref) => ai.includes(ref)));
-  // Still the floor of 5, and still one line.
-  assert.ok(ai.length >= 5 && skillGroupFitsOneLine("AI", ai.map((ref) => master.skills.find((s) => s.id === ref)!.name)), `AI line wrong: ${JSON.stringify(ai)}`);
+  // Re-pinned 2026-11-21: the rest of the live AI core follows in profile order, then the model's remaining pick (Tool
+  // Calling & Guardrails), then master order (Vector Search is never-listed; LLM Applications yields to its kept twin).
+  // (Cap 10 since 2026-11-21 14:41: master order continues until two lines are full.)
+  assert.deepEqual(ai.slice(1), ["AI Agents & Workflows", "Prompt Engineering", "Context Engineering", "Tool Calling & Guardrails", "LLM/SLM API Integration", "Multi-Agent Systems", "Prompt Injection Protection", "Quantization"].map(aiId));
+  // Still the floor of 5, and at most two printed lines.
+  assert.ok(ai.length >= 5 && TYPOGRAPHY_LADDER.every((_, i) => skillGroupLineCount("AI", ai.map((ref) => master.skills.find((s) => s.id === ref)!.name), i) <= 2), `AI line wrong: ${JSON.stringify(ai)}`);
 });
 
 // ---- ONE GROUP = ONE FULL LINE (Teja, 2026-11-12 13:57 IST) ---------------------------------------------------
@@ -978,7 +1002,8 @@ const lineGroupsOf = (skills: readonly { readonly ref: string }[], master: Maste
 };
 
 // L1 THE RULE. RED-ON-REVERT: the 11-11 shaper kept every model pick, so 9 picked Testing skills printed 9 (two lines).
-test("skills line (2026-11-12): L1 a model that picks all 9 Testing skills gets ONE line of at most 7, filled, never a wrap", () => {
+// Re-pinned 2026-11-21 (compact skills block, Teja 2026-11-18, newer than this 11-12 one-line rule): TWO lines.
+test("skills line (2026-11-21): L1 a model that picks all 9 Testing skills gets at most 7 in at most TWO lines, filled", () => {
   // The master above.
   const master = lineMaster();
   // The model picks every Testing skill, on a posting that names testing.
@@ -988,30 +1013,33 @@ test("skills line (2026-11-12): L1 a model that picks all 9 Testing skills gets 
   // Non-vacuity: the Testing group is on the page.
   const testing = groups.get("Testing & Quality");
   assert.ok(testing !== undefined && testing.length > 0, "the Testing group is missing; the case under test is absent");
-  // Every group on the page: one line, at most 7.
+  // Two printed lines at most, at every rung (the shared width model the PDF is fitted with).
+  const twoLines = (category: string, names: readonly string[]): boolean => TYPOGRAPHY_LADDER.every((_, i) => skillGroupLineCount(category, names, i) <= 2);
+  // Every group on the page: at most two lines, at most 7.
   for (const [category, names] of groups) {
     // At most the cap.
     assert.ok(names.length <= SKILLS_PER_GROUP_CAP, `${category} holds ${names.length} > ${SKILLS_PER_GROUP_CAP}`);
-    // One printed line at every typography rung.
-    assert.ok(skillGroupFitsOneLine(category, names), `${category} wraps: ${names.join(", ")}`);
+    // Two printed lines at most at every typography rung.
+    assert.ok(twoLines(category, names), `${category} passes two lines: ${names.join(", ")}`);
   }
-  // FULL: no unseated Testing skill would still fit on the line (unless the cap is reached).
-  const unseated = TESTING_V41.filter((n) => !testing.includes(n));
-  // The line is at the cap, or nothing left fits.
-  assert.ok(testing.length === SKILLS_PER_GROUP_CAP || unseated.every((n) => !skillGroupFitsOneLine("Testing & Quality", [...testing, n])), `the Testing line has room left: ${testing.join(", ")}`);
-  // And the posting-named skills hold the first seats.
-  assert.deepEqual(testing.slice(0, 4), ["JUnit", "pytest", "Integration Testing", "API Testing"]);
+  // FULL: no unseated Testing skill would still fit in the two lines (unless the cap is reached). "Testing" itself is
+  // the dropped twin of "Unit Testing" (live profile), so it is out by rule, not for room.
+  const unseated = TESTING_V41.filter((n) => !testing.includes(n) && n !== "Testing");
+  // At the cap, or nothing left fits.
+  assert.ok(testing.length === SKILLS_PER_GROUP_CAP || unseated.every((n) => !twoLines("Testing & Quality", [...testing, n])), `the Testing group has room left: ${testing.join(", ")}`);
+  // And the four skills the posting names hold the first seats (a tie of "mentioned"; core pytest leads the tie).
+  assert.deepEqual(testing.slice(0, 4), ["pytest", "JUnit", "Integration Testing", "API Testing"]);
 });
 
 // L2 THE CAP: a group of nine very short names fits nine on a line, but shows seven.
-test("skills line (2026-11-12): L2 nine short skills that would all fit one line still stop at the cap of 7", () => {
-  // Nine short Languages names (they would fit one line together).
-  const short = ["C", "R", "Go", "SQL", "Java", "HTML", "CSS", "Rust", "Bash"];
-  // Non-vacuity: all nine really fit one line, so only the cap can stop them.
-  assert.ok(skillGroupFitsOneLine("Languages", short), "nine short names wrap; the cap is not what is under test");
+test("skills line (2026-11-21): L2 thirteen short skills that would all fit two lines still stop at the cap of 10", () => {
+  // Thirteen short Languages names (re-pinned 2026-11-21 for the cap of 10: nine no longer reach the cap).
+  const short = ["C", "R", "Go", "SQL", "Java", "HTML", "CSS", "Rust", "Bash", "Perl", "Lua", "Dart", "Zig"];
+  // Non-vacuity: all thirteen fit two lines at every rung, so only the cap can stop them.
+  assert.ok(TYPOGRAPHY_LADDER.every((_, i) => skillGroupLineCount("Languages", short, i) <= 2), "thirteen short names pass two lines; the cap is not what is under test");
   // A master of that group plus the AI fixture.
   const master: MasterProfile = { ...MASTER, skills: [...short.map((name, i) => ({ id: `ln-${i}`, name, category: "Languages" })), ...AI_SKILL_NAMES_V32.map((name) => ({ id: aiId(name), name, category: "AI" }))] };
-  // The model picks all nine.
+  // The model picks all thirteen.
   const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: short.map((_, i) => ({ ref: `ln-${i}` })) }, master, "Systems engineer: C, Go, SQL.");
   // Exactly the cap.
   assert.equal(lineGroupsOf(shaped.profile.skills, master).get("Languages")?.length, SKILLS_PER_GROUP_CAP);
@@ -1031,4 +1059,230 @@ test("skills line (2026-11-12): L3 two spellings of one skill take one seat, the
   const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [{ ref: "fw-a" }, { ref: "fw-b" }] }, master, "Node backend with Express.js.");
   // Only the JD's own spelling prints.
   assert.deepEqual(lineGroupsOf(shaped.profile.skills, master).get("Frameworks"), ["Express.js", "FastAPI"]);
+});
+
+// ---- TAILOR #5 PARCEL 2 (2026-11-21): the skills engine — core + JD fill, never-list, twins, tiers, 2-line groups ----
+// Rulings: core + JD fill (Teja 2026-11-18); most-needed first in skills, groups, projects and achievements (2026-11-18
+// 21:47); >= 5 groups of up to 7 skills (2026-11-12 13:57); a group may wrap to 2 lines (2026-11-18 "compact skills
+// block"); AI group >= 5 from the master (2026-11-10). Each test passes its OWN profile, so a rule is pinned by data the
+// test controls, not by today's live profile (which the learning loop will keep editing).
+
+// A profile with nothing in it: the engine must still work (JD fill and master order only).
+const EMPTY_PROFILE: SkillProfile = { groups: [], never: [], twins: [], aliases: {} };
+
+// A wider master: two-line groups need more names than one line holds.
+const ENGINE_MASTER: MasterProfile = {
+  ...MASTER,
+  skills: [
+    // Languages, master order: Go, Python, SQL, Java, Rust.
+    { id: "l-go", name: "Go", category: "Languages" },
+    { id: "l-py", name: "Python", category: "Languages" },
+    { id: "l-sql", name: "SQL", category: "Languages" },
+    { id: "l-java", name: "Java", category: "Languages" },
+    { id: "l-rust", name: "Rust", category: "Languages" },
+    // Tools, including a never-list candidate (Slack).
+    { id: "t-jira", name: "Jira", category: "Tools" },
+    { id: "t-slack", name: "Slack", category: "Tools" },
+    { id: "t-git", name: "Git", category: "Tools" },
+    { id: "t-postman", name: "Postman", category: "Tools" },
+    // CS Fundamentals, named in JDs by other words ("data structures").
+    { id: "c-dsa", name: "DSA", category: "CS Fundamentals" },
+    { id: "c-os", name: "Operating Systems", category: "CS Fundamentals" },
+    // Testing: two spellings of one skill, and long names that wrap past one line.
+    { id: "q-testing", name: "Testing", category: "Testing & Quality" },
+    { id: "q-unit", name: "Unit Testing", category: "Testing & Quality" },
+    { id: "q-review", name: "Code review", category: "Testing & Quality" },
+    { id: "q-debug", name: "Debugging & Troubleshooting", category: "Testing & Quality" },
+    { id: "q-int", name: "Integration Testing", category: "Testing & Quality" },
+    { id: "q-api", name: "API Testing", category: "Testing & Quality" },
+    { id: "q-pw", name: "Playwright Testing", category: "Testing & Quality" },
+    { id: "q-junit", name: "JUnit", category: "Testing & Quality" },
+    // DevOps, a fifth group.
+    { id: "d-docker", name: "Docker", category: "DevOps & Cloud" },
+    { id: "d-aws", name: "AWS", category: "DevOps & Cloud" },
+  ],
+};
+
+// Shapes `skills` refs over ENGINE_MASTER with a profile; returns the printed names per group, in page order.
+function engine(skills: readonly string[], jd: string, profile: SkillProfile) {
+  // The model's answer: only its skills vary.
+  const tailored: TailoredProfile = { ...HONEST_TAILORING, skills: skills.map((ref) => ({ ref })) };
+  // The engine itself.
+  const shaped = shapeSkillGroups(tailored, ENGINE_MASTER, jd, profile);
+  // Names by id, for readable assertions.
+  const byId = new Map(ENGINE_MASTER.skills.map((s) => [s.id, s]));
+  // Group -> names, in first-appearance (= page) order.
+  const groups = new Map<string, string[]>();
+  // One pass over the printed refs.
+  for (const { ref } of shaped.profile.skills) {
+    // The master skill behind the ref.
+    const s = byId.get(ref)!;
+    // Appended to its group.
+    groups.set(s.category, [...(groups.get(s.category) ?? []), s.name]);
+  }
+  // Both views.
+  return { groups, shaped };
+}
+
+test("engine constants: >= 5 groups of up to 10 skills (Teja 2026-11-21 14:41), up to 7 groups (2026-11-21), groups may wrap to 2 lines (2026-11-18)", () => {
+  // Up to 10 per group (Teja 2026-11-21 14:41: "increase that cap to 3 more skills in each"; was 7 since 2026-11-12).
+  assert.equal(SKILLS_PER_GROUP_CAP, 10);
+  // At least 5 groups.
+  assert.equal(SKILLS_MIN_GROUPS, 5);
+  // Up to 7 groups (orch ruling 2026-11-21: Teja's 11-12 ruling sets no group max; his ideals have 7 groups, 25 of 26).
+  assert.equal(SKILLS_MAX_GROUPS, 7);
+  // The live profile never sets a group above the cap.
+  assert.ok(SKILL_PROFILE.groups.every((g) => g.max <= SKILLS_PER_GROUP_CAP), "a profile row above the cap");
+  // And every live row uses the full cap of 10 (the ruling raised every group, not some).
+  assert.ok(SKILL_PROFILE.groups.every((g) => g.max === SKILLS_PER_GROUP_CAP), "a profile row below the cap of 10");
+  // The AI row keeps its floor of 5.
+  assert.equal(SKILL_PROFILE.groups.find((g) => g.category === PAGE_FIT_FLOORS.aiSkillsCategory)?.min, PAGE_FIT_FLOORS.minAiSkills);
+});
+
+test("CORE: a profile's core skills ship even when the JD never names them and the model never picked them", () => {
+  // Tools core = Postman, Git, in a group of only 2 seats; the posting names Jira, not them. Without the core rule the
+  // JD-named Jira and then master order (Jira, Slack) would take both seats, so this is red on revert.
+  const { groups, shaped } = engine(["l-go"], "Requirements:\n- Go and Jira", { ...EMPTY_PROFILE, groups: [{ category: "Tools", core: ["Postman", "Git"], min: 2, max: 2, order: 1 }] });
+  // Exactly the two core skills (core ships first; the JD fill only takes seats the core leaves).
+  assert.deepEqual([...(groups.get("Tools") ?? [])].sort(), ["Git", "Postman"], `Tools = ${groups.get("Tools")}`);
+  // Reported as added (never silent).
+  assert.ok(shaped.added.includes("t-postman") && shaped.added.includes("t-git"));
+});
+
+test("CORE: a core name the master does not hold is skipped, never invented (master-only rule)", () => {
+  // "Kubernetes" is not an ENGINE_MASTER skill.
+  const { shaped } = engine(["l-go"], "Go", { ...EMPTY_PROFILE, groups: [{ category: "DevOps & Cloud", core: ["Kubernetes", "Docker"], min: 1, max: 7, order: 1 }] });
+  // Every printed ref resolves to the master.
+  assert.ok(shaped.profile.skills.every(({ ref }) => ENGINE_MASTER.skills.some((s) => s.id === ref)));
+});
+
+test("NEVER: a never-list skill is blocked even when the JD names it and the model picked it, and the drop is reported", () => {
+  // The posting names Slack; the model picked it.
+  const { groups, shaped } = engine(["t-slack", "t-jira"], "Requirements:\n- Slack and Jira", { ...EMPTY_PROFILE, never: ["Slack"] });
+  // Not printed anywhere.
+  assert.ok(![...groups.values()].flat().includes("Slack"), "Slack printed");
+  // Reported.
+  assert.ok(shaped.dropped.includes("t-slack"));
+});
+
+test("TWINS: two spellings of one skill print once, the profile's kept spelling", () => {
+  // The model picked both spellings.
+  const { groups } = engine(["q-testing", "q-unit"], "unit tests", { ...EMPTY_PROFILE, twins: [["Unit Testing", "Testing"]] });
+  // The printed group.
+  const q = groups.get("Testing & Quality") ?? [];
+  // Unit Testing in, Testing out.
+  assert.ok(q.includes("Unit Testing") && !q.includes("Testing"), `Testing & Quality = ${q}`);
+});
+
+test("ALIAS: a JD that says 'data structures' makes DSA JD-relevant (alias match, not exact name)", () => {
+  // The alias maps the JD's words to the master name.
+  const { groups } = engine(["l-go"], "Requirements:\n- Strong data structures", { ...EMPTY_PROFILE, aliases: { DSA: ["data structures"] } });
+  // The alias gives CS Fundamentals the only JD coverage, so it leads the PAGE (without the alias it would follow the
+  // model's Languages group: DSA is first in its group by master order anyway, so that alone could not go red).
+  assert.equal([...groups.keys()][0], "CS Fundamentals");
+  // And DSA leads it.
+  assert.equal(groups.get("CS Fundamentals")?.[0], "DSA");
+});
+
+test("TIERS: inside a group, required before preferred before mentioned before core, then master order", () => {
+  // Rust required, Java preferred, SQL mentioned; Python is core; Go is only in the master.
+  const jd = "We like SQL.\nRequirements:\n- Rust\nNice to have:\n- Java";
+  // Python core in Languages.
+  const { groups } = engine([], jd, { ...EMPTY_PROFILE, groups: [{ category: "Languages", core: ["Python"], min: 1, max: 7, order: 1 }] });
+  // The ruling's order exactly.
+  assert.deepEqual(groups.get("Languages"), ["Rust", "Java", "SQL", "Python", "Go"]);
+});
+
+test("TIERS: groups are ordered by how much of the JD they cover (tier-weighted), not by master order", () => {
+  // Two required DevOps skills outweigh one mentioned language.
+  const { groups } = engine([], "We like Go.\nRequirements:\n- Docker\n- AWS", EMPTY_PROFILE);
+  // DevOps first.
+  assert.equal([...groups.keys()][0], "DevOps & Cloud");
+});
+
+test("TWO LINES: a group seats more than one printed line holds, never more than two, never more than the cap", () => {
+  // Every Testing name ranked; no profile limits.
+  const { groups } = engine([], "unit tests", EMPTY_PROFILE);
+  // The printed group.
+  const q = groups.get("Testing & Quality") ?? [];
+  // More than the one-line fill could hold.
+  assert.ok(!skillGroupFitsOneLine("Testing & Quality", q), `still one line: ${q}`);
+  // Never a third line at any rung.
+  assert.ok(TYPOGRAPHY_LADDER.every((_, i) => skillGroupLineCount("Testing & Quality", q, i) <= 2));
+  // And within the cap.
+  assert.ok(q.length <= SKILLS_PER_GROUP_CAP);
+});
+
+test("MAX: a profile row's max caps its group below 7", () => {
+  // Languages max 2.
+  const { groups } = engine([], "Go Python SQL Java Rust", { ...EMPTY_PROFILE, groups: [{ category: "Languages", core: [], min: 1, max: 2, order: 1 }] });
+  // Exactly two.
+  assert.equal(groups.get("Languages")?.length, 2);
+});
+
+test("GROUP COUNT: at least 5 groups when the master holds 5, even for a one-skill posting", () => {
+  // A posting naming only Go.
+  const { groups } = engine(["l-go"], "Go", EMPTY_PROFILE);
+  // Five groups.
+  assert.equal(groups.size, 5);
+});
+
+test("PROJECTS + ACHIEVEMENTS: the most JD-relevant entry first, the rest in their given order", () => {
+  // Two projects and two achievements, the second of each about Kubernetes.
+  const master = {
+    ...MASTER,
+    projects: [
+      { id: "p-a", name: "Portal", bullets: [{ id: "pa1", text: "Built a Python portal", tags: [] }] },
+      { id: "p-b", name: "Cluster", bullets: [{ id: "pb1", text: "Ran Kubernetes clusters", tags: [] }] },
+    ],
+    achievements: [
+      { id: "a-a", label: "Python award", description: null, bullets: [] },
+      { id: "a-b", label: "Kubernetes award", description: null, bullets: [] },
+    ],
+  } as unknown as MasterProfile;
+  // The model's order: A then B.
+  const tailored = { ...HONEST_TAILORING, projects: [{ ref: "p-a", bullets: [] }, { ref: "p-b", bullets: [] }], achievements: [{ ref: "a-a", bullets: [] }, { ref: "a-b", bullets: [] }] } as unknown as TailoredProfile;
+  // A posting that requires Kubernetes and only mentions Python.
+  const ordered = orderByJdRelevance(tailored, master, "We use Python.\nRequirements:\n- Kubernetes");
+  // B first in projects.
+  assert.deepEqual(ordered.projects.map((p) => p.ref), ["p-b", "p-a"]);
+  // Same for achievements.
+  assert.deepEqual(ordered.achievements.map((a) => a.ref), ["a-b", "a-a"]);
+  // A posting naming neither keeps the given order (stable).
+  assert.deepEqual(orderByJdRelevance(tailored, master, "Rust").projects.map((p) => p.ref), ["p-a", "p-b"]);
+});
+
+// RED-ON-REVERT for the CALL in createTailorer: the unit test above calls orderByJdRelevance directly, so it would stay
+// green if the tailor stopped calling it. This runs the real tailorer end to end.
+test("PROJECTS + ACHIEVEMENTS: the tailor itself stores achievements most JD-relevant first (call-site guard)", async () => {
+  // MASTER plus two achievements, the second about Kubernetes.
+  const master: MasterProfile = { ...MASTER, achievements: [{ id: "a-a", label: "Python award", description: null, bullets: [] }, { id: "a-b", label: "Kubernetes award", description: null, bullets: [] }] };
+  // The model lists them A then B, and prints the section.
+  const answer: TailoredProfile = { ...HONEST_TAILORING, section_order: ["experience", "skills", "achievements"], achievements: [{ ref: "a-a", bullets: [] }, { ref: "a-b", bullets: [] }] };
+  // The real runner over that master.
+  const tailor = createTailorer({ callLlm: () => Promise.resolve(JSON.stringify(answer)), master, masterVersion: MASTER_VERSION });
+  // A posting that requires Kubernetes.
+  const outcome = await tailor({ ...POSTING, jobDescription: "Requirements:\n- Kubernetes" });
+  // Stored, not refused.
+  assert.equal(outcome.kind, "tailored");
+  if (outcome.kind !== "tailored") return;
+  // B first in the stored refs.
+  assert.deepEqual(outcome.refs.achievements.map((a) => a.ref), ["a-b", "a-a"]);
+});
+
+// SEVEN GROUPS (orch ruling 2026-11-21 on peer 4's r4 measurement): Teja's 11-12 13:57 ruling is ">= 5 groups, up to 7
+// skills each" with no group maximum; his 33 ideals carry 7 groups (25 of 26 matched) and his chat-edited finals 6.7. The
+// r3 engine filled only to the floor of 5, so Databases / Tools / CS Fundamentals (core PostgreSQL, Git, GitHub, Redis)
+// lost their seat on 13-20 of 26 ideals. Red on revert of the filler target (back to SKILLS_MIN_GROUPS) or of the cap.
+test("SEVEN GROUPS: a posting that covers 1 group still shows 7 when the master holds 7 or more (filler up to SKILLS_MAX_GROUPS)", () => {
+  // Ten master groups of two skills each, none named by the posting except Go.
+  const master: MasterProfile = { ...MASTER, skills: Array.from({ length: 10 }, (_, g) => [0, 1].map((k) => ({ id: `g${g}-${k}`, name: g === 0 && k === 0 ? "Go" : `Skill ${g}-${k}`, category: `Group ${g}` }))).flat() };
+  // A posting that names only Go.
+  const shaped = shapeSkillGroups({ ...HONEST_TAILORING, skills: [] }, master, "Go", EMPTY_PROFILE);
+  // The groups on the page.
+  const groups = new Set(shaped.profile.skills.map(({ ref }) => master.skills.find((s) => s.id === ref)!.category));
+  // Exactly the cap: filled past the floor of 5, never past 7.
+  assert.equal(groups.size, SKILLS_MAX_GROUPS);
+  // And the covered group leads.
+  assert.equal(master.skills.find((s) => s.id === shaped.profile.skills[0]!.ref)?.category, "Group 0");
 });

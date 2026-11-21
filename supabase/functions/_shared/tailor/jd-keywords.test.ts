@@ -10,7 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 // Extension-suffixed so this runs under Deno and `node --test` alike.
 // keywordAppearsIn is the NUMERATOR's rule; testing it beside the extractor keeps them one rule.
-import { AI_VOCABULARY_TERMS, canonicalSkillTerm, extractJdKeywords, keywordAppearsIn } from "./jd-keywords.ts";
+import { AI_VOCABULARY_TERMS, canonicalSkillTerm, classifyJd, extractJdKeywords, JD_TIER_WEIGHT, jdTierOf, keywordAppearsIn } from "./jd-keywords.ts";
 
 // A short posting in the shape of the live GitLab one, written for this test.
 const POSTING = [
@@ -28,9 +28,10 @@ test("finds the posting's skill terms, sorted, each once", () => {
   // The exact list, so a vocabulary edit that changes it is a visible decision.
   assert.deepEqual(extractJdKeywords(POSTING), [
     // Code-point order: uppercase-led terms ("CI/CD", "Caching") sort before lowercase-led.
-    "CI/CD", "Caching", "Code review", "Docker", "Go", "Kubernetes", "Message queues",
-    // "Testing" comes from "unit tests"; "On-call" and "Code review" from the practice line.
-    "Observability", "On-call", "PostgreSQL", "Rails", "Ruby", "Rust", "Testing",
+    "CI/CD", "Caching", "Code review", "Docker", "Go", "Kubernetes",
+    // "Testing" comes from "unit tests", "Code review" from the practice line. "Message queues" and "On-call" left
+    // the vocabulary on 2026-11-21 (vague: they named no skill a resume can show).
+    "Observability", "PostgreSQL", "Rails", "Ruby", "Rust", "Testing",
     // Absent on purpose: nothing from the boilerplate line, and no "SQL" from "PostgreSQL".
   ]);
 });
@@ -190,7 +191,9 @@ test("&amp; is decoded exactly once, never twice", () => {
 
 test("one rule: every term extractJdKeywords returns is credited by keywordAppearsIn on the same text", () => {
   // POSTING plus a line exercising the case-sensitive and hand-written terms.
-  const text = `${POSTING}\nBuild RESTful APIs and AI agents with SQL, Helm, Spring Boot, Azure, Spark, k8s and integration tests.`;
+  // (2026-11-21: Git, Postman, Jest and Next.js added, replacing the three terms that left the vocabulary, so the
+  // list stays >= 20 and the four new patterns go through the one-rule check too.)
+  const text = `${POSTING}\nBuild RESTful APIs and AI agents with SQL, Helm, Spring Boot, Azure, Spark, k8s and integration tests, Git, Postman, Jest and Next.js.`;
   // The extractor's list is the denominator.
   const terms = extractJdKeywords(text);
   // Guard against a vacuous pass: an empty list would make the loop below prove nothing.
@@ -238,4 +241,83 @@ test("AI_VOCABULARY_TERMS: every AI term is a vocabulary term the extractor emit
   assert.ok(AI_VOCABULARY_TERMS.size >= 5, `expected the 5 AI terms, got ${AI_VOCABULARY_TERMS.size}`);
   // Each term, written into a posting the way a recruiter would, comes back from the extractor under its own name.
   for (const term of AI_VOCABULARY_TERMS) assert.ok(extractJdKeywords(`Experience with ${term} required.`).includes(term), `${term} is not emitted`);
+});
+
+// ---- 2026-11-21, tailor #5 parcel 2 (plan §5 P3): aliases, new terms, vague terms out, requirement tiers ----
+
+test("aliases: JS and TS credit JavaScript and TypeScript, never the .js inside Node.js / Next.js / React.js", () => {
+  // The short forms recruiters write.
+  assert.equal(keywordAppearsIn("JavaScript", "Strong JS fundamentals"), true);
+  // TS, often beside Node.
+  assert.equal(keywordAppearsIn("TypeScript", "TS/Node services"), true);
+  // The trap: a ".js" suffix is the framework's name, not a JavaScript requirement.
+  assert.equal(keywordAppearsIn("JavaScript", "Built with Node.js, Next.js and React.js"), false);
+  // And the master spelling maps to the term, so a skill named "JS" is JavaScript.
+  assert.equal(canonicalSkillTerm("JS"), "JavaScript");
+  // k8s already credits Kubernetes (kept, pinned here beside the new aliases).
+  assert.equal(keywordAppearsIn("Kubernetes", "deploy on k8s"), true);
+});
+
+test("new terms: Next.js, Postman, Git and Jest are extracted; Git is not found inside GitHub", () => {
+  // Each new term in one posting.
+  assert.deepEqual(extractJdKeywords("Next.js frontend, Jest tests, API checks in Postman, version control with Git."), ["APIs", "Git", "Jest", "Next.js", "Postman"]);
+  // GitHub is not Git (word-bounded).
+  assert.equal(extractJdKeywords("Host the code on GitHub.").includes("Git"), false);
+});
+
+test("vague terms are out: messaging/queues, profiling, concurrency and on-call extract nothing; APIs stays (restored 14:52)", () => {
+  // Soft practice words that matched almost every posting and named no skill a resume can show.
+  assert.deepEqual(extractJdKeywords("Build messaging queues, profiling, concurrency, on-call rotation."), []);
+  // APIs was restored to the vocabulary (orch, 2026-11-21 14:52).
+  assert.deepEqual(extractJdKeywords("Build APIs."), ["APIs"]);
+});
+
+// A posting with the usual sections; each skill sits in exactly one of them.
+const TIERED = [
+  "About the role",
+  "You will build services with Docker.",
+  "Requirements:",
+  "- Strong Python and SQL",
+  "- Experience with PostgreSQL",
+  "Nice to have:",
+  "- Kubernetes",
+  "- Redis is a plus",
+].join("\n");
+
+test("tiers: a skill under Requirements is required, under Nice to have is preferred, elsewhere mentioned, absent null", () => {
+  // The posting's sentences, classified once.
+  const jd = classifyJd(TIERED);
+  // Under the Requirements heading.
+  assert.equal(jdTierOf(["Python"], jd), "required");
+  // Also required.
+  assert.equal(jdTierOf(["PostgreSQL"], jd), "required");
+  // Under Nice to have.
+  assert.equal(jdTierOf(["Kubernetes"], jd), "preferred");
+  // In the "about the role" prose: mentioned, the weakest present tier.
+  assert.equal(jdTierOf(["Docker"], jd), "mentioned");
+  // Not in the posting at all.
+  assert.equal(jdTierOf(["Java"], jd), null);
+  // Alias phrases count: any phrase that matches gives the tier.
+  assert.equal(jdTierOf(["Postgres", "PostgreSQL"], jd), "required");
+});
+
+test("tiers: an inline 'a plus' / 'preferred' marks its own sentence preferred, even inside Requirements", () => {
+  // One required line, one inline-preferred line, under the same heading.
+  const jd = classifyJd("Requirements:\n- Java\n- Experience with Kafka is a plus");
+  // The plain requirement.
+  assert.equal(jdTierOf(["Java"], jd), "required");
+  // The inline marker wins for its own sentence.
+  assert.equal(jdTierOf(["Kafka"], jd), "preferred");
+});
+
+test("tiers: the BEST tier wins when a skill appears in several sections", () => {
+  // Docker in the prose and in the requirements.
+  const jd = classifyJd("We use Docker everywhere.\nRequirements:\n- Docker");
+  // Required beats mentioned.
+  assert.equal(jdTierOf(["Docker"], jd), "required");
+});
+
+test("tiers: the weights rank required > preferred > mentioned", () => {
+  // Strictly ordered, so a sort by weight is the ruling's order.
+  assert.ok(JD_TIER_WEIGHT.required > JD_TIER_WEIGHT.preferred && JD_TIER_WEIGHT.preferred > JD_TIER_WEIGHT.mentioned && JD_TIER_WEIGHT.mentioned > 0);
 });

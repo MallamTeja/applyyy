@@ -76,8 +76,11 @@ function serverOpKinds(): string[] {
   const kinds: unknown = schema?.properties?.ops?.items?.properties?.op?.enum;
   // A list of strings, non-empty.
   assert.ok(Array.isArray(kinds) && kinds.length > 0 && kinds.every((k) => typeof k === 'string'), 'server op enum not found at responseSchema.properties.ops.items.properties.op.enum');
+  // The kinds only the MODEL writes (add_group, 2026-11-21): the server expands them before answering, so the browser
+  // never receives one. Subtracted here; the leak test below proves an answer really never carries one.
+  const modelOnly = new Set<string>(server.MODEL_ONLY_OP_KINDS);
   // Sorted, so order changes on either side do not matter.
-  return [...(kinds as string[])].sort();
+  return [...(kinds as string[])].filter((kind) => !modelOnly.has(kind)).sort();
 }
 
 describe('resume-assist op contract: server kinds vs web reader', () => {
@@ -101,5 +104,25 @@ describe('resume-assist op contract: server kinds vs web reader', () => {
       // And read as the same op, field for field.
       if (result.kind === 'ok') assert.deepEqual(result.ops, [op], `web changed op kind "${kind}" while reading it`);
     }
+  });
+
+  it("the server's answer never carries a model-only kind: add_group arrives as add_skill ops the web reads", async () => {
+    // Without this, subtracting MODEL_ONLY_OP_KINDS above would hide a real leak: the web refuses a WHOLE answer over one
+    // unknown kind. A master with one Tools skill, so one add_group expands and one (Databases) has nothing to add.
+    const parsed = server.parseAssistRequest({ ...MINIMAL_REQUEST, instruction: 'add tools and databases', categories: ['Tools', 'Databases'], availableSkills: [{ name: 'Postman', category: 'Tools' }] });
+    // The fixture must parse, or the test proves nothing.
+    assert.ok(parsed.ok, parsed.ok ? '' : parsed.message);
+    // The model's answer, through the server's own validator.
+    const answer = server.parseAssistOps(JSON.stringify({ note: '', ops: [{ op: 'add_group', name: 'Tools', n: 3 }, { op: 'add_group', name: 'Databases', n: 3 }] }), parsed.request);
+    // Parsed.
+    assert.ok(answer.ok);
+    // Non-vacuous: the fillable group really became an op.
+    assert.deepEqual(answer.ops, [{ op: 'add_skill', name: 'Postman', category: 'Tools' }]);
+    // Every kind sent is one the web has a sample for, and none is model-only.
+    for (const op of answer.ops) assert.ok(op.op in SAMPLES && !(server.MODEL_ONLY_OP_KINDS as readonly string[]).includes(op.op), `leaked kind ${op.op}`);
+    // And the web's real reader accepts the whole answer, as the server would send it.
+    const read = await ai.requestAssist(fakeEdgeClient(async () => ({ data: { status: 'ok', ops: answer.ops, note: answer.note, usage: {} }, error: null })), MINIMAL_REQUEST);
+    // Read, not refused.
+    assert.equal(read.kind, 'ok');
   });
 });

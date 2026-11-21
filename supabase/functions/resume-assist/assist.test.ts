@@ -10,6 +10,7 @@ import {
   MAX_AVAILABLE,
   MAX_OPS,
   MAX_OUTPUT_TOKENS,
+  MODEL_ONLY_OP_KINDS,
   parseAssistOps,
   parseAssistRequest,
   readUsage,
@@ -157,10 +158,10 @@ test("parseAssistOps files skills under the master's own group and drops printed
 });
 
 test("parseAssistOps caps the ops and refuses non-JSON", () => {
-  // Twenty distinct skills, all valid.
-  const many = Array.from({ length: 20 }, (_, i) => ({ op: "add_skill", name: `Skill${i}`, category: "Tools" }));
+  // Twenty valid moves. Moves, not skills: since 2026-11-21 all add_skill ops of one group are ONE change.
+  const many = Array.from({ length: 20 }, () => ({ op: "move", id: "b1", direction: "up" }));
   // Validated.
-  const parsed = parseAssistOps(JSON.stringify({ ops: many, note: "" }), naming(request(), ...many.map((op) => op.name)));
+  const parsed = parseAssistOps(JSON.stringify({ ops: many, note: "" }), structuredRequest());
   // Narrowed.
   assert.ok(parsed.ok);
   // Capped.
@@ -488,17 +489,17 @@ test("parseAssistOps drops a move of a bullet removed earlier in the answer, and
   assert.deepEqual(flat.ok ? [flat.ops.length, flat.dropped] : null, [0, 1]);
 });
 
-test("the schema and the system text offer exactly the ten ops (set_role joined 2026-11-11)", () => {
+test("the schema and the system text offer exactly the eleven ops the model may write (add_group joined 2026-11-21)", () => {
   // The prompt parts.
   const prompt = buildAssistPrompt(request());
   // The schema, read through its nested shape.
   const schema = prompt.responseSchema as { properties: { ops: { items: { properties: { op: { enum: string[] }; direction: { enum: string[] } } } } } };
   // Closed to what parseAssistOps reads; the two remove ops joined on 2026-11-04.
-  assert.deepEqual(schema.properties.ops.items.properties.op.enum, ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "add_back", "new_bullet", "remove_entry", "set_role"]);
+  assert.deepEqual(schema.properties.ops.items.properties.op.enum, ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "add_back", "new_bullet", "remove_entry", "set_role", "add_group"]);
   // Direction closed in the schema too.
   assert.deepEqual(schema.properties.ops.items.properties.direction.enum, ["up", "down"]);
   // Since 2026-11-04 the system text spells every op as exact JSON, so a skill's name cannot land in "text".
-  for (const kind of ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "add_back", "new_bullet", "remove_entry", "set_role"]) {
+  for (const kind of ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "add_back", "new_bullet", "remove_entry", "set_role", "add_group"]) {
     // Each kind appears as a JSON example, quoted exactly as the model must write it.
     assert.match(prompt.systemInstruction, new RegExp(`\\{"op":"${kind}"`), kind);
   }
@@ -691,11 +692,12 @@ test("every failing check names its own reason", () => {
   // The move's reason.
   assert.deepEqual(removed.ok ? removed.rejected : null, [{ what: 'Move bullet "Built a billing API serving 500 users." down', why: "Another change in this answer removes this bullet." }]);
   // Past the op cap, the reason says to ask for fewer.
-  const many = Array.from({ length: MAX_OPS + 1 }, (_, i) => ({ op: "add_skill", name: `Skill${i}`, category: "Tools" }));
+  // Moves, each its own change (skills of one group would now be one change).
+  const many = Array.from({ length: MAX_OPS + 1 }, () => ({ op: "move", id: "b1", direction: "up" }));
   // Validated.
-  const capped = parseAssistOps(JSON.stringify({ ops: many, note: "" }), naming(request(), ...many.map((op) => op.name)));
+  const capped = parseAssistOps(JSON.stringify({ ops: many, note: "" }), structuredRequest());
   // The thirteenth, named.
-  assert.deepEqual(capped.ok ? capped.rejected : null, [{ what: `Add skill "Skill${MAX_OPS}"`, why: `More than ${MAX_OPS} changes in one answer; ask for fewer at once.` }]);
+  assert.deepEqual(capped.ok ? capped.rejected : null, [{ what: 'Move bullet "Cut p95 latency by 30%." up', why: `More than ${MAX_OPS} changes in one answer; ask for fewer at once.` }]);
 });
 
 test("the rejected list stops at 20 while dropped keeps counting, and every label stays short", () => {
@@ -1336,17 +1338,20 @@ test("T10 all of a group: an owner-named group's master skills survive the op ca
   // The live master v32 Databases group, none printed.
   const databases = ["PostgreSQL", "pgvector", "Redis", "MySQL", "DBMS", "Supabase", "MongoDB"].map((name) => ({ name, category: "Databases" }));
   // The owner's own words from that turn.
-  const parsed = parseAssistRequest(body({ instruction: "add databases with all databases", categories: ["Languages", "Tools", "Databases"], availableSkills: [...tools, ...databases] }));
+  const parsed = parseAssistRequest(structured({ instruction: "add databases with all databases", categories: ["Languages", "Tools", "Databases"], availableSkills: [...tools, ...databases] }));
   // Valid fixture.
   assert.ok(parsed.ok);
-  // The model's order: the unrequested adds first, so a first-12 cut would keep only one database.
-  const answer = JSON.stringify({ ops: [...tools, ...databases].map((skill) => ({ op: "add_skill", name: skill.name, category: skill.category })), note: "" });
+  // The model's order: unrequested Tools adds, eleven moves, then the databases. A group is ONE change since 2026-11-21,
+  // so the moves are what fill the cap: Tools (1) + 11 moves = 12, and a first-12 cut would drop every database.
+  const moves = Array.from({ length: MAX_OPS - 1 }, () => ({ op: "move", id: "b1", direction: "up" }));
+  // The whole answer.
+  const answer = JSON.stringify({ ops: [...tools.map((skill) => ({ op: "add_skill", name: skill.name, category: skill.category })), ...moves, ...databases.map((skill) => ({ op: "add_skill", name: skill.name, category: skill.category }))], note: "" });
   // Validated.
   const ops = parseAssistOps(answer, parsed.request);
   // Narrowed.
   assert.ok(ops.ok);
-  // Still capped.
-  assert.equal(ops.ops.length, MAX_OPS);
+  // Still capped: 13 changes (Databases, Tools, 11 moves) for 12 seats, so exactly one falls: the last move.
+  assert.equal(ops.dropped, 1);
   // Every requested database survived the cap.
   assert.deepEqual(ops.ops.filter((op) => op.op === "add_skill" && op.category === "Databases").map((op) => (op.op === "add_skill" ? op.name : "")), databases.map((skill) => skill.name));
   // The prompt says it too: the named group first, never padded.
@@ -1566,4 +1571,141 @@ test("top-up 2: a skill named alone tops up nothing ('add docker' names no group
 test("top-up 3: a turn that adds no skill is never topped up ('remove devops stuff')", () => {
   // No add_skill in the answer: a removal or a question is not an add request, whatever group it names.
   assert.deepEqual(addedNames([], v41Request("remove devops stuff, and is hld needed?")), []);
+});
+
+// --- the cap counts a skill GROUP as one change (tailor pending #5 P3, 2026-11-21) ----------------------------
+//
+// Live (keep7 tailor-analysis, 361 chat turns): 17 replies hit the 12-op cap and Teja pasted its error back 3 times.
+// The asks were group fills ("add tools with 6, cs fund 5, backend 5, ai 5"): one add_skill per skill spent the cap
+// a skill at a time. MAX_OPS still guards the output budget; a group of adds is now ONE change against it.
+
+// Four master groups of six skills each, none printed.
+const FOUR_GROUPS = ["Tools", "CS Fundamentals", "Backend Engineering", "AI"].flatMap((group) => Array.from({ length: 6 }, (_, i) => ({ name: `${group.split(" ")[0]}${i}`, category: group })));
+
+test("per-group cap: four group fills of six master skills are four changes, so all 24 survive", () => {
+  // The owner's live wording, four groups in one message.
+  const parsed = parseAssistRequest(body({ instruction: "add tools with 6, cs fund 6, backend 6, ai 6", categories: ["Languages", "Tools", "CS Fundamentals", "Backend Engineering", "AI"], availableSkills: FOUR_GROUPS }));
+  // Valid fixture.
+  if (!parsed.ok) throw new Error(parsed.message);
+  // One add_skill per skill, as the model writes them.
+  const ops = parsedOps(FOUR_GROUPS.map((skill) => ({ op: "add_skill", name: skill.name, category: skill.category })), parsed.request);
+  // Every one kept: 24 ops, 4 changes, well under the cap.
+  assert.equal(ops.ops.length, 24);
+  // Nothing refused for the cap.
+  assert.equal(ops.dropped, 0);
+});
+
+test("per-group cap: the top-up still fills a group this answer already touches when eleven other changes come first", () => {
+  // Three short DevOps names that fit one line together.
+  const devops = ["Docker", "Kubernetes", "Terraform"].map((name) => ({ name, category: "DevOps & Cloud" }));
+  // "devops too": the owner names the group.
+  const parsed = parseAssistRequest(structured({ instruction: "devops too", categories: ["Languages", "DevOps & Cloud"], availableSkills: devops }));
+  // Valid fixture.
+  if (!parsed.ok) throw new Error(parsed.message);
+  // Eleven moves and Docker: twelve changes, the cap reached.
+  const answer = [...Array.from({ length: MAX_OPS - 1 }, () => ({ op: "move", id: "b1", direction: "up" })), { op: "add_skill", name: "Docker", category: "DevOps & Cloud" }];
+  // Topped up anyway: Kubernetes and Terraform join a group already counted, so they cost no change.
+  assert.deepEqual(addedNames(answer, parsed.request), ["Docker", "Kubernetes", "Terraform"]);
+});
+
+// --- add_group: one op fills a skill group from the master (tailor pending #5 P3, 2026-11-21) -----------------
+//
+// The model writes ONE {"op":"add_group","name":"Tools","n":5} instead of five add_skill ops, which saves output tokens
+// under the 2048 cap. The SERVER expands it into ordinary add_skill ops from the owner's master, so the browser never
+// sees a new kind (its reader refuses a whole answer over one unknown kind) and nothing is invented.
+
+// The live Tools wish list (keep7: Postman 40 apps, Cursor 41, Jira 30, Swagger 32, VS Code 38), none printed.
+const TOOLS_MASTER = ["Postman", "Cursor", "Jira", "Swagger", "VS Code"].map((name) => ({ name, category: "Tools" }));
+
+// A request whose master holds TOOLS_MASTER and whose job is missing Jira.
+function toolsRequest(instruction: string): AssistRequest {
+  // Through the real validator.
+  const parsed = parseAssistRequest(body({ instruction, job: { title: "Backend Engineer", company: "Acme", missing: ["Jira"] }, categories: ["Languages", "Tools", "Databases"], availableSkills: TOOLS_MASTER }));
+  // Valid fixture.
+  if (!parsed.ok) throw new Error(parsed.message);
+  // The request.
+  return parsed.request;
+}
+
+test("add_group: one op becomes n add_skill ops from the master, the job's missing keywords first", () => {
+  // The model's single op, the group in the owner's lower case.
+  const ops = parsedOps([{ op: "add_group", name: "tools", n: 3 }], toolsRequest("add tools with 3"));
+  // Three skills, Jira (the job asks for it) first, then master order; filed under the master's own group spelling.
+  assert.deepEqual(ops.ops, [
+    { op: "add_skill", name: "Jira", category: "Tools" },
+    { op: "add_skill", name: "Postman", category: "Tools" },
+    { op: "add_skill", name: "Cursor", category: "Tools" },
+  ]);
+  // Nothing refused.
+  assert.equal(ops.dropped, 0);
+});
+
+test("add_group: the answer never carries add_group, so the browser's strict reader never sees it", () => {
+  // Two group fills and a plain op, the way a live answer mixes them.
+  const ops = parsedOps([{ op: "add_group", name: "Tools", n: 2 }, { op: "remove", id: "b0" }, { op: "add_group", name: "Databases", n: 4 }], toolsRequest("add tools and databases"));
+  // Only kinds the web already reads; the model-only kind is gone from the answer.
+  assert.deepEqual([...new Set(ops.ops.map((op) => op.op))].sort(), ["add_skill", "remove"]);
+  // And it is listed as model-only, for the web contract test to subtract.
+  assert.deepEqual([...MODEL_ONLY_OP_KINDS], ["add_group"]);
+});
+
+test("add_group: a group the master has nothing left for is refused with a reason, never filled with invented skills", () => {
+  // Databases has no master skills in this fixture.
+  const ops = parsedOps([{ op: "add_group", name: "Databases", n: 4 }], toolsRequest("add databases"));
+  // No op.
+  assert.deepEqual(ops.ops, []);
+  // The reason names the group and what the owner can do.
+  assert.deepEqual(ops.rejected, [{ what: 'Add group "Databases"', why: '"Databases" has no master skills left to add. Name the ones you want and they are added.' }]);
+});
+
+test("add_group: n is capped at the group size of 10 unless the owner says all, and a bad n means that size", () => {
+  // Twelve short master skills in one group (2026-11-21: was nine, which no longer reach the cap of 10), so the line
+  // width never decides.
+  const nine = Array.from({ length: 12 }, (_, i) => ({ name: `T${i}`, category: "Tools" }));
+  // A request with them.
+  const req = (instruction: string): AssistRequest => {
+    // Through the real validator.
+    const parsed = parseAssistRequest(body({ instruction, categories: ["Tools"], availableSkills: nine }));
+    // Valid fixture.
+    if (!parsed.ok) throw new Error(parsed.message);
+    // The request.
+    return parsed.request;
+  };
+  // Twenty asked: ten given (Teja 2026-11-21 14:41: up to 10 per group; 7 from 2026-11-12).
+  assert.equal(parsedOps([{ op: "add_group", name: "Tools", n: 20 }], req("add tools")).ops.length, 10);
+  // A missing, fractional or non-positive n is not a number of skills: the group size.
+  for (const n of [undefined, 2.5, 0, -3, "4"]) assert.equal(parsedOps([{ op: "add_group", name: "Tools", n }], req("add tools")).ops.length, 10, String(n));
+  // "all": every one, as the fill rule already says for add_skill.
+  assert.equal(parsedOps([{ op: "add_group", name: "Tools", n: 3 }], req("add all tools")).ops.length, 12);
+});
+
+// --- set_role on the allow-listed experience (Teja 2026-11-18 21:55; orch queue 2026-11-21) ---------------------------
+//
+// The web now refuses an unlisted Aczen title (tailoredEdits.ts setEntryRole), so a proposal of one only costs Teja a
+// round trip. The chat request names entries by eN + label, not by master id, so the server recognises the allow-listed
+// experience by the title it PRINTS: the master's role or a validated role_title, both from the allow-list.
+
+// The live shape: the Aczen entry printing an allow-listed title.
+function aczenRequest(instruction: string): AssistRequest {
+  // Through the real validator, with the entry's label carrying the allow-listed role.
+  const parsed = parseAssistRequest(structured({ instruction, entries: [{ id: "e0", section: "experience", label: "Aczen Technologies · Full Stack AI Engineer Intern" }, { id: "e2", section: "experience", label: "Acme · Data Lead" }, { id: "e1", section: "projects", label: "F1 Race Pace Predictor" }] }));
+  // Valid fixture.
+  if (!parsed.ok) throw new Error(parsed.message);
+  // The request.
+  return parsed.request;
+}
+
+test("set_role on the allow-listed experience: an unlisted title is refused with the list, a listed one is kept in its exact spelling", () => {
+  // The FamPay case, dictated by the owner.
+  const fampay = parsedOps([{ op: "set_role", entry: "e0", text: "Data Analyst Intern" }], aczenRequest("change aczen title to data analyst intern"));
+  // Refused, naming every allowed title so the owner can pick one.
+  assert.deepEqual(fampay.rejected, [{ what: 'Set title of "Aczen Technologies · Full Stack AI Engineer Intern" to "Data Analyst Intern"', why: "This job's title can only be one of: Full Stack AI Engineer Intern, Software Engineer Intern, Backend Engineer Intern, AI Engineer Intern (background checks compare titles with HR records). Say which one." }]);
+  // A listed title in the owner's lower case: kept, in the list's exact spelling (the web compares exactly).
+  const listed = parsedOps([{ op: "set_role", entry: "e0", text: "software engineer intern" }], aczenRequest("make aczen title software engineer intern"));
+  // Kept.
+  assert.deepEqual(listed.ops, [{ op: "set_role", entry: "e0", text: "Software Engineer Intern" }]);
+  // Another job is not allow-listed: the owner's dictated title is still theirs to set.
+  const other = parsedOps([{ op: "set_role", entry: "e2", text: "Data Analyst Intern" }], aczenRequest("set acme title to data analyst intern"));
+  // Kept.
+  assert.deepEqual(other.ops, [{ op: "set_role", entry: "e2", text: "Data Analyst Intern" }]);
 });

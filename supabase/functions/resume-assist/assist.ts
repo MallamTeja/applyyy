@@ -46,8 +46,10 @@ import { authorizeCaller, readKillSwitch, type CallerAuthClient, type CallerRefu
 import type { GeminiCallOutcome, GeminiResponseBody, GenerateGeminiOptions } from "../_shared/gemini/client.ts";
 // The operator-readable sentence for a failed Gemini call.
 import { describeGeminiFailure } from "../_shared/gemini/failure-message.ts";
-// The tailor's own number extractor, reused so "a new metric" means the same thing here as there; and the one printable job-title shape (set_role, 2026-11-11).
-import { numbersIn, ROLE_TITLE_SHAPE } from "../_shared/tailor/validator.ts";
+// The tailor's own number extractor, reused so "a new metric" means the same thing here as there; the one printable job-title shape (set_role, 2026-11-11); and the title allow-list the validator and the web enforce (2026-11-21).
+import { EXPERIENCE_TITLE_ALLOW_LIST, numbersIn, ROLE_TITLE_SHAPE } from "../_shared/tailor/validator.ts";
+// Every allow-listed title once, in the list's order: what set_role may write on the allow-listed experience.
+const ALLOWED_ROLE_TITLES: readonly string[] = [...new Set(Object.values(EXPERIENCE_TITLE_ALLOW_LIST).flat())];
 // The auditor's word allowlist, so the model is told the vocabulary the audit lets through.
 import { ALLOWED_RHETORICAL_WORDS } from "../_shared/audit/detector.ts";
 // The closed list of section names a resume's section_order may hold, shared with the tailor's
@@ -55,12 +57,19 @@ import { ALLOWED_RHETORICAL_WORDS } from "../_shared/audit/detector.ts";
 import { TAILOR_SECTION_KINDS } from "../_shared/tailor/prompt.ts";
 // One technology's spellings, read from the JD vocabulary's own patterns, to find the master's skill (2026-11-07).
 import { canonicalSkillTerm } from "../_shared/tailor/jd-keywords.ts";
+// The ONE "did the owner name this?" matcher, shared with the web's auto-apply predicate (S5, 2026-11-21), so the
+// server and the browser can never disagree about whether "rm vs cod e" named VS Code.
+import { namedIn, withinOneEdit } from "../_shared/text/name-match.ts";
 // The one-skill-group-one-line width model (2026-11-12), the same one the tailor fills groups with.
 import { skillGroupFitsOneLine } from "../../../packages/resume-template/src/index.ts";
 
 // At most this many ops per answer. A bigger rewrite is a re-tailor, not an assist, and the cap
 // also bounds the output the model is asked to produce.
 export const MAX_OPS = 12;
+/* Op kinds the MODEL may write that never reach the browser (2026-11-21). add_group is expanded by parseAssistOps into
+   ordinary add_skill ops from the owner's master, because the web's reader refuses a whole answer over one unknown kind.
+   Exported so the web contract test can subtract them from the schema enum and still police every kind that IS sent. */
+export const MODEL_ONLY_OP_KINDS = ["add_group"] as const;
 // The billed-output ceiling for one call, thinking included. Twelve ops of ~60 tokens is ~720;
 // the rest is headroom for "low" thinking. ponytail: fixed cap, measure usage before raising it.
 export const MAX_OUTPUT_TOKENS = 2048;
@@ -542,7 +551,9 @@ const SYSTEM_INSTRUCTION = [
   /* Structure edits (2026-11-01). One line, in the cached prefix. add_back is steered ahead of
      new_bullet because it reuses the master's true words, while new_bullet writes a new claim. */
   // 2026-11-04: the same ops as exact JSON, plus remove_entry.
-  'Structure ops: {"op":"move","id":"b0","direction":"up"} moves a bullet one place up or down within its entry (repeat to move further). {"op":"move_section","section":"projects","direction":"down"} moves one SECTION ORDER name one place. {"op":"add_back","id":"m0"} restores an AVAILABLE item (mN bullet, nN entry). {"op":"new_bullet","entry":"e0","text":"..."} adds a bullet under entry eN, only for a fact the owner states; prefer add_back when AVAILABLE has it. {"op":"remove_entry","id":"e0"} takes entry eN off this resume. {"op":"set_role","entry":"e0","text":"Data Analyst Intern"} sets the job title of experience entry eN to the title the owner states, spelled correctly. move and move_section ALWAYS carry "direction" ("up" or "down"); never send one without it.',
+  // 2026-11-21: the set_role example was "Data Analyst Intern", the very title the FamPay row shipped wrongly; an example
+  // is a suggestion, so it now shows an allow-listed Aczen title (Teja 2026-11-18 21:55).
+  'Structure ops: {"op":"move","id":"b0","direction":"up"} moves a bullet one place up or down within its entry (repeat to move further). {"op":"move_section","section":"projects","direction":"down"} moves one SECTION ORDER name one place. {"op":"add_back","id":"m0"} restores an AVAILABLE item (mN bullet, nN entry). {"op":"new_bullet","entry":"e0","text":"..."} adds a bullet under entry eN, only for a fact the owner states; prefer add_back when AVAILABLE has it. {"op":"remove_entry","id":"e0"} takes entry eN off this resume. {"op":"set_role","entry":"e0","text":"Software Engineer Intern"} sets the job title of experience entry eN to the title the owner states, spelled correctly. move and move_section ALWAYS carry "direction" ("up" or "down"); never send one without it.',
   /* What this page cannot do, and where it is done instead (2026-11-04), so a request no op covers gets
      a plain answer with a place to go, not an invented op or a claimed change. */
   /* 2026-11-05, live row ce0d1730: "add 2 tools from my master that are not on this resume" got "check
@@ -565,6 +576,9 @@ const SYSTEM_INSTRUCTION = [
      each filled from the master, the job-relevant first, and an honest ask when the master has nothing left. The
      last sentence is backed by a control: parseAssistOps refuses a new_bullet with a word the owner never said. */
   "Filling a group (\"add the <group> group\", \"add more skills to <group>\"): add_skill that group's MASTER SKILLS NOT ON RESUME, those the DESCRIPTION or MISSING KEYWORDS name first, at least 4 when the master has them; when the owner names a group or says \"all\", add every MASTER SKILLS NOT ON RESUME skill of that group first, before any other op, and never pad an explicit request with unrequested adds; when none are left, no op, and note says the group has no more master skills and asks the owner to name the ones to add. More points (\"add more points to <entry>\") with no text given: add_back that entry's AVAILABLE mN items, the most job-relevant first; when AVAILABLE has none for it, no op, and note says no unused master bullets remain and asks the owner to dictate the point. Never new_bullet text the owner did not state.",
+  /* add_group (2026-11-21): one op per group fill instead of one per skill, so "add tools with 6, cs fund 5" costs ~4 ops
+     of output, not 21. The server picks the skills from the master (job-relevant first), so the model chooses nothing. */
+  'To fill a skill group from MASTER SKILLS NOT ON RESUME, send ONE {"op":"add_group","name":"Tools","n":5} per group: "name" is the group, "n" how many skills the owner asked for (5 when they gave no number); the app picks that group\'s master skills, the job\'s first. Use add_skill only for a specific skill the owner names.',
   /* The edge cases, each with its one right answer (2026-11-07), so none falls through to a refusal card. */
   "Edge cases: a skill SKILLS already prints is never re-added (say it is already there); a group the resume does not print yet is fine for add_skill (it appears with its first skill); a skill in neither SKILLS nor MASTER SKILLS NOT ON RESUME that the owner names IS added with add_skill (never answer that it is missing from their master), and one they did not name is not added: say it is not in their master and that it is added on the Master profile page; a remove or reorder request uses remove, remove_skill, remove_entry, move or move_section; a vague request still gets concrete ops chosen by the job rules above; a request beyond the master (a new employer, a degree, a metric the text lacks) gets no op and an honest note saying why and where it can be done.",
   /* 2026-11-11 (RainFocus row): "add typography, wireframing, ux skills etc.. in skills" was refused, then the owner's
@@ -593,7 +607,8 @@ const RESPONSE_SCHEMA = {
         // Every field any op kind uses; flat because the schema subset has no tagged unions.
         properties: {
           // The kind, closed to the seven the page can apply. Nine since 2026-11-04: remove_skill, remove_entry.
-          op: { type: "STRING", enum: ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "add_back", "new_bullet", "remove_entry", "set_role"] },
+          // add_group joined 2026-11-21: model-only, expanded into add_skill ops before the browser sees the answer.
+          op: { type: "STRING", enum: ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "add_back", "new_bullet", "remove_entry", "set_role", "add_group"] },
           // A bullet id or "summary"; an AVAILABLE id for add_back; an entry id (eN) for remove_entry.
           id: { type: "STRING" },
           // The new text, for edit and new_bullet.
@@ -608,6 +623,8 @@ const RESPONSE_SCHEMA = {
           section: { type: "STRING" },
           // An entry id, for new_bullet.
           entry: { type: "STRING" },
+          // How many skills, for add_group; checked as a positive integer after parsing.
+          n: { type: "INTEGER" },
         },
         // Only the kind is universal.
         required: ["op"],
@@ -798,6 +815,10 @@ function describeOp(raw: unknown, request: AssistRequest): string {
     case "add_skill":
       // "Add skill "C"" or "Add skill (no name)".
       return `Add skill ${skill}`;
+    // Fill a skill group from the master; only reaches a label when the master had nothing left for it.
+    case "add_group":
+      // "Add group "Databases"".
+      return `Add group ${skill}`;
     // Remove a skill.
     case "remove_skill":
       // "Remove skill "Testing"".
@@ -868,12 +889,22 @@ function groupNamedIn(instruction: string, categories: readonly string[]): strin
   return named.length === 1 ? named[0] : undefined;
 }
 
+/* WHAT ONE CHANGE IS, for MAX_OPS (2026-11-21, tailor pending #5 P3). Every add_skill filed under one skill group is ONE
+   change, keyed by the group; any other op is its own change, keyed by its position. Live (361 chat turns): 17 replies hit
+   the 12-op cap on group fills ("add tools with 6, cs fund 5, backend 5, ai 5"), because each skill spent a seat. The cap
+   still bounds how many DIFFERENT things one answer does. A blank group (a group-less add) counts alone, never as a group. */
+function capUnit(group: string, index: number): string {
+  // A named group: its key, so every skill of it shares one seat.
+  return group.trim() !== "" ? `group:${skillKey(group)}` : `op:${index}`;
+}
+
 /* Words too common to name a group on their own: "add more skills and tools" must not name every group with "and". */
 const GROUP_FILLER_WORDS = new Set(["and", "the", "for", "with", "skill", "skills", "group", "groups", "other"]);
 /* A group never grows past this by a top-up, unless the owner says "all". 7 since 2026-11-12 13:57 IST (Teja: "each having
    up to 7 skills ... in 1 line but full in that 1 line"; was 6, the 11-11 "4-6 skills"). The line itself is the second
    limit: a top-up never makes a group wrap (skillGroupFitsOneLine, the tailor's own width model). */
-const TOP_UP_GROUP_SIZE = 7;
+// 10 since 2026-11-21 14:41 (Teja: "increase that cap to 3 more skills in each"), so a chat top-up matches the tailor cap.
+const TOP_UP_GROUP_SIZE = 10;
 
 /* THE TOP-UP (2026-11-12, live Harvey row fcf3a2dd): "devops and clousde too, hld lld too" got ONE op, Docker, while the
    master held seven more DevOps & Cloud skills and "System Design (LLD/HLD)". The prompt already says "fill the group";
@@ -887,7 +918,8 @@ const TOP_UP_GROUP_SIZE = 7;
         "System Design (LLD/HLD)").
    Master skills only, in the master's spelling and group, so nothing is invented and the browser auto-applies them.
    Only the instruction is read, never earlier turns: a skill the owner declined before is not re-added. Never past MAX_OPS. */
-function topUpNamedSkills(kept: readonly AssistOp[], request: AssistRequest, printed: ReadonlyMap<string, string>, claimed: Set<string>): AssistOp[] {
+// `filledGroups`: keys of the groups an add_group filled this turn (2026-11-21); step 1 leaves them at the owner's count.
+function topUpNamedSkills(kept: readonly AssistOp[], request: AssistRequest, printed: ReadonlyMap<string, string>, claimed: Set<string>, filledGroups: ReadonlySet<string> = new Set()): AssistOp[] {
   // No skill added this turn: not an add request (a removal, a question), so nothing is topped up.
   if (!kept.some((op) => op.op === "add_skill")) return [];
   // The instruction's words, normalised like group names ("&" is "and").
@@ -924,8 +956,10 @@ function topUpNamedSkills(kept: readonly AssistOp[], request: AssistRequest, pri
   const added: AssistOp[] = [];
   // Adds one master skill unless the cap, a printed or claimed name, or a twin spelling stops it; true when added.
   const add = (skill: PrintedSkill): boolean => {
-    // The cap counts every kept op.
-    if (kept.length + added.length >= MAX_OPS) return false;
+    // The changes this answer already spends, counted the way parseAssistOps counts them (capUnit).
+    const units = new Set([...kept, ...added].map((op, index) => capUnit(op.op === "add_skill" ? op.category : "", index)));
+    // A skill for a group already counted is free; a new group needs a seat under the cap.
+    if (!units.has(capUnit(skill.category, -1)) && units.size >= MAX_OPS) return false;
     // The claim key parseAssistOps uses, so nothing is proposed twice.
     const key = `skill:${skillKey(skill.name)}`;
     // Printed, already proposed, or another spelling of one that is: skipped.
@@ -943,6 +977,8 @@ function topUpNamedSkills(kept: readonly AssistOp[], request: AssistRequest, pri
   };
   // 1. Groups the owner named: a group is named when one of its distinctive words was said.
   for (const category of request.categories) {
+    // A group an add_group already filled keeps the count the owner asked for ("add tools with 3" stays 3).
+    if (filledGroups.has(skillKey(category))) continue;
     // The group's own words, minus filler and short ones ("cs", "ai" name a group only by the whole name below).
     const words = groupWords(category).trim().split(" ").filter((word) => word.length >= 3 && !GROUP_FILLER_WORDS.has(word));
     // Named by one of those words, or by the whole name (how "AI" or "Tools" is named).
@@ -984,30 +1020,8 @@ function masterSkillNamed(name: string, available: readonly PrintedSkill[]): Pri
    Teja's live wording); a short name must match exactly, because one edit away from "C" or "Go" is half the language.
    No alias matching: a looser match only widens what an unasked add can slip through. */
 function ownerNamed(name: string, request: AssistRequest): boolean {
-  // The name with case, spaces and punctuation gone; + and # stay, so "C++" and "C#" are not "C".
-  const target = compactName(name);
-  // Nothing left to match (a name of pure punctuation): never "named".
-  if (target === "") return false;
-  // Only the owner's words: this message and their earlier ones.
-  const said = [request.instruction, ...request.history.filter((message) => message.role === "user").map((message) => message.text)];
-  // Every message, word by word.
-  for (const text of said) {
-    // Split on spaces and punctuation that never sits inside a skill name; "." "+" "#" stay for "node.js", "c++".
-    const words = text.toLowerCase().split(/[\s,;:!?()"'\/]+/).filter((word) => word !== "");
-    // Each run of 1-4 words starting at each word.
-    for (let start = 0; start < words.length; start += 1) {
-      // Runs longer than 4 words are sentences, not skill names.
-      for (let end = start + 1; end <= Math.min(start + 4, words.length); end += 1) {
-        // The run compacted the same way as the name.
-        const compact = compactName(words.slice(start, end).join(""));
-        // Exact, or one typo on a long name.
-        // Two typos (a swap counts as one) on a name of 8+ letters (2026-11-11: "type grpahy" is Typography).
-        if (compact === target || (target.length >= 6 && withinOneEdit(compact, target)) || (target.length >= 8 && withinTwoEdits(compact, target))) return true;
-      }
-    }
-  }
-  // Nobody named it.
-  return false;
+  // Only the owner's words (this message and their earlier ones), read by the shared matcher the web also uses.
+  return namedIn(name, [request.instruction, ...request.history.filter((message) => message.role === "user").map((message) => message.text)]);
 }
 
 /* The words a bullet may carry that no owner needs to have said (T10, 2026-11-10). They state no fact: no tool,
@@ -1121,47 +1135,7 @@ function undictatedWord(text: string, request: AssistRequest): string | null {
   return words.find((word) => !DICTATION_SAFE_WORDS.has(word) && !saidStems.has(stemOf(word))) ?? null;
 }
 
-// Lower case, letters, digits, "+" and "#" only: the form two spellings of one skill name share.
-function compactName(text: string): string {
-  // Everything else is spacing or punctuation.
-  return text.toLowerCase().replace(/[^a-z0-9+#]/g, "");
-}
-
-// True when a and b differ by at most one insertion, deletion or substitution.
-function withinOneEdit(a: string, b: string): boolean {
-  // Two or more letters apart in length cannot be one edit.
-  if (Math.abs(a.length - b.length) > 1) return false;
-  // Walk both until the first difference.
-  let i = 0;
-  // The shared prefix.
-  while (i < a.length && i < b.length && a[i] === b[i]) i += 1;
-  // After it, the rest must match with one letter substituted, dropped from a, or dropped from b.
-  return a.slice(i + 1) === b.slice(i + 1) || a.slice(i + 1) === b.slice(i) || a.slice(i) === b.slice(i + 1);
-}
-
-/* At most two edits apart, an adjacent swap counting as ONE (optimal string alignment distance), for the long names
-   ownerNamed checks (2026-11-11: "type grpahy" -> "typography" is a substitution plus a swap). Bounded: two strings
-   more than 2 letters apart in length are never within 2. */
-function withinTwoEdits(a: string, b: string): boolean {
-  // A length gap over 2 needs 3+ edits.
-  if (Math.abs(a.length - b.length) > 2) return false;
-  // dp[i][j]: edits between a's first i and b's first j letters; row 0 and column 0 are the pure insert/delete costs.
-  const dp: number[][] = Array.from({ length: a.length + 1 }, (_, i) => Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)));
-  // Every prefix pair.
-  for (let i = 1; i <= a.length; i += 1) {
-    // Every b prefix.
-    for (let j = 1; j <= b.length; j += 1) {
-      // Substitution costs nothing on a match.
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      // Delete, insert, substitute.
-      dp[i]![j] = Math.min(dp[i - 1]![j]! + 1, dp[i]![j - 1]! + 1, dp[i - 1]![j - 1]! + cost);
-      // An adjacent swap.
-      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) dp[i]![j] = Math.min(dp[i]![j]!, dp[i - 2]![j - 2]! + 1);
-    }
-  }
-  // Within two.
-  return dp[a.length]![b.length]! <= 2;
-}
+// compactName / withinOneEdit / withinTwoEdits moved to _shared/text/name-match.ts (S5, 2026-11-21): one copy, no drift.
 
 /* Whether the OWNER dictated this job title (2026-11-11), not the model or the job posting: at least half of the
    title's words of 3+ letters appear in the owner's own messages, each exactly or (5+ letters) within one typo.
@@ -1245,11 +1219,17 @@ const BARE_CLAIM = /^\s*(?:added|removed|changed|moved|applied|updated|rewrote|r
 /* The reply the owner reads, derived from what survived (2026-11-05): every sentence that claims a
    change is dropped, and an answer whose ops ALL failed leads with what happened instead. Never a
    success sentence the outcome does not back. */
+/* The note's sentences with every change claim dropped whole, each kept with its own end mark. Shared by the final
+   note and the live stream (2026-11-21): the stream showed the RAW note, so "I added Kafka" flashed on screen before
+   the result line replaced it, on exactly the answers whose ops all failed. */
+function claimFreeSentences(text: string): string[] {
+  // One line, split into sentences; empty and claiming ones dropped.
+  return (oneLine(text).match(/[^.!?]+[.!?]*/g) ?? []).map((sentence) => sentence.trim()).filter((sentence) => sentence !== "" && !CHANGE_CLAIM.test(sentence) && !BARE_CLAIM.test(sentence));
+}
+
 function honestNote(raw: unknown, ops: readonly AssistOp[], rejected: readonly RejectedOp[]): string {
-  // The model's text, one line, or nothing.
-  const text = typeof raw === "string" ? oneLine(raw) : "";
-  // Sentences, each kept with its own end mark; a claim sentence is dropped whole.
-  const kept = (text.match(/[^.!?]+[.!?]*/g) ?? []).map((sentence) => sentence.trim()).filter((sentence) => sentence !== "" && !CHANGE_CLAIM.test(sentence) && !BARE_CLAIM.test(sentence));
+  // Sentences of the model's text, claims dropped; nothing when it sent no text.
+  const kept = typeof raw === "string" ? claimFreeSentences(raw) : [];
   // Ops proposed but none survived: say so first, with the first reason.
   const lead = ops.length === 0 && rejected.length > 0 ? `Nothing was changed: ${rejected[0]!.why}` : "";
   // Lead, then what the model said that was not a claim; capped as before.
@@ -1373,6 +1353,9 @@ export function parseAssistOps(
       // Kept.
       return { op: "remove", id };
     }
+    // An add_group still here is one the expansion below could not fill: the master has nothing left for that group.
+    // Refused with what to do, never filled with invented skills (master-or-dictated content only).
+    if (raw.op === "add_group") return `"${clip(textField(raw.name) || "That group", 40)}" has no master skills left to add. Name the ones you want and they are added.`;
     // Add a skill.
     if (raw.op === "add_skill") {
       // The printed name: only from "name", never from "text" or "id" (CLAUDE.md §6: a missing field is a
@@ -1576,6 +1559,16 @@ export function parseAssistOps(
       if (title === "") return WHY.noText;
       // The validator's one printable title shape, so the page's save gate (tracesToMaster) will accept it.
       if (!ROLE_TITLE_SHAPE.test(title)) return "A job title is 2-60 letters, digits, spaces or & + # . / -, starting with a letter.";
+      /* THE ALLOW-LISTED EXPERIENCE (Teja 2026-11-18 21:55; orch queue 2026-11-21). The web refuses any other title for it
+         (tailoredEdits.ts setEntryRole), so proposing one only costs the owner a round trip. The request names entries by
+         eN + "company · role", not by master id, so it is recognised by the title it PRINTS: the master's role or a
+         validated role_title, both allow-listed. ponytail: a second job printing an allow-listed title would be held to
+         the list too; send the master ref per entry if that ever happens. */
+      const printedRole = entry.label.split(" · ").pop()?.trim().toLowerCase() ?? "";
+      // The listed title the requested one names, case aside, in the list's exact spelling (the web compares exactly).
+      const listed = ALLOWED_ROLE_TITLES.find((allowed) => allowed.toLowerCase() === title.toLowerCase());
+      // On the allow-listed experience, an unlisted title is refused with the whole list, so the owner can pick one.
+      if (ALLOWED_ROLE_TITLES.some((allowed) => allowed.toLowerCase() === printedRole) && listed === undefined) return `This job's title can only be one of: ${ALLOWED_ROLE_TITLES.join(", ")} (background checks compare titles with HR records). Say which one.`;
       // A title the owner never said (e.g. lifted from the job posting) is refused: the title is the owner's claim to make.
       if (!ownerDictatedTitle(title, request)) return `"${clip(title, 40)}" is not the title you asked for. Say the title in your message to set it.`;
       // One title per entry per answer.
@@ -1584,8 +1577,8 @@ export function parseAssistOps(
       if (claimed.has(key)) return WHY.targeted;
       // Claimed.
       claimed.add(key);
-      // Kept.
-      return { op: "set_role", entry: id, text: title };
+      // Kept; a listed title in the list's own spelling, any other job's title as dictated.
+      return { op: "set_role", entry: id, text: listed ?? title };
     }
     // An op kind outside the closed union.
     return WHY.unknownKind;
@@ -1595,30 +1588,82 @@ export function parseAssistOps(
      A prompt is not a control (CLAUDE.md §6): when the cap WILL cut, an add_skill filed under a group the owner named
      goes first. Stable otherwise, and nothing moves when everything fits, so op order is unchanged in the usual case.
      The group read is the master's for a master skill (where it lands), else the model's. */
+  // The group a proposed add_skill will be filed under: the master's, else the one the model wrote ("" for any other op).
+  const proposedGroup = (raw: unknown): string => (isRecord(raw) && raw.op === "add_skill" ? masterSkillNamed(textField(raw.name), request.availableSkills)?.category ?? textField(raw.category) : "");
   const ownerAsked = (raw: unknown): boolean => {
     // Only add_skill ops are promoted; every other kind keeps its place.
     if (!isRecord(raw) || raw.op !== "add_skill") return false;
     // The group the skill will be filed under: the master's, else the one the model wrote.
-    const group = masterSkillNamed(textField(raw.name), request.availableSkills)?.category ?? textField(raw.category);
+    const group = proposedGroup(raw);
     // Named by the owner: the one existing group their instruction names, or any group their own words name.
     return group !== "" && ((namedGroup !== undefined && skillKey(group) === skillKey(namedGroup)) || ownerNamed(group, request));
   };
   /* The proposed ops, requested ones first only when the cap would cut. MAX_OPS stays 12 (decided 2026-11-10): 20 ops
      of ~60 tokens is ~1200 of the 2048 output ceiling, leaving too little for "low" thinking, and a truncated answer
      fails the whole turn; with the requested ones first, 12 already fits a 7-skill group plus 5 more. */
-  const ordered = parsed.ops.length > MAX_OPS ? [...parsed.ops.filter(ownerAsked), ...parsed.ops.filter((raw) => !ownerAsked(raw))] : parsed.ops;
+  /* ADD_GROUP EXPANSION (2026-11-21). Each {"op":"add_group","name","n"} becomes add_skill ops for that group's master
+     skills not on the resume: the job's missing keywords first, then master order (sort is stable), at most n (a bad n,
+     or n over the group size, means the group size: up to 7, Teja 2026-11-12), and only while the group still fits one
+     printed line (the browser refuses a wrap), unless the owner said "all", which lifts both limits as for add_skill.
+     Master skills only, under the master's own group spelling, so nothing is invented and the browser auto-applies them.
+     A group with nothing to add stays an add_group, and check() refuses it with a reason. */
+  // The groups an add_group filled, so the top-up leaves them at the owner's count.
+  const filledGroups = new Set<string>();
+  // The owner said "all": no count and no line limit, the same reading the top-up uses.
+  const saidAll = groupWords(request.instruction).trim().split(" ").includes("all");
+  // The job's missing keywords by key, for the ranking.
+  const missingKeys = new Set(request.job.missing.map((keyword) => skillKey(keyword)));
+  // One proposed op becomes one or more.
+  const expandGroup = (raw: unknown): unknown[] => {
+    // Every other kind passes through untouched.
+    if (!isRecord(raw) || raw.op !== "add_group") return [raw];
+    // The group as the model wrote it; matched by key, so "tools" finds the master's "Tools".
+    const key = skillKey(textField(raw.name));
+    // That group's master skills not already printed.
+    const pool = request.availableSkills.filter((skill) => skillKey(skill.category) === key && !printed.has(skillKey(skill.name)));
+    // Missing keywords first; stable, so master order otherwise.
+    const ranked = [...pool].sort((a, b) => Number(missingKeys.has(skillKey(b.name))) - Number(missingKeys.has(skillKey(a.name))));
+    // The count: a positive whole number capped at the group size; anything else is not a count (§6), so the group size.
+    const want = typeof raw.n === "number" && Number.isInteger(raw.n) && raw.n > 0 ? Math.min(raw.n, TOP_UP_GROUP_SIZE) : TOP_UP_GROUP_SIZE;
+    // The group's printed line so far, for the width check.
+    const line = (request.printedSkills ?? []).filter((skill) => skillKey(skill.category) === key).map((skill) => skill.name);
+    // The picks, in order.
+    const picked: PrintedSkill[] = [];
+    // Each candidate, best first.
+    for (const skill of ranked) {
+      // "all" takes every one; otherwise stop at the count.
+      if (!saidAll && picked.length >= want) break;
+      // A name that would wrap the line is skipped, and a shorter later one may still fit (as in the top-up).
+      if (!saidAll && !skillGroupFitsOneLine(skill.category, [...line, ...picked.map((p) => p.name), skill.name])) continue;
+      // Taken.
+      picked.push(skill);
+    }
+    // Nothing to add: left for check() to refuse with its reason.
+    if (picked.length === 0) return [raw];
+    // Remembered, so the top-up does not pad past the owner's count.
+    filledGroups.add(key);
+    // Ordinary add_skill ops in the master's spelling and group: the browser already reads and auto-applies these.
+    return picked.map((skill) => ({ op: "add_skill", name: skill.name, category: skill.category }));
+  };
+  // The answer with every fillable add_group expanded.
+  const proposed = parsed.ops.flatMap(expandGroup);
+  // Requested ones first, only when the cap would cut (the MAX_OPS comment above this block says why).
+  const ordered = proposed.length > MAX_OPS ? [...proposed.filter(ownerAsked), ...proposed.filter((raw) => !ownerAsked(raw))] : proposed;
   // Each proposed op's outcome, in order, and whether the cap (not a check) is what dropped it.
   const outcomes: { raw: unknown; result: AssistOp | string; capCut: boolean }[] = [];
-  // Ops kept so far, for the cap.
-  let keptSoFar = 0;
-  // Each proposed op in order.
-  for (const raw of ordered) {
-    // Past the cap, everything else is dropped, valid or not: a bigger rewrite is a re-tailor.
-    const capCut = keptSoFar >= MAX_OPS;
+  // The changes kept so far, for the cap: one key per change (capUnit says what one change is).
+  const keptUnits = new Set<string>();
+  // Each proposed op in order, with its position for the one-op-one-change key.
+  for (const [index, raw] of ordered.entries()) {
+    // Which change this op belongs to: its skill group for an add_skill, else itself.
+    const unit = capUnit(proposedGroup(raw), index);
+    // Past the cap, every NEW change is dropped, valid or not: a bigger rewrite is a re-tailor. A skill joining a
+    // group already counted costs nothing (2026-11-21: 17 live replies hit the cap on "add tools with 6, cs fund 5").
+    const capCut = !keptUnits.has(unit) && keptUnits.size >= MAX_OPS;
     // The cap's reason, or the op's own check.
     const result = capCut ? `More than ${MAX_OPS} changes in one answer; ask for fewer at once.` : check(raw);
     // Counted toward the cap only when kept.
-    if (typeof result !== "string") keptSoFar += 1;
+    if (typeof result !== "string") keptUnits.add(unit);
     // Recorded for the swap pass below.
     outcomes.push({ raw, result, capCut });
   }
@@ -1687,7 +1732,7 @@ export function parseAssistOps(
     ops.push(result);
   }
   // What the owner asked for and the model left out, from the master (2026-11-12, topUpNamedSkills says why).
-  ops.push(...topUpNamedSkills(ops, request, printed, claimed));
+  ops.push(...topUpNamedSkills(ops, request, printed, claimed, filledGroups));
   // The note is display text, never a made-up success: claim sentences dropped, and an all-failed answer
   // led by what happened (honestNote). A note with nothing to read gets a one-line count (honestNote).
   const note = honestNote(parsed.note, ops, rejected);
@@ -1882,7 +1927,9 @@ export async function handleResumeAssist(req: Request, deps: AssistDeps): Promis
       // Every chunk: the note so far, cumulative, only when it grew.
       onText: (accumulated) => {
         // Decoded up to the last complete character.
-        const note = partialNote(accumulated);
+        const raw = partialNote(accumulated);
+        // Change claims dropped as they appear, by the same filter as the final note (claimFreeSentences).
+        const note = raw === null ? null : claimFreeSentences(raw).join(" ");
         // Nothing new (or not started): no line.
         if (note === null || note === "" || note === lastNote) return;
         // Remembered for the duplicate check.

@@ -35,7 +35,7 @@ import { allLivenessUnknown, classifyJobLiveness, LIVENESS_UNKNOWN_DETAIL } from
 // The runner: prompt -> model -> validate -> verdict.
 import { createTailorer } from "../_shared/tailor/tailorer.ts";
 // The prompt shape callLlm receives, to type the counted wrapper below.
-import type { TailorPrompt } from "../_shared/tailor/prompt.ts";
+import { TAILOR_TEMPERATURE, type TailorPrompt } from "../_shared/tailor/prompt.ts";
 // Counts this run's Gemini calls for agent_runs.gemini_calls (it was never written before 2026-11-09).
 import { countCalls } from "./call-counter.ts";
 // The write: payload first, status second, never the reverse.
@@ -256,6 +256,8 @@ Deno.serve(withErrorBoundary("applyy-tailor", async (req: Request): Promise<Resp
         },
         // Spread only when set: exactOptionalPropertyTypes forbids passing `undefined`.
         ...(callBudget ? { timeoutMs: callBudget.timeoutMs, maxRetries: callBudget.maxRetries } : {}),
+        // Low temperature (plan §5 P2, 2026-11-21): one stable selection per job, not a fresh gamble each re-tailor.
+        generation: { temperature: TAILOR_TEMPERATURE },
       });
       // A pool or transport failure is not a tailoring verdict. Thrown so the row is
       // recorded as an error rather than being persisted as a refusal, which would

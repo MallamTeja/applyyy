@@ -35,6 +35,10 @@ export interface TypographyStep {
   // The summary paragraph's top and bottom margin in em (the browser default <p> margin is 1em).
   // 1 on the original rungs, so their CSS (and so their rendered bytes) is unchanged.
   readonly paragraphEm: number;
+  // Multiplier on the SKILLS font only (10.5pt at 1): the compact skills block (Teja, 2026-11-18).
+  // It may run ahead of fontScale (a skills-only step) so 4-6 skills per group fit in two lines;
+  // never larger than fontScale, never under 9pt. 1 on rung 0, so rung 0 still adds no CSS.
+  readonly skillFontScale: number;
 }
 
 /**
@@ -60,17 +64,18 @@ export interface TypographyStep {
  */
 export const TYPOGRAPHY_LADDER: readonly TypographyStep[] = [
   // Today's stylesheet, untouched.
-  { fontScale: 1, lineHeight: 1.38, gapScale: 1, pageMarginMm: 14, paragraphEm: 1 },
+  { fontScale: 1, lineHeight: 1.38, gapScale: 1, pageMarginMm: 14, paragraphEm: 1, skillFontScale: 1 },
   // Air out of the leading and gaps first: the cheapest change a reader notices least.
-  { fontScale: 1, lineHeight: 1.3, gapScale: 0.8, pageMarginMm: 12, paragraphEm: 1 },
-  // Then a half point off the type.
-  { fontScale: 0.952, lineHeight: 1.28, gapScale: 0.7, pageMarginMm: 11, paragraphEm: 1 },
-  // The old minimum (until 2026-11-08): 9.5pt body.
-  { fontScale: 0.905, lineHeight: 1.25, gapScale: 0.6, pageMarginMm: 10, paragraphEm: 1 },
-  // Dense: tighter leading and gaps, 8mm margin, the summary's paragraph margin halved.
-  { fontScale: 0.905, lineHeight: 1.18, gapScale: 0.4, pageMarginMm: 8, paragraphEm: 0.5 },
+  // Skills step half a point ahead of the body (10pt): the compact skills block shrinks before any bullet text.
+  { fontScale: 1, lineHeight: 1.3, gapScale: 0.8, pageMarginMm: 12, paragraphEm: 1, skillFontScale: 0.952 },
+  // Then a half point off the type. Skills stay half a point ahead (9.5pt).
+  { fontScale: 0.952, lineHeight: 1.28, gapScale: 0.7, pageMarginMm: 11, paragraphEm: 1, skillFontScale: 0.905 },
+  // The old minimum (until 2026-11-08): 9.5pt body, skills level with it.
+  { fontScale: 0.905, lineHeight: 1.25, gapScale: 0.6, pageMarginMm: 10, paragraphEm: 1, skillFontScale: 0.905 },
+  // Dense: tighter leading and gaps, 8mm margin, the summary's paragraph margin halved, skills at their 9pt floor.
+  { fontScale: 0.905, lineHeight: 1.18, gapScale: 0.4, pageMarginMm: 8, paragraphEm: 0.5, skillFontScale: 0.857 },
   // The readable minimum. Nothing renders denser than this.
-  { fontScale: 0.905, lineHeight: 1.15, gapScale: 0.3, pageMarginMm: 7, paragraphEm: 0.3 },
+  { fontScale: 0.905, lineHeight: 1.15, gapScale: 0.3, pageMarginMm: 7, paragraphEm: 0.3, skillFontScale: 0.857 },
 ];
 
 // A4 in points (210 × 297 mm), the paper @page declares.
@@ -452,8 +457,9 @@ export function flowHeight(flow: readonly FlowItem[], step: TypographyStep, widt
       height += Math.max(titleLines * titleSize * step.lineHeight, datesSize * step.lineHeight);
       continue;
     }
-    // A text box at this step.
-    const size = item.style.size * step.fontScale;
+    // A text box at this step. A skill group follows the skills-only scale (the compact skills block),
+    // the exact value stepStylesheet prints for .resume__skill-group, so model and CSS cannot disagree.
+    const size = item.style.size * (item.style === STYLE.skillGroup ? step.skillFontScale : step.fontScale);
     // Its line-height (the name keeps its own).
     const lh = item.style.lineHeight ?? step.lineHeight;
     // Lines at its width.
@@ -511,7 +517,7 @@ body { font-size: ${pt(10.5)}; line-height: ${s.lineHeight}; }
 .resume__entry-dates { font-size: ${pt(9.5)}; }
 .resume__bullets { margin: ${mm(1.2)} 0 0 0; }
 .resume__bullet { margin: 0 0 ${mm(0.8)} 0; }
-.resume__skill-group { margin: 0 0 ${mm(1)} 0; }
+.resume__skill-group { margin: 0 0 ${mm(1)} 0; font-size: ${(10.5 * s.skillFontScale).toFixed(2)}pt; }
 .resume__entry-detail { font-size: ${pt(10)}; margin: ${mm(0.6)} 0 0 0; }
 .resume__summary { font-size: ${pt(9.5)}; }
 .resume__split .resume__entry-title { font-size: ${pt(9.5)}; }
@@ -551,7 +557,8 @@ export function skillGroupLineCount(category: string, names: readonly string[], 
   // The full text column at this rung, less the headroom.
   const width = (A4_WIDTH_PT - 2 * step.pageMarginMm * MM) * SKILL_LINE_SAFETY;
   // Lines at this rung's font size.
-  return lineCount(skillGroupText(category, names), STYLE.skillGroup, STYLE.skillGroup.size * step.fontScale, width, labelWords);
+  // At the skills-only scale: the size the skills block prints at on this rung.
+  return lineCount(skillGroupText(category, names), STYLE.skillGroup, STYLE.skillGroup.size * step.skillFontScale, width, labelWords);
 }
 
 /**
@@ -580,6 +587,34 @@ export function fillSkillLine(category: string, ranked: readonly string[], cap: 
     if (skillGroupFitsOneLine(category, [...kept, name])) kept.push(name);
   }
   // The filled line.
+  return kept;
+}
+
+/**
+ * The compact skills block (Teja, 2026-11-18): a group may wrap to at most this many printed lines.
+ * Two, so groups reach 4-6 skills; a third line would cost a bullet for every group that took it.
+ */
+export const SKILL_GROUP_MAX_LINES = 2;
+
+/**
+ * fillSkillLine's two-line sibling: take `ranked` in order, keep each name while the group still
+ * prints on at most `maxLines` lines at EVERY rung, skip one that would add a line, stop at `cap`.
+ * flowHeight counts every wrapped line in full, so the page fit never reads two lines as one.
+ * fillSkillLine stays as it is for the web edit gate and resume-assist (one line, stricter, safe).
+ */
+export function fillSkillLines(category: string, ranked: readonly string[], cap: number, maxLines: number = SKILL_GROUP_MAX_LINES): string[] {
+  // The names seated so far.
+  const kept: string[] = [];
+  // In relevance order.
+  for (const name of ranked) {
+    // Full: nothing more is taken, however short.
+    if (kept.length >= cap) break;
+    // The group with this name added.
+    const next = [...kept, name];
+    // Taken only if no rung prints it on more than maxLines lines.
+    if (TYPOGRAPHY_LADDER.every((_, index) => skillGroupLineCount(category, next, index) <= maxLines)) kept.push(name);
+  }
+  // The filled group.
   return kept;
 }
 

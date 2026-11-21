@@ -43,10 +43,11 @@ const SKILL_VOCABULARY: readonly SkillTerm[] = [
   // Languages. `exact` for Go: "Go" the language vs "go" the verb.
   // The most-requested backend and data language; unambiguous as a word.
   { term: "Python", pattern: word("python") },
-  // Frontend and Node work; spelled out, so no abbreviation trap.
-  { term: "JavaScript", pattern: word("javascript") },
-  // Typed JavaScript; postings list it separately from JavaScript.
-  { term: "TypeScript", pattern: word("typescript") },
+  // Frontend and Node work, or its "JS" short form (2026-11-21). The left bound also refuses ".", so the
+  // ".js" inside "Node.js", "Next.js" or "React.js" (a framework's NAME) never credits JavaScript.
+  { term: "JavaScript", pattern: /(?<![A-Za-z0-9.])(?:javascript|js)(?![A-Za-z0-9])/i },
+  // Typed JavaScript, or its "TS" short form (2026-11-21); same "." bound as JavaScript (a ".ts" file is not the skill).
+  { term: "TypeScript", pattern: /(?<![A-Za-z0-9.])(?:typescript|ts)(?![A-Za-z0-9])/i },
   // Bounded, so it is not found inside "JavaScript".
   { term: "Java", pattern: word("java") },
   // Case-sensitive: "Go" the language, never "go" the verb; also matches "Golang".
@@ -74,6 +75,8 @@ const SKILL_VOCABULARY: readonly SkillTerm[] = [
   { term: "React", pattern: word("react(?:\\.js)?") },
   // Runtime, written "Node.js", "NodeJS" or "nodejs".
   { term: "Node.js", pattern: word("node\\.?js") },
+  // React framework, written "Next.js" or "NextJS" (2026-11-21: missed before, plan §2 item 6).
+  { term: "Next.js", pattern: word("next\\.?js") },
   // Python web framework.
   { term: "FastAPI", pattern: word("fastapi") },
   // Python web framework.
@@ -90,7 +93,8 @@ const SKILL_VOCABULARY: readonly SkillTerm[] = [
   { term: "gRPC", pattern: word("grpc") },
   // Case-sensitive: the API style, never "the rest of".
   { term: "REST", pattern: exact("REST(?:ful)?") },
-  // API design and integration; "API" or "APIs".
+  // API design and integration; "API" or "APIs". Dropped as vague earlier on 2026-11-21, RESTORED the same day on the
+  // orch's instruction (14:52), so the ATS coverage denominator keeps it.
   { term: "APIs", pattern: word("apis?") },
   // LLM orchestration library.
   { term: "LangChain", pattern: word("langchain") },
@@ -117,8 +121,8 @@ const SKILL_VOCABULARY: readonly SkillTerm[] = [
   { term: "Airflow", pattern: word("airflow") },
   // A requirement in its own right ("caching", "cache", "caches").
   { term: "Caching", pattern: word("cach(?:e|es|ing)") },
-  // Queues, messaging or brokers: one requirement, many spellings.
-  { term: "Message queues", pattern: word("queues?|messaging|message brokers?") },
+  // "Message queues" LEFT on 2026-11-21 (vague): bare "messaging" or "queues" matched chat products and support
+  // queues. Kafka and RabbitMQ above are the concrete forms.
   // Only with design/evolution/migration, so a passing "schema" is not a skill.
   { term: "Schema design", pattern: word("schema (?:design|evolution|migrations?)") },
   // Infrastructure and delivery.
@@ -143,6 +147,10 @@ const SKILL_VOCABULARY: readonly SkillTerm[] = [
   { term: "CI/CD", pattern: word("ci ?/ ?cd") },
   // Named CI system.
   { term: "GitHub Actions", pattern: word("github actions") },
+  // Version control (2026-11-21). Word-bounded, so "GitHub" and "GitLab" do not count as "Git".
+  { term: "Git", pattern: word("git") },
+  // API client, on 40 of 64 of Teja's hand-edited resumes (2026-11-21).
+  { term: "Postman", pattern: word("postman") },
   // Architecture style, hyphenated or not.
   { term: "Microservices", pattern: word("micro-?services?") },
   // Architecture style, hyphen or space.
@@ -154,16 +162,14 @@ const SKILL_VOCABULARY: readonly SkillTerm[] = [
   // Engineering practice, named only when a posting asks for it as a skill.
   // Only concrete test kinds, so "test" in prose ("put to the test") does not count.
   { term: "Testing", pattern: word("unit tests?|integration tests?|end-to-end|automated (?:tests?|testing|coverage)|test automation") },
+  // JavaScript test runner (2026-11-21).
+  { term: "Jest", pattern: word("jest") },
   // Reviewing others' code, a listed responsibility.
   { term: "Code review", pattern: word("code reviews?") },
   // A listed fundamental.
   { term: "Debugging", pattern: word("debugging") },
-  // Performance profiling.
-  { term: "Profiling", pattern: word("profiling") },
-  // Concurrent programming.
-  { term: "Concurrency", pattern: word("concurrency") },
-  // Operational duty; the hyphen distinguishes it from "on call" in prose.
-  { term: "On-call", pattern: word("on-call") },
+  // "Profiling", "Concurrency" and "On-call" LEFT on 2026-11-21 (vague practice words, plan §5 P3): no master skill or
+  // resume line answers them, so they only lowered the ATS coverage figure.
   // AI group. Case-sensitive acronym, never the letters inside "said" or "maintain".
   { term: "AI", pattern: exact("AI") },
   // Case-sensitive acronym, singular or plural.
@@ -269,4 +275,97 @@ export function extractJdKeywords(jobDescription: string): readonly string[] {
   const found = SKILL_VOCABULARY.filter((entry) => appearsInDecoded(entry.term, text)).map((entry) => entry.term);
   // Code-point order, not locale order, so the cache-key input is identical on every runtime.
   return [...new Set(found)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+// ---- REQUIREMENT TIERS (2026-11-21, Teja's 2026-11-18 21:47 ruling "most-needed first") --------------------------
+// "Inside each group, JD-required skills first, then JD-preferred, then core; groups ordered by how much of the JD
+// they cover; projects and achievements the same." That needs to know WHERE in the posting a skill is named, not only
+// THAT it is. A posting is read line by line: a short heading line opens a section (Requirements / Nice to have / other
+// prose), and an inline marker ("is a plus", "preferred") overrides its own sentence. The heading words below mirror
+// _shared/screen/required-experience.ts's SOFT/HARD headings (that file is the screener's and module-local, so they are
+// restated here rather than shared across the two owners).
+
+/** Where a posting names a skill: under its requirements, its nice-to-haves, or anywhere else. */
+export type JdTier = "required" | "preferred" | "mentioned";
+
+/** The weight of each tier for ranking: required > preferred > mentioned (> 0, so any mention beats none). */
+export const JD_TIER_WEIGHT: Readonly<Record<JdTier, number>> = { required: 3, preferred: 2, mentioned: 1 };
+
+/** One sentence of a posting with the tier its position gives it. */
+export interface JdSentence {
+  // The sentence, entity-decoded once (the same decoding the matcher uses).
+  readonly text: string;
+  // Its tier.
+  readonly tier: JdTier;
+}
+
+// A nice-to-have heading. Checked FIRST, because "Preferred Qualifications" also contains a required word.
+const PREFERRED_HEADING = /\b(?:nice[- ]to[- ]haves?|preferred|bonus(?: points)?|good[- ]to[- ]haves?|pluses|desired|desirable|optional)\b/i;
+// A requirements heading.
+const REQUIRED_HEADING = /\b(?:requirements?|required|qualifications?|must[- ]haves?|what (?:you(?:'ll)?|we(?:'re)?) (?:need|bring|look(?:ing)? for|expect)|you (?:have|bring|should have)|who you are|about you|skills)\b/i;
+// Any other heading (the role, the company, benefits): closes a requirements section, so its prose is "mentioned".
+const OTHER_HEADING = /\b(?:about (?:us|the (?:company|team|role|job))|the role|benefits|perks|what we offer|why (?:join|us)|responsibilities|what you(?:'ll)? do|compensation|salary|equal opportunity|how to apply)\b/i;
+// An inline nice-to-have marker: the sentence is preferred wherever it sits.
+const PREFERRED_INLINE = /\b(?:nice to have|good to have|(?:is |are |would be )?a (?:big )?plus|preferred|bonus|is an advantage|desirable)\b/i;
+// An inline requirement marker, for postings without headings.
+const REQUIRED_INLINE = /\b(?:required|must|mandatory|essential)\b/i;
+
+/** A heading's shape: an UNBULLETED short line, at most 8 words, no sentence inside it (a trailing colon is allowed). */
+function headingShaped(line: string): boolean {
+  // A bulleted line is a list item, never a heading ("- Python skills" is content, though it says "skills").
+  if (/^[\-*•]/.test(line)) return false;
+  // Markdown hashes and a trailing colon are layout, not words.
+  const bare = line.replace(/^#+\s*/, "").replace(/:\s*$/, "").trim();
+  // Short, and not a sentence (a heading has no full stop in the middle and no list of items).
+  return bare !== "" && bare.split(/\s+/).length <= 8 && !/[.;,]/.test(bare);
+}
+
+/**
+ * The posting split into sentences, each tagged with its tier. Lines before any heading, and lines under a non-
+ * requirements heading, are "mentioned". Pure and deterministic; call once per posting and reuse the result.
+ */
+export function classifyJd(jobDescription: string): readonly JdSentence[] {
+  // The section the current line sits in; prose until a requirements heading says otherwise.
+  let section: JdTier = "mentioned";
+  // The tagged sentences.
+  const out: JdSentence[] = [];
+  // Line by line: headings are lines.
+  for (const raw of decodeEntities(jobDescription).split(/\r?\n|•/)) {
+    // Surrounding space is not content.
+    const line = raw.trim();
+    // Blank lines carry nothing.
+    if (line === "") continue;
+    // A heading switches the section and is not itself a requirement. Only a KNOWN heading counts: a short line that
+    // names no section ("Experience with Kafka is a plus") is content and gets the inline check below.
+    // Nice-to-have first ("Preferred Qualifications"), then requirements, then any other heading closes the section.
+    const heading = !headingShaped(line) ? null : PREFERRED_HEADING.test(line) ? "preferred" : REQUIRED_HEADING.test(line) ? "required" : OTHER_HEADING.test(line) ? "mentioned" : null;
+    // A heading: switch, and move on.
+    if (heading !== null) { section = heading; continue; }
+    // A content line, split into sentences so an inline marker only marks its own sentence.
+    for (const sentence of line.split(/(?<=[.;!?])\s+/)) {
+      // An inline nice-to-have wins everywhere; an inline requirement lifts prose; otherwise the section decides.
+      const tier: JdTier = PREFERRED_INLINE.test(sentence) ? "preferred" : section === "mentioned" && REQUIRED_INLINE.test(sentence) ? "required" : section;
+      // Tagged.
+      out.push({ text: sentence, tier });
+    }
+  }
+  // Every sentence, in posting order.
+  return out;
+}
+
+/** The BEST tier at which any of `phrases` appears in the classified posting, or null when none appears. */
+export function jdTierOf(phrases: readonly string[], sentences: readonly JdSentence[]): JdTier | null {
+  // The best tier so far.
+  let best: JdTier | null = null;
+  // Each sentence that names any phrase.
+  for (const { text, tier } of sentences) {
+    // Already the top tier: nothing beats it.
+    if (best === "required") break;
+    // Not named here, or no better than what we have.
+    if (best !== null && JD_TIER_WEIGHT[tier] <= JD_TIER_WEIGHT[best]) continue;
+    // Named by any phrase (the one matching rule, alias-aware: "Postgres" credits PostgreSQL).
+    if (phrases.some((phrase) => appearsInDecoded(phrase, text))) best = tier;
+  }
+  // The best, or null for "the posting never names it".
+  return best;
 }

@@ -48,6 +48,8 @@ import type { AddableBullet, AddableEntry, BulletSection, MoveDirection, Section
 /* The auditor's own rule 5 and tokenizer, imported by relative path (as diffAdapter.ts imports
    jd-keywords) so the advice shown before Apply is the audit's definition, never a copy. */
 import { bulletGroundingGaps, tokenizeText } from '../../../../../supabase/functions/_shared/audit/detector.ts';
+// "Did the owner name this?", the server's own matcher (resume-assist reads names the same way), 2026-11-21.
+import { namedIn } from '../../../../../supabase/functions/_shared/text/name-match.ts';
 /* The closed list of section names, shared with the tailor's schema and the edge function, so a
    stored op naming a section is checked against the same seven words everywhere. */
 import { TAILOR_SECTION_KINDS } from '../../../../../supabase/functions/_shared/tailor/prompt.ts';
@@ -836,9 +838,12 @@ export function shouldAutoApply(op: StoredOp, instruction: string): boolean {
   if (op.op === 'rejected') return false;
   // A new claim in the master is the operator's call, every time.
   if (op.op === 'new_bullet') return false;
-  /* A whole entry off is the biggest change one op can make, and since 2026-11-04 the untrusted JD is
-     in the prompt, so a posting could ask for it (review finding): always the operator's click. */
-  if (op.op === 'remove_entry') return false;
+  /* A whole entry off is the biggest change one op can make, and since 2026-11-04 the untrusted JD is in the prompt,
+     so a posting could ask for it (review finding). Since Teja's ruling (2026-11-21 14:36, "if i say rm something ...
+     it need to directly remove") it applies by itself ONLY when the owner named the entry by its whole name (the part
+     before " · ", typo-tolerant, the server's own matcher); a partial or unnamed one still waits for the click. A swap
+     half is held back separately (isPairedHalf in the panel). */
+  if (op.op === 'remove_entry') return namedIn(op.label.split(' · ')[0] ?? '', [instruction]);
   // A job title is a claim an employer verifies (2026-11-11): always the operator's click.
   if (op.op === 'set_role') return false;
   /* A text edit applies by itself only when rule 5 found it grounded (Teja, 2026-11-04, "Audit-gated").
@@ -853,12 +858,10 @@ export function shouldAutoApply(op: StoredOp, instruction: string): boolean {
   if (op.op === 'add_skill') return op.inMaster;
   /* A skill off (2026-11-04, the JD reason above): only when the operator named it; "remove the
      duplicate testing" names Testing, "trim my skills" names none. */
-  // The operator's words, as the auditor tokenises text.
-  const said = new Set(tokenizeText(instruction));
-  // Every word of the skill's name must have been typed ("CN" needs "cn"; "Code review" needs both).
-  const name = tokenizeText(op.name);
-  // An empty name never auto-applies.
-  return name.length > 0 && name.every((token) => said.has(token));
+  /* Named by the server's own matcher (2026-11-21): runs of 1-4 words, compacted, one typo on 6+ letters, two on 8+,
+     short names exact. Before, every word had to be typed exactly, so Teja's "rm  vs cod e" (which the server already
+     read as VS Code) left the card waiting. Same answer on both sides now; an empty name is never named. */
+  return namedIn(op.name, [instruction]);
 }
 
 /* The page action a stored op becomes on Apply. A switch over the closed union: a new StoredOp arm

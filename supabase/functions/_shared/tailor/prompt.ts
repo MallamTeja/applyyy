@@ -15,6 +15,15 @@
 
 // aa's contract, through this stream's single re-export module.
 import type { MasterProfile, TailoredSectionKind } from "../contracts/shared-types.ts";
+// The posting's vocabulary terms, shown to the model as its requirements (2026-11-21: they were computed only AFTER the
+// call before, tailorer.ts:602, so the model never saw what the job asked for).
+import { extractJdKeywords } from "./jd-keywords.ts";
+// The titles an experience may print; the validator that refuses any other title owns the list (e1f4b520).
+import { EXPERIENCE_TITLE_ALLOW_LIST } from "./validator.ts";
+
+// The sampling temperature for every tailor call (plan §5 P2, 2026-11-21): one stable reading of the master per job, so
+// a re-tailor does not reshuffle a resume Teja already edited. tailor/index.ts passes it; prompt.test.ts pins both.
+export const TAILOR_TEMPERATURE = 0.2;
 
 // The section names the schema's `section_order` enum offers, as a runtime tuple — a
 // JSON schema needs values, and the contract's `TailoredSectionKind` is a type only.
@@ -126,6 +135,11 @@ function renderMasterProfile(master: MasterProfile, masterVersion: number): stri
     // aa's TailoredExperience has no field for them, so an employer cannot be renamed.
     // Includes start and end dates for context.
     sections.push(`- ref=${node.id} :: ${node.role} at ${node.company} (${node.start_display}–${node.end_display})`);
+    // The titles this experience may print instead of its master role (Teja 2026-11-18 21:55), only where the allow-list
+    // names the node; any other experience gets no line, and the validator refuses a role_title on it.
+    const titles = EXPERIENCE_TITLE_ALLOW_LIST[node.id];
+    // Listed in the allow-list's own order and spelling.
+    if (titles !== undefined && titles.length > 0) sections.push(`  role_title options (put ONE in role_title): ${titles.join(" | ")}`);
     // A bullet-less node says so explicitly, so its required `bullets` array comes back
     // empty instead of holding the node's own ref (see noBulletsLine).
     if (node.bullets.length === 0) sections.push(noBulletsLine(node.id));
@@ -374,6 +388,17 @@ const TAILOR_POLICY = [
   "  vocabulary to prefer when rewording them.",
   // Section separator.
   "",
+  // THE REQUIREMENT-TO-EVIDENCE STEP (plan §5 P2, 2026-11-21). The model now sees the posting's extracted requirements
+  // (userContent), so it is told to map each to master proof before choosing, and never to write around a gap.
+  "REQUIREMENT-TO-EVIDENCE (do this before choosing anything): take the job's requirements from the",
+  // Continued: where they come from.
+  "  `extracted_requirements` line of the posting plus any other must-have its description states. For each,",
+  // Continued: the evidence search.
+  "  find the master bullets, skills, projects and certifications that prove it. Choose the items that prove the most",
+  // Continued: ordering, and the honest gap.
+  "  requirements and put the strongest proof first. A requirement with no master evidence stays unaddressed: never write around the gap.",
+  // Section separator.
+  "",
   // THE SELECTION RULE (Teja, 2026-11-08 15:36 + 15:46 IST). A HINT ONLY, like the wording rule below:
   // content-rules.ts enforces every number in code after the answer, so a model that ignores this is corrected.
   "SELECTION RULE: pick EXACTLY 2 projects (the 2 most relevant; never 3), each with at least 4 bullets;",
@@ -383,22 +408,75 @@ const TAILOR_POLICY = [
   "  the Aczen experience with at least 4 bullets; at least 5 certifications (all of them if fewer), EVERY achievement, 2 educations.",
   // Section separator.
   "",
-  // THE WORDING HINT (2026-11-05). 97 of 130 tailor violations in 30 days were words the validator could not
-  // trace (robust, ensure, alongside, auditing). This states the validator's own rule up front. A HINT ONLY:
-  // the validator still checks every word, and the bullet rewrite retry handles what slips through.
-  "WORDING RULE: reword each bullet using ONLY words from that bullet's own master text, the candidate's",
-  // Continued.
-  "  listed skills, and plain connectives (a, the, and, with, for, using, built, developed, designed).",
-  // The failure it prevents, named with the live examples.
-  "  Do not add adjectives or claims the master text does not make (robust, scalable, ensure, accurate,",
-  // Continued.
-  "  alongside); a word from another bullet or another job is not allowed either. Unknown words fail the check.",
+  // THE BULLET RULE (Teja 2026-11-18 21:47: "AI writes the bullets"; 2026-11-21). Replaces the 2026-11-05 WORDING HINT
+  // ("only words from the bullet's own master text"), which the validator still applies to a bullet WITHOUT sources. A
+  // bullet WITH sources is checked for provenance instead (validator.ts, e1f4b520): every number and tech name must be in
+  // the cited sources, and every number of the ref bullet kept (the Stripe row lost "260+", "878 rows", "59%").
+  "BULLET RULE: write each bullet in your own words for this job, and list in `sources` every master bullet id",
+  // Continued: what sources may hold.
+  "  its facts come from: its own `ref` first, plus any sibling bullet under the SAME parent, never another node's.",
+  // Continued: the binding part, as the validator checks it.
+  "  Every number and every technology name in the text must appear in those sources; keep every number of the `ref` bullet.",
+  // Continued: the claim words the old rule named, still not allowed, and the length that keeps one page.
+  "  Add no adjective or claim the sources do not make (robust, scalable, ensure, accurate). About 20-30 words each.",
   // THE KEEP RULE (2026-11-07). Every rule above limits what may be ADDED; none limited what may be REMOVED.
   // Live row 67b979b3 (GitLab, tailored 2026-11-02 by the first call, no retry): master "AI orchestration
   // pipelines" came back as "orchestration pipelines", and "AI" was that posting's only keyword in the bullet.
   "KEEP RULE: never remove a job-posting keyword that the master bullet already contains. Rewording may",
   // Continued: rewording keeps its freedom to reorder, so the rule costs no flexibility; the example is the live case.
   "  reorder or rephrase around it, but the keyword stays (master 'AI orchestration pipelines' keeps 'AI').",
+  // Section separator.
+  "",
+  // THE SUMMARY RULE (Teja 2026-11-18: "per-JD summary"; plan §5 P2). Live: 85% of summaries were a master summary or
+  // variant verbatim, 2 resumes shipped with none. The 33 ideals run 46-56 words in 2 sentences with 2-5 master numbers.
+  "SUMMARY RULE: always return `summary`. Write it new for THIS job: 2-3 sentences, about 45-60 words, using only",
+  // Continued: the evidence, the keywords and the metric.
+  "  facts from the master items you cite in `summary.refs`. Name at least 2 of the job's requirements those items support",
+  // Continued: the metric and the copy ban.
+  "  and include at least 1 real metric copied exactly from a cited item. Never copy a master summary or summary variant word for word.",
+  // Section separator.
+  "",
+  // THE ROLE TITLE RULE (allow-list ruled 2026-11-18 21:55). The mapping is the one the 33 keep7 ideals used: SWE 17,
+  // Full Stack AI 6 (full-stack, web), Backend 5 (SRE, data, cloud), AI 5 (AI/ML, data science). The schema closes the
+  // value to the allow-list, and the validator refuses it on any other experience.
+  "ROLE TITLE RULE: an experience listed with `role_title options` carries `role_title`, ONE of those options, picked",
+  // Continued: the mapping.
+  "  by the job: AI Engineer Intern for AI/ML or data-science roles, Backend Engineer Intern for backend, SRE, data or cloud",
+  // Continued: the rest, and the ban.
+  "  roles, Full Stack AI Engineer Intern for full-stack or web roles, else Software Engineer Intern. No other experience carries role_title.",
+  // Section separator.
+  "",
+  // THE WORKED EXAMPLE (plan §5 P2: "one good worked example"). FICTIONAL on purpose: an example built from the owner's
+  // master would be copied onto unrelated jobs, and its numbers would read as his. The example_ refs exist in no master,
+  // so a copied ref fails validation as an unknown id.
+  "WORKED EXAMPLE (FICTIONAL: its names, refs and numbers belong to no candidate; never copy them):",
+  // The posting side.
+  "  Posting asks: Python, REST APIs, PostgreSQL, Docker.",
+  // The master side.
+  "  Master: ref=example_b1 :: Built a Flask REST service in Python for 40 clinics | ref=example_b2 :: Moved the service to Docker, cutting deploys from 20 to 5 minutes.",
+  // The evidence map, with the gap left open.
+  "  Evidence: Python -> example_b1; REST APIs -> example_b1; Docker -> example_b2; PostgreSQL -> none, so it is not claimed.",
+  // A bullet drawing on two siblings.
+  '  Bullet: {"ref":"example_b1","text":"Built a Python REST API in Flask for 40 clinics and moved it to Docker, cutting deploys from 20 to 5 minutes","sources":["example_b1","example_b2"]}',
+  // The summary: new words, 2 requirements, a real metric, cited.
+  '  Summary: {"text":"Backend intern who builds Python REST APIs, including a Flask service used by 40 clinics. Moved it to Docker, cutting deploys from 20 to 5 minutes.","refs":["example_b1","example_b2"]}',
+  // Section separator.
+  "",
+  // THE SELF-CHECK (plan §5 P2). Last, so it reviews every rule above; each line names a check the validator or
+  // content-rules.ts will run anyway, so a miss caught here is a retry saved.
+  "SELF-CHECK before you answer (fix anything that fails):",
+  // Refs and parents.
+  "  1. Every ref and every sources id is in the MASTER PROFILE, under the parent you put it under.",
+  // Provenance.
+  "  2. Every number and technology name in a bullet or the summary appears in the items it cites.",
+  // The summary.
+  "  3. summary is present, 2-3 sentences, names 2+ requirements, holds 1 real metric, and copies no master summary.",
+  // The counts.
+  "  4. Exactly 2 projects; at least 5 certifications (all if fewer); every achievement; the Aczen experience has 4+ bullets.",
+  // The title.
+  "  5. Each experience with role_title options has one of them in role_title; no other experience has role_title.",
+  // The honesty step.
+  "  6. No requirement is claimed without master evidence.",
 ]
   // Joined once at module load, so the value is fixed for the process lifetime.
   .join("\n");
@@ -540,12 +618,16 @@ export const TAILOR_RESPONSE_SCHEMA = {
         properties: {
           // Must resolve to a master experience node.
           ref: { type: "string" },
+          // The printed title, only for an allow-listed experience (2026-11-21); closed to the allow-list's titles, so a
+          // free title such as "Data Analyst Intern" (the FamPay row) cannot be written at all. Optional: most have none.
+          role_title: { type: "string", enum: [...new Set(Object.values(EXPERIENCE_TITLE_ALLOW_LIST).flat())] },
           // Bullets belonging to THAT node; scope is enforced by the validator.
           bullets: {
             // Array of bullet items for this experience entry.
             type: "array",
             // Each bullet specifies ref and reworded text.
-            items: { type: "object", properties: { ref: { type: "string" }, text: { type: "string" } }, required: ["ref", "text"] },
+            // sources since 2026-11-21: the master bullets the AI-written text draws on; required so provenance always arrives.
+            items: { type: "object", properties: { ref: { type: "string" }, text: { type: "string" }, sources: { type: "array", items: { type: "string" } } }, required: ["ref", "text", "sources"] },
           },
         },
         // Both required: a node without bullets is legal but must be explicit.
@@ -569,7 +651,8 @@ export const TAILOR_RESPONSE_SCHEMA = {
             // Array of bullet items for this project.
             type: "array",
             // Each bullet item specifies ref and text.
-            items: { type: "object", properties: { ref: { type: "string" }, text: { type: "string" } }, required: ["ref", "text"] },
+            // sources since 2026-11-21: the master bullets the AI-written text draws on; required so provenance always arrives.
+            items: { type: "object", properties: { ref: { type: "string" }, text: { type: "string" }, sources: { type: "array", items: { type: "string" } } }, required: ["ref", "text", "sources"] },
           },
         },
         // Both ref and bullets required.
@@ -593,7 +676,8 @@ export const TAILOR_RESPONSE_SCHEMA = {
             // Array of bullet items for education.
             type: "array",
             // Bullet item definition with ref and text.
-            items: { type: "object", properties: { ref: { type: "string" }, text: { type: "string" } }, required: ["ref", "text"] },
+            // sources since 2026-11-21: the master bullets the AI-written text draws on; required so provenance always arrives.
+            items: { type: "object", properties: { ref: { type: "string" }, text: { type: "string" }, sources: { type: "array", items: { type: "string" } } }, required: ["ref", "text", "sources"] },
           },
         },
         // Both ref and bullets required.
@@ -620,7 +704,8 @@ export const TAILOR_RESPONSE_SCHEMA = {
             // Array of bullet items for this award.
             type: "array",
             // Bullet item definition with ref and text.
-            items: { type: "object", properties: { ref: { type: "string" }, text: { type: "string" } }, required: ["ref", "text"] },
+            // sources since 2026-11-21: the master bullets the AI-written text draws on; required so provenance always arrives.
+            items: { type: "object", properties: { ref: { type: "string" }, text: { type: "string" }, sources: { type: "array", items: { type: "string" } } }, required: ["ref", "text", "sources"] },
           },
         },
         // Both required, as for every bullet-bearing section, so the parser's
@@ -646,7 +731,8 @@ export const TAILOR_RESPONSE_SCHEMA = {
             // Array of bullet items for this credential.
             type: "array",
             // Bullet item definition with ref and text.
-            items: { type: "object", properties: { ref: { type: "string" }, text: { type: "string" } }, required: ["ref", "text"] },
+            // sources since 2026-11-21: the master bullets the AI-written text draws on; required so provenance always arrives.
+            items: { type: "object", properties: { ref: { type: "string" }, text: { type: "string" }, sources: { type: "array", items: { type: "string" } } }, required: ["ref", "text", "sources"] },
           },
         },
         // Both ref and bullets required.
@@ -673,6 +759,8 @@ export function buildTailorPrompt(input: TailorPromptInput): TailorPrompt {
   // The body, which is where a payload most often arrives.
   // Neutralize fence-like angle bracket sequences from job description text.
   const safeDescription = neutralizeFenceSequences(input.jobDescription);
+  // The posting's vocabulary terms, sorted and deduped by jd-keywords, so the prompt stays byte-stable.
+  const requirements = extractJdKeywords(input.jobDescription);
 
   // Construct system instruction string array by joining system policy and candidate truth tags.
   // Uses explicit structural XML fencing tags <system_policy> and <candidate_truth>.
@@ -708,6 +796,9 @@ export function buildTailorPrompt(input: TailorPromptInput): TailorPrompt {
     "description:",
     // Sanitized job description text.
     safeDescription,
+    // The posting's vocabulary terms, as the requirements the evidence step maps; posting-derived, so fenced as data.
+    // Never blank: an empty line could read as "this job asks for nothing".
+    `extracted_requirements: ${requirements.length > 0 ? neutralizeFenceSequences(requirements.join(", ")) : "(none found; read the description)"}`,
     // Closer tag for untrusted job posting container.
     "</untrusted_job_posting>",
     // Closer fence sequence marker.

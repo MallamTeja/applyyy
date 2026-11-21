@@ -1236,6 +1236,13 @@ test("generateGeminiContent sends maxOutputTokens and thinkingLevel when generat
   });
 });
 
+test("generateGeminiContent sends temperature when generation sets it (tailor, 2026-11-21)", async () => {
+  // The tailor asks for 0.2: one stable reading of the master, not a creative one.
+  const sent = await capturedRequestBody({ generation: { temperature: 0.2 } });
+  // Under the REST name generateContent reads, after the schema keys.
+  assert.deepEqual(sent.generationConfig, { responseMimeType: "application/json", responseSchema: { type: "OBJECT" }, temperature: 0.2 });
+});
+
 test("generateGeminiContent without generation sends the pre-2026-10-31 body unchanged", async () => {
   // No cost controls: every existing caller.
   const sent = await capturedRequestBody({});

@@ -24,6 +24,8 @@ import { MASTER_V2, STORED_TAILORED_PROFILE, TAILOR_REFS } from './fixtures/gitl
 import { assertDistIsTestable, seedSession, startDistServer } from './support/e2eDist.ts';
 // The renderer's own one-page question: the same function the page's fit uses.
 import { fitsOnePage } from '../../../packages/resume-template/src/index.ts';
+// The template's own line counter and ladder, to measure how many added skills wrap the AI group (2026-11-21).
+import { skillGroupLineCount, TYPOGRAPHY_LADDER } from '../../../packages/resume-template/src/index.ts';
 import type { ResolvedResume } from '../src/data/contract';
 
 // The signed-in operator.
@@ -34,23 +36,66 @@ const STAMP_0 = '2026-11-07T00:00:00.000000+00:00';
 const APP_ID = '44444444-4444-4444-8444-444444444444';
 // The job, as the preview frame's title names it.
 const JOB_TITLE = 'Page Fit Engineer';
-/* Four master AI skills not on the stored resume, as the AI answer adds them. Four, because they join the
-   existing AI line and only the fourth wraps it onto a new line (measured: 1-3 add no height). */
-const ADDED_SKILLS = ['RAG Pipelines', 'Prompt Engineering', 'Context Engineering', 'Tool Calling & Guardrails'].map((name) => ({ name, category: 'AI' }));
+/* Master AI skills not on the stored resume, as the AI answer adds them. The COUNT is MEASURED, not fixed: the add must
+   push the AI group onto one more printed line at the READABLE MINIMUM (the last rung, the one fitsOnePage decides at),
+   or it adds no height there and the near-full search below finds no length. It was a fixed four until 2026-11-21, when the compact skills block (skills print 0.5-1pt
+   smaller from rung 1, Teja 2026-11-18) let four fit on the existing line and the search threw. Measuring with the
+   template's own skillGroupLineCount means the next font change re-derives the count instead of breaking this test. */
+/* THE TEST MASTER: MASTER_V2 plus three long-named synthetic AI skills (2026-11-21). With the compact skills block,
+   every skill MASTER_V2 does not already print fits on an existing line at the readable minimum (measured: all 8
+   together add no line at 9pt), so no add from MASTER_V2 alone can cost height where fitsOnePage decides. These three
+   exist only in this test's master (served below as master_profiles), so the add is still master content to the app. */
+const TEST_MASTER = { ...(MASTER_V2 as unknown as { skills: { id: string; name: string; category: string }[] }), skills: [
+  // The fixture master's own skills, unchanged.
+  ...(MASTER_V2 as unknown as { skills: { id: string; name: string; category: string }[] }).skills,
+  // Long names, so a few of them wrap the AI line even at 9pt.
+  { id: "skill_test_ai_eval", name: "Retrieval Evaluation and Benchmarking Harnesses", category: "AI" },
+  // Same reason.
+  { id: "skill_test_ai_orch", name: "Autonomous Agent Orchestration Frameworks", category: "AI" },
+  // Same reason.
+  { id: "skill_test_ai_obs", name: "Large Language Model Observability Pipelines", category: "AI" },
+] };
+
+// (At the minimum rung the AI line alone no longer wraps: all four remaining master AI skills fit on it at 9pt, measured
+// 2026-11-21. So the add is measured over the WHOLE skills block: AI skills first, then the master's others, whose own
+// group is a new line.)
+const ADDED_SKILLS = ((): { name: string; category: string }[] => {
+  // The stored resume's skills (the block the add joins).
+  const stored = (STORED_TAILORED_PROFILE as unknown as { skills: { name: string; category: string }[] }).skills;
+  // The master's skills not on it, AI first (the turn this test was written for), then master order.
+  const unused = TEST_MASTER.skills.filter((s) => !stored.some((k) => k.name === s.name));
+  // AI candidates, then the rest.
+  const candidates = [...unused.filter((s) => s.category === 'AI'), ...unused.filter((s) => s.category !== 'AI')];
+  // The rung fitsOnePage measures at: the readable minimum.
+  const minimum = TYPOGRAPHY_LADDER.length - 1;
+  // Printed lines of the whole skills block at that rung: each group's own line count, summed.
+  const blockLines = (skills: readonly { name: string; category: string }[]): number =>
+    [...new Set(skills.map((s) => s.category))].reduce((sum, category) => sum + skillGroupLineCount(category, skills.filter((s) => s.category === category).map((s) => s.name), minimum), 0);
+  // The fewest candidates that add a line.
+  for (let n = 1; n <= candidates.length; n += 1) {
+    // The first n candidates.
+    const added = candidates.slice(0, n).map((s) => ({ name: s.name, category: s.category }));
+    // A new line at the minimum: the add really costs height where the one-page verdict is made.
+    if (blockLines([...stored, ...added]) > blockLines(stored)) return added;
+  }
+  // No count does it: the fixture changed; said by name rather than a vacuous pass.
+  throw new Error('pageFitE2e: no number of master skills adds a printed line to the skills block; re-check the fixture');
+})();
 /* The prompt. It says "all" since 2026-11-12: an add that wraps a skill group onto a second line is refused
    unless the owner says "all" (tailoredEdits.skillGroupWrapReason), and this test needs exactly that wrap. */
-const PROMPT = 'Add all of RAG Pipelines, Prompt Engineering, Context Engineering and Tool Calling to my skills.';
+// Built from the measured names (2026-11-21), so the prompt always names exactly what the answer adds.
+const PROMPT = `Add all of ${ADDED_SKILLS.slice(0, -1).map((s) => s.name).join(', ')} and ${ADDED_SKILLS[ADDED_SKILLS.length - 1]!.name} to my skills.`;
 
 /* The resume with the four skills appended as addSkill builds them (the master's ref, name, category). */
 function withAddedSkills(resume: ResolvedResume): ResolvedResume {
   // The master's own skill nodes, found by name.
-  const master = (MASTER_V2 as unknown as { skills: { id: string; name: string; category: string }[] }).skills;
+  const master = TEST_MASTER.skills;
   // Each added skill as a resolved node.
   const added = ADDED_SKILLS.map((s) => {
     // Must exist in the master, or the fixture changed under this test.
     const node = master.find((m) => m.name === s.name);
     // Said by name.
-    assert.ok(node !== undefined, `MASTER_V2 must hold the skill ${s.name}`);
+    assert.ok(node !== undefined, `TEST_MASTER must hold the skill ${s.name}`);
     // Resolved shape.
     return { ref: node.id, name: node.name, category: node.category };
   });
@@ -208,8 +253,8 @@ describe('one-page rule, live in the editor (2026-11-07)', () => {
       }
       // The master: the row's pin is version 2 (version 1 a placeholder, as in aiEditE2e).
       if (url.pathname.endsWith('/rest/v1/master_profiles')) {
-        // Both versions are MASTER_V2's content.
-        const masters = [{ profile: MASTER_V2, version: 1 }, { profile: MASTER_V2, version: 2 }];
+        // Both versions are TEST_MASTER's content (MASTER_V2 plus the three synthetic AI skills above).
+        const masters = [{ profile: TEST_MASTER, version: 1 }, { profile: TEST_MASTER, version: 2 }];
         // A pinned read names its version; otherwise the newest.
         const pinned = url.searchParams.get('version');
         // That version, or the newest.
