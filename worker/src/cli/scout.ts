@@ -17,6 +17,9 @@ import { loadScreenContext } from '../../../supabase/functions/_shared/screen/co
 import { supabaseScreenQueries } from '../../../supabase/functions/_shared/screen/supabase-queries.ts';
 // The dedupe + insert/refresh split that keeps one fingerprint from poisoning a batch.
 import { dedupeByFingerprint, persistJobBatch, watchlistPollUpdate, type PreparedJob } from '../scout/persist-jobs.ts';
+// D3 + D10 (2026-11-18): the stored-row description backfill, and the once-a-day rule for boards
+// deep in a failure streak. Both pure-or-injected in persist-jobs.ts, so they are tested there.
+import { backfillWorkdayDescriptions, dueForPoll, FAILING_BOARD_STREAK } from '../scout/persist-jobs.ts';
 // The board-identity guard, shared with scout-ats: a wrong token can answer 200 with a
 // DIFFERENT company's jobs (2026-10-23 'tcs'→Thornbury), and this file is the one on cron.
 import { evaluateBoardIdentity } from '../../../supabase/functions/_shared/ats/identity.ts';
@@ -27,6 +30,9 @@ import { boardRefusal, failureMark } from '../../../supabase/functions/_shared/a
 // Every page of a board through plain HTTP, kept in its own module so it can be tested; and the
 // same module's robots-gated single GET, for the Workday detail read.
 import { readBoardPages, robotsGatedGet } from '../scout/board-pages.ts';
+// D1 (2026-11-18): robots.txt answered 429/5xx, so the policy is unknown: skip the board this
+// run without a failure mark. Checked by type in the catch below, never by message text.
+import { RobotsUnavailableError } from '../scout/board-pages.ts';
 // Disappearance marking with the edge's own planner (2026-11-05): this cron scout never marked any.
 import { applyBoardLiveness, readLivenessSnapshot } from '../scout/liveness-marking.ts';
 // The Workday detail read (2026-11-05): one run per scout run, so its read cap spans every board.
@@ -234,6 +240,9 @@ async function main(): Promise<void> {
   let totalReappeared = 0;
   // Boards where liveness wrote nothing for a reason (refusal or a failed read/write).
   let totalLivenessRefused = 0;
+  // D1 (2026-11-18): boards skipped because robots.txt answered 429/5xx. Log-only, and
+  // deliberately NOT a failure: nothing is written to the board, so it goes first next run.
+  let totalRobotsDeferred = 0;
   const now = new Date();
 
   // THE SCREENER'S CONTEXT, LOADED ONCE FOR THE WHOLE RUN. The rules, the blocklist, the
@@ -288,7 +297,25 @@ async function main(): Promise<void> {
   // untouched, so their older last_polled_at sorts them first next run (the order above);
   // every board this run does start gets last_polled_at = now from watchlistPollUpdate or
   // failureMark. The board in flight is always finished: the check is between boards.
-  const budget = boardsWithinBudget(boards as WatchlistRow[], deadline);
+  // D10 (2026-11-18): a board at FAILING_BOARD_STREAK+ consecutive failures rests 24 h between
+  // polls, so a dead board stops spending every run's budget. Its rows are untouched while it rests.
+  const dueBoards = (boards as WatchlistRow[]).filter((board) => dueForPoll(board, now));
+  // Always printed, zero included, so "0 resting" and "rule never ran" do not look alike.
+  console.log(`[applyy-scout] ${boards.length - dueBoards.length} board(s) at ${FAILING_BOARD_STREAK}+ failures resting (polled under 24 h ago); ${dueBoards.length} due.`);
+
+  // D3 (2026-11-18): stored Workday rows still in the pipeline with no description get read
+  // BEFORE the board loop. Every run ends on the budget, so a pass after the loop would get no
+  // time. It spends from the same detail cap and deadline as new rows (at most 20 of the 40).
+  if (workdayRun !== undefined) {
+    // Robots-gated, paced and capped exactly like the new-row fill.
+    const backfill = await backfillWorkdayDescriptions(client, workdayRun);
+    // A failed statement is a database error: it closes the run failed, like every other write.
+    for (const message of backfill.errors) noteError(`workday backfill: ${message}`, { message });
+    // Always printed, zero included.
+    console.log(`[applyy-scout] workday backfill: ${backfill.selected} stored blank row(s) selected, ${backfill.written} written.`);
+  }
+
+  const budget = boardsWithinBudget(dueBoards, deadline);
   for (const board of budget.boards) {
     const adapter = getAdapter(board.ats_provider);
     if (!adapter) {
@@ -507,6 +534,17 @@ async function main(): Promise<void> {
       console.log(`[applyy-scout] ✓ ${board.company_name}: processed ${boardNewJobs} jobs (${boardNewApps} new applications created).`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      // D1 (2026-11-18): robots.txt answered 429/5xx, so its policy is UNKNOWN. The board was not
+      // fetched (robots honoured), and no failureMark is written: not the count, not last_polled_at,
+      // so the board sorts first next run. A real Disallow is the parent type and falls through.
+      if (err instanceof RobotsUnavailableError) {
+        // Counted for the summary line.
+        totalRobotsDeferred += 1;
+        // log, not error: this is the planned "retry later" path, not a failed poll.
+        console.log(`[applyy-scout] deferred ${board.company_name}: robots.txt unavailable (HTTP ${err.status ?? '429 Retry-After'}), retry next run, failure count unchanged. ${msg}`);
+        // Next board; nothing written for this one.
+        continue;
+      }
       console.error(`[applyy-scout] error polling ${board.company_name}: ${msg}`);
       // Checked like the other failure marks, for the same reason; same shared update.
       const { error: crashMarkErr } = await client.from('company_watchlist').update(failureMark(board, now)).eq('id', board.id);
@@ -522,6 +560,8 @@ async function main(): Promise<void> {
   console.log(`[applyy-scout] boards skipped for identity mismatch: ${totalIdentityMismatch}`);
   // Same always-print rule: "0 emptied" must not look like "gate never ran".
   console.log(`[applyy-scout] boards failed for going empty: ${totalEmptiedBoards}`);
+  // Same always-print rule: "0 deferred" must not look like "the robots skip never ran".
+  console.log(`[applyy-scout] boards deferred for robots.txt 429/5xx (no failure counted): ${totalRobotsDeferred}`);
   // Always printed, zero included: "0 marked" and "liveness never ran" must not look alike.
   console.log(`[applyy-scout] liveness: ${totalMarkedDisappeared} marked disappeared, ${totalReappeared} reappeared, ${totalLivenessRefused} board(s) refused or skipped.`);
   // THE SCREENER'S OWN COUNTERS, reported separately from the discovery counters because
@@ -545,7 +585,7 @@ async function main(): Promise<void> {
   const budgetOutcome = budget.outcome();
   // A budget stop is said in the log as well as on the run row, with the counts.
   if (budgetOutcome.stoppedEarly) {
-    console.log(`[applyy-scout] ⏱️ run budget (${SCOUT_BUDGET_MS / 60_000} min) reached after ${budgetOutcome.processed} of ${boards.length} boards; the other ${budgetOutcome.skippedForDeadline} go first next run.`);
+    console.log(`[applyy-scout] ⏱️ run budget (${SCOUT_BUDGET_MS / 60_000} min) reached after ${budgetOutcome.processed} of ${dueBoards.length} due boards; the other ${budgetOutcome.skippedForDeadline} go first next run.`);
   }
   console.log('====================================================');
 

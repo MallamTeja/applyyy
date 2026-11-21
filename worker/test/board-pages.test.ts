@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 // The typed refusal the gate throws; the same class scout-ats's transport throws.
 import { RobotsDisallowedError } from '../../supabase/functions/_shared/http/errors.ts';
 // The unit under test.
-import { readBoardPages, robotsGatedGet } from '../src/scout/board-pages.ts';
+import { createRequestPacer, readBoardPages, robotsGatedGet, RobotsUnavailableError } from '../src/scout/board-pages.ts';
 // Types only: the fake adapter below is shaped against the real contract.
 import type { AtsAdapter, ParsedPosting } from '../../supabase/functions/_shared/ats/types.ts';
 
@@ -40,14 +40,16 @@ const FAKE_ADAPTER = {
 // The board's robots.txt answer, separate from the page answer: the gate asks for it
 // first, and every test below scripts it. 404 = the host publishes no robots file, which
 // master-robots reads as permission, so the page-transport tests are not about robots.
-type RobotsAnswer = { status: number; body?: string };
+// headers: extra response headers, e.g. a Retry-After for the 'wait' verdict test.
+type RobotsAnswer = { status: number; body?: string; headers?: Record<string, string> };
 // The no-robots-file default the pre-gate tests run under.
 const NO_ROBOTS: RobotsAnswer = { status: 404 };
 // Serve a robots answer as the real fetch would: text/plain, so master-robots' shape
 // check treats a 200 body as a robots.txt and not as a soft-200 HTML page.
 function robotsResponse(answer: RobotsAnswer): Response {
   // A real Response, like every other answer these doubles give.
-  return new Response(answer.body ?? '', { status: answer.status, headers: { 'content-type': 'text/plain' } });
+  // Scripted headers are merged over the text/plain default, so a test can add a Retry-After.
+  return new Response(answer.body ?? '', { status: answer.status, headers: { 'content-type': 'text/plain', ...answer.headers } });
 }
 
 // A fetch double that serves PAGES and records every URL it was asked for. It returns a
@@ -225,5 +227,170 @@ describe('robotsGatedGet', () => {
     await expect(robotsGatedGet(DETAIL, impl, new Map())).rejects.toBeInstanceOf(RobotsDisallowedError);
     // Only robots.txt was read; the posting never was.
     expect(requested).toEqual(['https://fake.test/robots.txt']);
+  });
+});
+
+// ROBOTS "UNKNOWN, RETRY LATER" (2026-11-18, D1). The 11-18 07:35Z scout log: 43 Workday boards
+// refused with "robots.txt returned 429 with no readable Retry-After", each one counted as a failed
+// poll, so 62 of 64 Workday boards sat at consecutive_failures >= 5. Teja's design (22:27 IST): a 429
+// or 5xx on robots.txt means the policy is UNKNOWN, so the board is skipped this run (still never
+// fetched) and its failure count is left alone. A real Disallow must keep failing exactly as before.
+describe('readBoardPages: robots.txt temporarily unavailable', () => {
+  it('a robots.txt 429 throws RobotsUnavailableError, still a refusal, and the board is never contacted', async () => {
+    // Pages would answer 200; robots.txt answers 429 with no Retry-After, the live shape.
+    const { impl, requested } = fakeFetch(200, { status: 429 });
+    // The read is refused...
+    const err = await readBoardPages(FAKE_ADAPTER, 'acme', impl, new Map()).catch((e: unknown) => e);
+    // ...with the "skip, don't count" type scout.ts branches on.
+    expect(err).toBeInstanceOf(RobotsUnavailableError);
+    // Still a RobotsDisallowedError, so any caller that only knows the parent type keeps failing closed.
+    expect(err).toBeInstanceOf(RobotsDisallowedError);
+    // The status that made it transient is carried, for the log line.
+    expect((err as RobotsUnavailableError).status).toBe(429);
+    // Never treated as "allowed": only robots.txt was requested, no page.
+    expect(requested).toEqual(['https://fake.test/robots.txt']);
+  });
+
+  it('a robots.txt 429 with a short Retry-After (a wait verdict) is also skipped, never contacted', async () => {
+    // Retry-After 2 s, under master-robots' 5 s ceiling: the gate answers 'wait', not 'refuse'.
+    const { impl, requested } = fakeFetch(200, { status: 429, headers: { 'retry-after': '2' } });
+    // The read is refused...
+    const err = await readBoardPages(FAKE_ADAPTER, 'acme', impl, new Map()).catch((e: unknown) => e);
+    // ...with the skip type, so a polite "come back in 2 s" is never counted as a failed poll.
+    expect(err).toBeInstanceOf(RobotsUnavailableError);
+    // The 'wait' path carries no status by construction (see RobotsUnavailableError.status).
+    expect((err as RobotsUnavailableError).status).toBeNull();
+    // Only robots.txt was requested: a wait is honoured by not touching the board.
+    expect(requested).toEqual(['https://fake.test/robots.txt']);
+  });
+
+  it('a robots.txt 503 is also "unknown, retry later"', async () => {
+    // A server error on robots.txt: the host did not answer the question.
+    const { impl } = fakeFetch(200, { status: 503 });
+    // Same skip type as the 429.
+    await expect(readBoardPages(FAKE_ADAPTER, 'acme', impl, new Map())).rejects.toBeInstanceOf(RobotsUnavailableError);
+  });
+
+  it('a 200 Disallow still refuses as a plain failure, NOT as unavailable', async () => {
+    // A published policy that forbids everything.
+    const { impl } = fakeFetch(200, { status: 200, body: 'User-agent: *\nDisallow: /\n' });
+    // The refusal...
+    const err = await readBoardPages(FAKE_ADAPTER, 'acme', impl, new Map()).catch((e: unknown) => e);
+    // ...is the parent type, so scout.ts counts it with failureMark...
+    expect(err).toBeInstanceOf(RobotsDisallowedError);
+    // ...and is never the skip type: a Disallow is an answer, not an unknown.
+    expect(err).not.toBeInstanceOf(RobotsUnavailableError);
+  });
+
+  it('a robots.txt fetch that throws (timeout, DNS) stays a counted failure', async () => {
+    // Every request throws, robots.txt included: there is no HTTP status to call transient.
+    const impl = (async () => { throw new Error('Signal timed out'); }) as typeof fetch;
+    // Refused...
+    const err = await readBoardPages(FAKE_ADAPTER, 'acme', impl, new Map()).catch((e: unknown) => e);
+    // ...as a plain refusal (the design names 429 and 5xx only).
+    expect(err).toBeInstanceOf(RobotsDisallowedError);
+    // Not skipped.
+    expect(err).not.toBeInstanceOf(RobotsUnavailableError);
+  });
+
+  it('a cached 429 verdict still reads as unavailable for the next board on that origin', async () => {
+    // One run cache shared by two boards on one host.
+    const cache = new Map();
+    // robots.txt answers 429.
+    const { impl, requested } = fakeFetch(200, { status: 429 });
+    // First board: fetched, 429, skipped.
+    await expect(readBoardPages(FAKE_ADAPTER, 'acme', impl, cache)).rejects.toBeInstanceOf(RobotsUnavailableError);
+    // Second board: served from the cache (no new robots GET), and still the skip type.
+    await expect(readBoardPages(FAKE_ADAPTER, 'acme', impl, cache)).rejects.toBeInstanceOf(RobotsUnavailableError);
+    // One robots.txt request in total: the cache, not a second 429, answered the second board.
+    expect(requested.filter((u) => u.endsWith('/robots.txt'))).toHaveLength(1);
+  });
+});
+
+// WORKDAY PACING (2026-11-18, D1 design point 3). Every *.myworkdayjobs.com tenant sits behind one
+// Cloudflare zone (Server: cloudflare on every tenant, probed 11-18), so the gap is kept across the
+// whole zone, not per tenant host. Other providers are never delayed.
+describe('createRequestPacer', () => {
+  // A fake clock and sleep: the pacer's only side effects, recorded instead of waited on.
+  function fakeTime() {
+    // Milliseconds since the test started.
+    let nowMs = 0;
+    // Every wait the pacer asked for.
+    const sleeps: number[] = [];
+    // Both seams plus the record.
+    return {
+      // The clock the pacer reads.
+      now: () => nowMs,
+      // A sleep that advances the clock instead of waiting.
+      sleep: async (ms: number) => { sleeps.push(ms); nowMs += ms; },
+      // Lets a test move time forward between requests.
+      advance: (ms: number) => { nowMs += ms; },
+      // The recorded waits.
+      sleeps,
+    };
+  }
+
+  it('spaces Workday requests by the gap, across tenants of the same zone', async () => {
+    // Fresh time.
+    const t = fakeTime();
+    // A 1 s gap.
+    const pacer = createRequestPacer(1_000, t.now, t.sleep);
+    // First Workday request: nothing to wait for.
+    await pacer.before('https://zendesk.wd1.myworkdayjobs.com/robots.txt');
+    // 200 ms later, a page on the same tenant: waits the remaining 800 ms.
+    t.advance(200);
+    await pacer.before('https://zendesk.wd1.myworkdayjobs.com/wday/cxs/zendesk/zendesk/jobs');
+    // Immediately after, a DIFFERENT tenant: still the same zone, so a full 1 s wait.
+    await pacer.before('https://fractal.wd1.myworkdayjobs.com/robots.txt');
+    // Exactly those two waits.
+    expect(t.sleeps).toEqual([800, 1_000]);
+  });
+
+  it('never delays a non-Workday host', async () => {
+    // Fresh time.
+    const t = fakeTime();
+    // A 1 s gap.
+    const pacer = createRequestPacer(1_000, t.now, t.sleep);
+    // Back-to-back Greenhouse and Lever requests.
+    await pacer.before('https://boards-api.greenhouse.io/v1/boards/a/jobs');
+    await pacer.before('https://boards-api.greenhouse.io/v1/boards/b/jobs');
+    await pacer.before('https://api.lever.co/v0/postings/c');
+    // No waits at all.
+    expect(t.sleeps).toEqual([]);
+  });
+
+  it('readBoardPages paces the robots.txt GET and every page of a Workday board', async () => {
+    // Fresh time.
+    const t = fakeTime();
+    // Every URL the pacer was asked about, in order.
+    const paced: string[] = [];
+    // A real pacer underneath, so the waits are the production arithmetic.
+    const inner = createRequestPacer(1_000, t.now, t.sleep);
+    // The pacer the transport gets: records, then delegates.
+    const pacer = { before: async (url: string) => { paced.push(url); await inner.before(url); } };
+    // The fake adapter moved onto a myworkdayjobs.com origin, same two-page shape.
+    const adapter = {
+      // Everything else from the fake adapter.
+      ...FAKE_ADAPTER,
+      // Page one on a Workday-zone host.
+      buildRequestUrl: () => 'https://acme.wd1.myworkdayjobs.com/p1',
+    } as unknown as AtsAdapter;
+    // The two pages, keyed by URL.
+    const pages: Record<string, unknown> = {
+      // Page one names page two.
+      'https://acme.wd1.myworkdayjobs.com/p1': { ids: ['a'], next: 'https://acme.wd1.myworkdayjobs.com/p2' },
+      // Page two is the last.
+      'https://acme.wd1.myworkdayjobs.com/p2': { ids: ['b'], next: null },
+    };
+    // 404 for robots.txt (no rules), JSON pages otherwise.
+    const impl = (async (url: string | URL | Request) =>
+      // The robots answer first.
+      String(url).endsWith('/robots.txt') ? new Response('', { status: 404 }) : new Response(JSON.stringify(pages[String(url)]))) as typeof fetch;
+    // Read the board through the recording pacer.
+    await readBoardPages(adapter, 'acme', impl, new Map(), pacer);
+    // robots.txt, then each page, all through the pacer.
+    expect(paced).toEqual(['https://acme.wd1.myworkdayjobs.com/robots.txt', 'https://acme.wd1.myworkdayjobs.com/p1', 'https://acme.wd1.myworkdayjobs.com/p2']);
+    // Two full-gap waits: the fake clock never advanced on its own.
+    expect(t.sleeps).toEqual([1_000, 1_000]);
   });
 });

@@ -1,7 +1,7 @@
 // Tests for the scout's job persistence: the "cannot affect row a second time" fix.
 import { describe, expect, it } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { dedupeByFingerprint, persistJobBatch, watchlistPollUpdate, type PreparedJob } from '../src/scout/persist-jobs.ts';
+import { backfillWorkdayDescriptions, dedupeByFingerprint, dueForPoll, persistJobBatch, watchlistPollUpdate, WORKDAY_BACKFILL_STATUSES, type PreparedJob } from '../src/scout/persist-jobs.ts';
 
 // Builds a posting; only the fields the module reads are real.
 function job(fingerprint: string, atsJobId: string, postedAt = '2026-10-01T00:00:00Z'): PreparedJob {
@@ -171,5 +171,193 @@ describe('persistJobBatch: Workday detail read', () => {
     // The row is inserted with no text. The upsert planner's blanking guard omits a null
     // description_raw key (upsert-plan.ts), so "absent" and "null" are both "no text" here.
     expect(upserts[0]!.rows[0]!.description_raw ?? null).toBeNull();
+  });
+});
+
+// D3 (2026-11-18): the fill above reads NEW rows only, so a Workday row stored blank stays blank
+// forever (8,539 of 9,090 Workday applications had no text on 11-18). Each run now also fills up
+// to 20 stored rows, oldest first, but only rows still moving through the pipeline: the 8,495
+// blank rows at dropped_filter would spend the reads and change nothing.
+describe('backfillWorkdayDescriptions', () => {
+  // One recorded builder call: the method name and its arguments.
+  type Call = [string, unknown[]];
+  // A chainable supabase-js double. Every builder method records itself and returns the builder;
+  // awaiting the builder resolves like supabase-js does: { data, error }, never a throw.
+  function fakeJobsDb(stored: Record<string, unknown>[], selectError: { message: string } | null = null) {
+    // Calls on the SELECT chain.
+    const selectCalls: Call[] = [];
+    // One entry per UPDATE chain: its payload and its filters.
+    const updates: { payload: Record<string, unknown>; calls: Call[] }[] = [];
+    // A builder that records into `calls` and resolves to `result`.
+    function builder(calls: Call[], result: () => unknown) {
+      // The chain object; a Proxy so any filter method the code uses is recorded.
+      const chain: unknown = new Proxy({}, {
+        get(_t, prop) {
+          // Awaiting the chain resolves to the scripted result, as supabase-js does.
+          if (prop === 'then') return (resolve: (v: unknown) => unknown) => resolve(result());
+          // Any other method: record it and keep chaining.
+          return (...args: unknown[]) => { calls.push([String(prop), args]); return chain; };
+        },
+      });
+      // The chain, to be filtered and awaited.
+      return chain;
+    }
+    // The client: only from('jobs') is used.
+    const db = {
+      from: (table: string) => ({
+        // The read: answers with the stored rows, or the scripted error.
+        select: (...args: unknown[]) => {
+          // Recorded with the table, so the test can see what was read and from where.
+          selectCalls.push(['from', [table]], ['select', args]);
+          // Rows or error, never both.
+          return builder(selectCalls, () => (selectError ? { data: null, error: selectError } : { data: stored, error: null }));
+        },
+        // The write: records the payload and its filters, answers { error: null }.
+        update: (payload: Record<string, unknown>) => {
+          // A fresh record per UPDATE statement.
+          const entry = { payload, calls: [['from', [table]]] as Call[] };
+          // Kept for the assertions.
+          updates.push(entry);
+          // No error.
+          return builder(entry.calls, () => ({ error: null }));
+        },
+      }),
+    } as unknown as SupabaseClient;
+    // Everything a test asserts on.
+    return { db, selectCalls, updates };
+  }
+
+  // A stored blank Workday job, as the SELECT returns it.
+  function storedRow(id: string, slug: string): Record<string, unknown> {
+    // The columns the backfill selects.
+    return {
+      id, ats_provider: 'workday', title: 'Software Engineer', description_raw: null, location_raw: 'Pune, India',
+      apply_url: `https://fractal.wd1.myworkdayjobs.com/Careers/job/Pune/SDE_${slug}`,
+    };
+  }
+
+  // A run whose GET answers with `description` (null = a response without text).
+  async function runAnswering(description: string | null) {
+    // The run factory the worker uses.
+    const { newWorkdayDetailRun } = await import('../../supabase/functions/_shared/scout/workday-detail.ts');
+    // URLs read, in order.
+    const reads: string[] = [];
+    // A run with no real sleep and plenty of time.
+    const run = newWorkdayDetailRun({
+      // The detail endpoint's envelope, with or without text.
+      get: async (url: string) => {
+        // Recorded for the "what was read" assertions.
+        reads.push(url);
+        // jobDescription is the one field the parser reads.
+        return new Response(JSON.stringify({ jobPostingInfo: { jobDescription: description } }));
+      },
+      // Stored rows already passed the title gate when they were screened.
+      worthReading: () => true,
+      // Never runs out.
+      deadline: { remainingMs: () => 60_000 } as never,
+      // No real sleep.
+      pause: async () => {},
+    }, 40);
+    // Both.
+    return { run, reads };
+  }
+
+  it('selects only live-pipeline Workday jobs with no text and no tombstone, oldest first, 20 at most', async () => {
+    // Nothing stored: only the query shape matters here.
+    const { db, selectCalls } = fakeJobsDb([]);
+    // A run that would answer.
+    const { run } = await runAnswering('<p>x</p>');
+    // Run the backfill with its default limit.
+    await backfillWorkdayDescriptions(db, run);
+    // Every filter that keeps the reads on rows that can still use a description.
+    expect(selectCalls).toContainEqual(['from', ['jobs']]);
+    expect(selectCalls).toContainEqual(['eq', ['ats_provider', 'workday']]);
+    expect(selectCalls).toContainEqual(['is', ['description_raw', null]]);
+    expect(selectCalls).toContainEqual(['is', ['tombstoned_at', null]]);
+    expect(selectCalls).toContainEqual(['in', ['applications.status', [...WORKDAY_BACKFILL_STATUSES]]]);
+    expect(selectCalls).toContainEqual(['order', ['first_seen_at', { ascending: true }]]);
+    expect(selectCalls).toContainEqual(['limit', [20]]);
+    // dropped_filter is never a backfill target.
+    expect(WORKDAY_BACKFILL_STATUSES).not.toContain('dropped_filter');
+  });
+
+  it('reads each stored blank row and writes its text, guarded so stored text is never overwritten', async () => {
+    // Two stored blank rows.
+    const { db, updates } = fakeJobsDb([storedRow('j1', 'R-1'), storedRow('j2', 'R-2')]);
+    // Every read returns text.
+    const { run, reads } = await runAnswering('<p>Build services in Go.</p>');
+    // The backfill.
+    const result = await backfillWorkdayDescriptions(db, run);
+    // Both rows read through the detail URL.
+    expect(reads).toHaveLength(2);
+    // Two UPDATEs, one per row.
+    expect(updates).toHaveLength(2);
+    // Each carries the text...
+    expect(updates[0]!.payload.description_raw).toBe('Build services in Go.');
+    // ...targets its own row...
+    expect(updates[0]!.calls).toContainEqual(['eq', ['id', 'j1']]);
+    // ...and only while the row is still blank (a concurrent writer's text wins).
+    expect(updates[0]!.calls).toContainEqual(['is', ['description_raw', null]]);
+    // Counted.
+    expect(result).toEqual({ selected: 2, written: 2, errors: [] });
+    // And the run counters show it in the scout's "workday detail" log line.
+    expect(run.filled).toBe(2);
+  });
+
+  it('a read with no text writes nothing', async () => {
+    // One stored blank row.
+    const { db, updates } = fakeJobsDb([storedRow('j1', 'R-1')]);
+    // The detail answers without a description.
+    const { run } = await runAnswering(null);
+    // The backfill.
+    const result = await backfillWorkdayDescriptions(db, run);
+    // No UPDATE: a null description is never written over the null that is there.
+    expect(updates).toHaveLength(0);
+    // Selected but not written.
+    expect(result).toEqual({ selected: 1, written: 0, errors: [] });
+  });
+
+  it('a SELECT error is returned, and nothing is read', async () => {
+    // supabase-js reports failure as { error }, never a throw (CLAUDE.md §5).
+    const { db, updates } = fakeJobsDb([], { message: 'boom' });
+    // A run that would answer.
+    const { run, reads } = await runAnswering('<p>x</p>');
+    // The backfill.
+    const result = await backfillWorkdayDescriptions(db, run);
+    // The error surfaces for the run log.
+    expect(result.errors).toEqual(['select workday backfill rows: boom']);
+    // No read, no write.
+    expect(reads).toHaveLength(0);
+    expect(updates).toHaveLength(0);
+  });
+});
+
+// D10 (2026-11-18): a board failing >= 5 polls in a row is polled once a day, not every run.
+// last_polled_at is stamped on every attempt (failureMark), so "polled in the last 24 h" needs
+// no new column. A robots-unavailable skip writes nothing, so it never resets this clock.
+describe('dueForPoll', () => {
+  // A fixed "now".
+  const NOW = new Date('2026-11-18T12:00:00Z');
+
+  it('a healthy or briefly failing board is always due', () => {
+    // 4 failures, polled a minute ago: still due.
+    expect(dueForPoll({ consecutive_failures: 4, last_polled_at: '2026-11-18T11:59:00Z' }, NOW)).toBe(true);
+  });
+
+  it('a board at 5+ failures polled under 24 h ago rests', () => {
+    // 23 h ago.
+    expect(dueForPoll({ consecutive_failures: 5, last_polled_at: '2026-11-17T13:00:00Z' }, NOW)).toBe(false);
+  });
+
+  it('a board at 5+ failures polled 24 h or more ago is due again', () => {
+    // Exactly 24 h ago.
+    expect(dueForPoll({ consecutive_failures: 27, last_polled_at: '2026-11-17T12:00:00Z' }, NOW)).toBe(true);
+  });
+
+  it('a failing board with no readable last poll is due (never rested on missing data)', () => {
+    // No stamp at all.
+    expect(dueForPoll({ consecutive_failures: 9, last_polled_at: null }, NOW)).toBe(true);
+    // A stamp that does not parse.
+    expect(dueForPoll({ consecutive_failures: 9, last_polled_at: 'not a date' }, NOW)).toBe(true);
   });
 });

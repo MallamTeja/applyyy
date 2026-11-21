@@ -197,3 +197,102 @@ export function watchlistPollUpdate(
     consecutive_failures: 0,
   };
 }
+
+// D10 (2026-11-18): a board this far into a failure streak is polled once a day, not every run.
+// On 11-18, 62 of 64 Workday boards sat at >= 5, and every run spent its 12-min budget on them.
+export const FAILING_BOARD_STREAK = 5;
+// How long a failing board rests between polls.
+export const FAILING_BOARD_REST_MS = 24 * 60 * 60 * 1000;
+
+// Whether a board should be polled this run. Pure, so the rule is testable without the CLI.
+// Uses last_polled_at, which failureMark stamps on every failed attempt, so no new column is
+// needed. A robots-unavailable skip writes nothing, so it never moves this clock.
+export function dueForPoll(
+  // The two watchlist columns the rule reads.
+  board: { consecutive_failures: number | null; last_polled_at: string | null },
+  // The run's clock.
+  now: Date,
+): boolean {
+  // Under the streak: polled every run, as before.
+  if ((board.consecutive_failures ?? 0) < FAILING_BOARD_STREAK) return true;
+  // Never polled: due. Missing data never RESTS a board (CLAUDE.md §6: a missing value
+  // must not become the answer that hides the board).
+  if (board.last_polled_at === null) return true;
+  // Milliseconds since the epoch, or NaN for an unreadable stamp.
+  const last = Date.parse(board.last_polled_at);
+  // Unreadable: due, for the same reason. A lenient mis-parse lands far in the past, also due.
+  if (!Number.isFinite(last)) return true;
+  // Due once a full rest has passed; inside the rest window the board sits this run out.
+  return now.getTime() - last >= FAILING_BOARD_REST_MS;
+}
+
+// D3 (2026-11-18): stored Workday rows read per run, besides new ones. Teja's design: 20 oldest.
+export const WORKDAY_BACKFILL_LIMIT = 20;
+// The application statuses whose job is worth a detail read: rows still before tailoring, where
+// a description can change the matcher's score and the tailor's input. On 11-18, 8,495 of the
+// 8,539 blank Workday rows were dropped_filter; reading those would spend the cap for nothing.
+export const WORKDAY_BACKFILL_STATUSES = ['passed_filters', 'scored'] as const;
+
+// What one backfill pass did, for the scout log.
+export interface WorkdayBackfillResult {
+  // Rows the SELECT returned.
+  selected: number;
+  // Rows whose description was written.
+  written: number;
+  // Failed statements, as messages; supabase-js reports these as { error }, never a throw.
+  errors: string[];
+}
+
+// Fill descriptions on up to `limit` stored blank Workday jobs, oldest first, through the same
+// run (cap, deadline, pacing, robots gate) the new-row fill uses. Called BEFORE the board loop:
+// every run ends on the 12-min budget, so a pass after the loop would never get time.
+export async function backfillWorkdayDescriptions(
+  // The scout's service client.
+  db: SupabaseClient,
+  // The run's detail-read allowance; this pass spends from the same cap as new rows.
+  run: WorkdayDetailRun,
+  // How many stored rows to try.
+  limit: number = WORKDAY_BACKFILL_LIMIT,
+): Promise<WorkdayBackfillResult> {
+  // Blank, live-pipeline, untombstoned Workday jobs, oldest first. !inner keeps only jobs with a
+  // matching application; a tombstoned job must keep a NULL description (jobs_tombstone check).
+  const { data, error } = await db
+    .from('jobs')
+    .select('id, ats_provider, title, apply_url, location_raw, description_raw, applications!inner(status)')
+    .eq('ats_provider', 'workday')
+    .is('description_raw', null)
+    .is('tombstoned_at', null)
+    .in('applications.status', [...WORKDAY_BACKFILL_STATUSES])
+    .order('first_seen_at', { ascending: true })
+    .limit(limit);
+  // A failed SELECT reads nothing and says so.
+  if (error) return { selected: 0, written: 0, errors: [`select workday backfill rows: ${error.message}`] };
+  // The rows as the fill reads them (it touches ats_provider, description_raw, title, apply_url,
+  // location_raw); the id rides along for the UPDATE. Copies, so the fill's in-place writes are ours.
+  const rows = (data ?? []).map((row) => ({ ...(row as Record<string, unknown>) })) as unknown as (JobInsert & { id: string })[];
+  // The shared fill: robots-gated, paced, capped, deadline-aware. Mutates rows in place.
+  await fillWorkdayDescriptions(rows, run);
+  // Statements that failed.
+  const errors: string[] = [];
+  // Rows written.
+  let written = 0;
+  // One UPDATE per filled row.
+  for (const row of rows) {
+    // A read with no text leaves the null; nothing to write.
+    if (typeof row.description_raw !== 'string') continue;
+    // Guarded on description_raw still NULL, so text written meanwhile (a pasted link, scout-ats)
+    // is never overwritten. location_raw is the fill's own "N Locations" replacement, or unchanged.
+    const { error: updateError } = await db
+      .from('jobs')
+      .update({ description_raw: row.description_raw, location_raw: row.location_raw })
+      .eq('id', row.id)
+      // The guard: matches nothing once another writer has filled the text.
+      .is('description_raw', null);
+    // Recorded, and the next row still tried.
+    if (updateError) errors.push(`backfill description for job ${row.id}: ${updateError.message}`);
+    // Counted only when the statement succeeded.
+    else written += 1;
+  }
+  // Everything the scout log needs.
+  return { selected: rows.length, written, errors };
+}

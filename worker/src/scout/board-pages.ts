@@ -37,6 +37,127 @@ const SCOUT_ROBOTS_TOKEN = tokenFromUserAgentHeader(REQUEST_HEADERS['User-Agent'
 // the per-run cache: each origin's robots.txt is fetched once, not once per board/page.
 const RUN_ROBOTS_CACHE: RobotsCache = new Map();
 
+// ROBOTS "UNKNOWN, RETRY LATER" (2026-11-18, D1; Teja's design 22:27 IST). On 11-18 07:35Z,
+// 43 Workday boards were refused because robots.txt answered 429 (Cloudflare, no Retry-After).
+// Each refusal went through failureMark, so 62 of 64 Workday boards reached consecutive_failures
+// >= 5 while their policy was never actually read. A 429 or 5xx on robots.txt means the policy is
+// UNKNOWN. The board is still never fetched (robots is honoured), but scout.ts skips it this run
+// without counting a failure. It EXTENDS RobotsDisallowedError on purpose: a caller that only
+// knows the parent type (workday-detail's fill, any future reader) still treats it as a refusal,
+// so the new type can make a caller more lenient only where it opts in (CLAUDE.md §6).
+export class RobotsUnavailableError extends RobotsDisallowedError {
+  // The robots.txt HTTP status that made the answer unknown (429 or 5xx), or null for a
+  // 'wait' verdict (a short readable Retry-After), whose status is 429 by construction.
+  readonly status: number | null;
+
+  constructor(url: string, verdict: 'refuse' | 'wait', reason: string, source: string | null, status: number | null) {
+    // The parent writes the "robots.txt gate refused <url>: <reason>" message the log greps for.
+    super(url, verdict, reason, source);
+    // Its own name, so a log line or a stack says which kind of refusal this was.
+    this.name = 'RobotsUnavailableError';
+    // Kept for the scout's skip line.
+    this.status = status;
+  }
+}
+
+// The robots.txt statuses that mean "the host did not answer the question" rather than "no".
+// 429 = rate limited; 5xx = the server failed. A 401/403/404 is an answer and is NOT here.
+function isUnknownRobotsStatus(status: number): boolean {
+  // Rate limited, or any server error.
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
+// The last robots.txt HTTP status seen per origin, per verdict cache. master-robots folds a
+// 429 and a timeout into the same 'indeterminate' source and keeps only a human reason string,
+// so the status is recorded here, from the real response, instead of parsed back out of that
+// text (CLAUDE.md §6: check the shape, never ask a message what happened). Keyed by the cache
+// object so it lives exactly as long as the cache it describes: a cache hit (no new fetch)
+// still finds the status of the fetch that filled the cache. WeakMap: a test's throwaway cache
+// takes its statuses with it.
+const ROBOTS_STATUS_BY_CACHE = new WeakMap<RobotsCache, Map<string, number>>();
+
+// The status map for one verdict cache, created on first use.
+function robotsStatusesFor(cache: RobotsCache): Map<string, number> {
+  // The existing map, when this cache has been used before.
+  const existing = ROBOTS_STATUS_BY_CACHE.get(cache);
+  // Reused, so every board in a run shares one record.
+  if (existing !== undefined) return existing;
+  // A fresh map for a fresh cache.
+  const created = new Map<string, number>();
+  // Remembered against the cache.
+  ROBOTS_STATUS_BY_CACHE.set(cache, created);
+  // Handed back.
+  return created;
+}
+
+// WORKDAY PACING (2026-11-18, D1 design point 3). Every *.myworkdayjobs.com tenant answers
+// through one Cloudflare zone (Server: cloudflare, probed 11-18), and the 429s hit one tenant
+// after another, so the gap is kept across the whole zone, not per tenant host. The scout polls
+// boards one at a time, so "serial" already holds; this adds the gap between requests.
+// ponytail: 1 s is the low end of the approved 1–2 s. ~426 Workday pages + 64 robots GETs is
+// ~8 min of gap per run against a 12-min budget; raise it only if 429s continue at 1 s.
+export const WORKDAY_REQUEST_GAP_MS = 1_000;
+
+// Which pacing lane a URL belongs to: the Workday zone, or null for "never delayed".
+function paceLane(url: string): string | null {
+  // The hostname alone; an unparseable URL is not paced (the fetch itself will fail on it).
+  let host: string;
+  // URL throws on garbage.
+  try {
+    // Lower-cased by the URL parser.
+    host = new URL(url).hostname;
+  } catch {
+    // No lane for a URL that cannot be requested anyway.
+    return null;
+  }
+  // Every Workday tenant shares the one lane.
+  return host === 'myworkdayjobs.com' || host.endsWith('.myworkdayjobs.com') ? 'myworkdayjobs.com' : null;
+}
+
+// The pacer seam: awaited before every request a scout makes to a board's origin.
+export interface RequestPacer {
+  // Resolves when the URL may be requested.
+  before(url: string): Promise<void>;
+}
+
+// A pacer that keeps `gapMs` between the starts of two requests in the same lane. `now` and
+// `sleep` are injected so tests run on a fake clock. Assumes one caller at a time (the scout is
+// serial); concurrent callers could both pass the check together.
+export function createRequestPacer(
+  // Minimum gap between two requests in one lane.
+  gapMs: number,
+  // The clock.
+  now: () => number = Date.now,
+  // The wait.
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+): RequestPacer {
+  // When each lane last sent a request.
+  const lastStartByLane = new Map<string, number>();
+  // The pacer itself.
+  return {
+    async before(url: string): Promise<void> {
+      // Unpaced hosts go straight through.
+      const lane = paceLane(url);
+      // Greenhouse, Lever, Ashby: no delay.
+      if (lane === null) return;
+      // The previous request in this lane, if any.
+      const last = lastStartByLane.get(lane);
+      // Wait out whatever is left of the gap.
+      if (last !== undefined) {
+        // Remaining milliseconds; zero or less means the gap has already passed.
+        const waitMs = last + gapMs - now();
+        // Only a positive wait sleeps.
+        if (waitMs > 0) await sleep(waitMs);
+      }
+      // This request's start, read after the wait.
+      lastStartByLane.set(lane, now());
+    },
+  };
+}
+
+// The run's pacer, module-global like RUN_ROBOTS_CACHE: one scout process = one run.
+const RUN_PACER: RequestPacer = createRequestPacer(WORKDAY_REQUEST_GAP_MS);
+
 // Read every page of one board. `fetchImpl` and `robotsCache` are injected only so tests
 // can serve pages and robots.txt without a network and without sharing verdicts;
 // production passes neither and gets the global fetch and the run's cache.
@@ -49,11 +170,15 @@ export function readBoardPages(
   fetchImpl: typeof fetch = fetch,
   // The robots verdict cache, defaulting to the one this run shares.
   robotsCache: RobotsCache = RUN_ROBOTS_CACHE,
+  // The request pacer, defaulting to the run's (Workday zone gap; other hosts undelayed).
+  pacer: RequestPacer = RUN_PACER,
 ): Promise<BoardPagesResult> {
   // The shared loop owns pagination, the cursor-stall check and the page cap.
   return collectBoardPages(adapter, boardToken, async (pageUrl, body) => {
     // The shared robots gate (gateRobots below): a throw unless robots.txt allows this page.
-    await gateRobots(pageUrl, fetchImpl, robotsCache);
+    await gateRobots(pageUrl, fetchImpl, robotsCache, pacer);
+    // The page itself waits its turn in the pacing lane too (Broadridge's PAGE got a 429 on 11-18).
+    await pacer.before(pageUrl);
     // One request per page, same headers as page one. A body (Workday, 2026-11-01)
     // makes it a JSON POST, because Workday's list endpoint answers GET with 400; no
     // body keeps the exact GET every other board has always had. scout-ats's
@@ -83,6 +208,8 @@ async function gateRobots(
   fetchImpl: typeof fetch,
   // The verdict cache.
   robotsCache: RobotsCache,
+  // The pacer the robots.txt GET waits on, like any other request to the origin.
+  pacer: RequestPacer,
 ): Promise<void> {
   // THE ROBOTS GATE, before every board-page request and every detail read (Teja, 2026-11-01: "Honor robots").
   // Per page, not per board, because robots rules match path AND query, and a later
@@ -96,10 +223,44 @@ async function gateRobots(
   // 'scouting' is the board-read policy scout-ats also passes: a 401 robots.txt counts as
   // no rules (Ashby), while 403 and a published Disallow (SmartRecruiters) still refuse.
   // The robots.txt GET goes through the same fetch seam, so tests script it.
-  const verdict = await checkRobots(url, SCOUT_ROBOTS_TOKEN, { cache: robotsCache, fetcher: fetchImpl, policy: 'scouting' });
-  // Anything but an explicit allow refuses, 'wait' included, exactly as transport.ts
-  // does. A THROW, so scout.ts's catch records the board with failureMark like any
-  // failed poll: a refused board must never read as "0 jobs found" (CLAUDE.md §6).
+  // The per-origin status record for this cache (see ROBOTS_STATUS_BY_CACHE).
+  const statuses = robotsStatusesFor(robotsCache);
+  // The origin robots.txt lives at; the key master-robots' cache uses too.
+  const origin = new URL(url).origin;
+  // The robots.txt GET, paced, with its HTTP status recorded. Only robots.txt ever goes
+  // through this fetcher (master-robots calls it for nothing else).
+  const fetcher = async (robotsUrl: string, init: { signal: AbortSignal; headers: Record<string, string> }) => {
+    // Forget the previous status first, so a fetch that THROWS leaves no stale 429 behind.
+    statuses.delete(origin);
+    // Wait for the lane like every other request to this origin.
+    await pacer.before(robotsUrl);
+    // The real request through the injected seam.
+    const response = await fetchImpl(robotsUrl, init);
+    // Recorded from the response itself, not from master-robots' reason text.
+    statuses.set(origin, response.status);
+    // Unchanged, for master-robots to classify.
+    return response;
+  };
+  // The verdict; served from the cache when this origin was read earlier this run.
+  const verdict = await checkRobots(url, SCOUT_ROBOTS_TOKEN, { cache: robotsCache, fetcher, policy: 'scouting' });
+  // A 'wait' is a 429 with a short, readable Retry-After: unknown for now, retry later. Honoured
+  // by not contacting the origin again while the cache holds it (master-robots' failure TTL).
+  if (verdict.kind === 'wait') {
+    // The skip type: refused, not counted.
+    throw new RobotsUnavailableError(url, 'wait', verdict.reason, null, null);
+  }
+  // The status behind an 'indeterminate' refusal, when the robots.txt GET returned one.
+  const robotsStatus = statuses.get(origin);
+  // A 429 (no or over-long Retry-After) or a 5xx: the policy is unknown, so skip, don't count.
+  // A thrown fetch (timeout, DNS) has no status and stays a counted failure below.
+  if (verdict.kind === 'refuse' && verdict.source === 'indeterminate' && robotsStatus !== undefined && isUnknownRobotsStatus(robotsStatus)) {
+    // Refused all the same: robots is never treated as "allowed" on an unknown answer.
+    // The skip type carries the status, so the scout's skip line names 429 vs 5xx.
+    throw new RobotsUnavailableError(url, 'refuse', verdict.reason, verdict.source, robotsStatus);
+  }
+  // Anything else but an explicit allow refuses, exactly as transport.ts does. A THROW, so
+  // scout.ts's catch records the board with failureMark like any failed poll: a refused
+  // board must never read as "0 jobs found" (CLAUDE.md §6).
   if (verdict.kind !== 'allow') {
     throw new RobotsDisallowedError(url, verdict.kind, verdict.reason, verdict.kind === 'refuse' ? verdict.source : null);
   }
@@ -116,9 +277,13 @@ export async function robotsGatedGet(
   fetchImpl: typeof fetch = fetch,
   // The robots verdict cache, defaulting to the one this run shares.
   robotsCache: RobotsCache = RUN_ROBOTS_CACHE,
+  // The request pacer, defaulting to the run's.
+  pacer: RequestPacer = RUN_PACER,
 ): Promise<Response> {
   // Refused before the target origin is contacted.
-  await gateRobots(url, fetchImpl, robotsCache);
+  await gateRobots(url, fetchImpl, robotsCache, pacer);
+  // The detail read waits its turn in the Workday lane too.
+  await pacer.before(url);
   // The plain GET every board page without a body gets.
   // 15 s, the transport's per-attempt timeout scout-ats gets from httpFetch: without it a hung
   // socket could run past the scout's deadline, which WORKDAY_DETAIL_MIN_REMAINING_MS assumes cannot happen.
