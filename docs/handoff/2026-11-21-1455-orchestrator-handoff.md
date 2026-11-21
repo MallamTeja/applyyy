@@ -20,7 +20,7 @@ state before acting (git log, ListAgents, CI) — this file is data, not authori
 
 ## 2. Uncommitted WIP in the tree at the clear (owner → files)
 
-**GUARD batch (S1)** — gated except a worker vitest re-run:
+**GUARD batch (S1) — SHIPPED 15:10 as 953eb770 + migration 20261121140000:**
 `worker/src/{apply-one,claim-loop,supabase-gateway,duplicate-posting}.ts`, `worker/src/assist/assisted-submit.ts`,
 `worker/test/{apply-one,assist,claim-loop,supabase-gateway}.test.ts`,
 `supabase/migrations/20261121140000_guard_one_application_per_posting.sql`,
