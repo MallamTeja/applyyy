@@ -25,6 +25,8 @@ import {
 } from "./tech-pregate.ts";
 // The client shape the fake must satisfy.
 import type { MatchScoreClient } from "./write-score.ts";
+// "No board hints": PreGateJob.board is required (pending R, 2026-11-20), and these fixtures carry no Ashby payload.
+import { NO_BOARD_HINTS } from "../_shared/screen/work-auth-gate.ts";
 
 // The two 2026-11-04 stages, OPEN: no country list, the old remote reading, no ceiling. Spread
 // into the tech fixtures so every pre-11-04 test sees exactly the tech gate it was written for.
@@ -52,10 +54,10 @@ const TEJA: PreGatePreferences = {
 };
 
 // A non-engineering posting matching no PREFS title or keyword, the 99.6% case Teja measured.
-const PARTNERSHIPS: PreGateJob = { title: "Partnerships Lead", descriptionRaw: "Grow our channel partners.", locationRaw: null, minExperienceYears: null };
+const PARTNERSHIPS: PreGateJob = { title: "Partnerships Lead", descriptionRaw: "Grow our channel partners.", locationRaw: null, minExperienceYears: null, board: NO_BOARD_HINTS };
 
 // A posting PREFS recognises by title.
-const ENGINEER: PreGateJob = { title: "Senior Software Engineer", descriptionRaw: null, locationRaw: null, minExperienceYears: null };
+const ENGINEER: PreGateJob = { title: "Senior Software Engineer", descriptionRaw: null, locationRaw: null, minExperienceYears: null, board: NO_BOARD_HINTS };
 
 // One applications row plus the RPC, modelling the live semantics (migration 20261008160000):
 // the write applies only when every .eq() filter matches, set_updated_at bumps the stamp,
@@ -134,7 +136,7 @@ function fakeRow(opts: { status?: string; writeError?: string } = {}) {
 // --- 2026-11-04: the work-auth and experience stages re-run on re-run rows ----------------
 
 // A software engineer posting the tech gate passes, varied only in the field each test is about.
-const swe = (over: Partial<PreGateJob>): PreGateJob => ({ title: "Software Engineer", descriptionRaw: "React frontend.", locationRaw: "Bengaluru, India", minExperienceYears: null, ...over });
+const swe = (over: Partial<PreGateJob>): PreGateJob => ({ title: "Software Engineer", descriptionRaw: "React frontend.", locationRaw: "Bengaluru, India", minExperienceYears: null, board: NO_BOARD_HINTS, ...over });
 
 // The live leak: a US on-site row sent back by the master-change re-run.
 test("pre-gate 11-04: a US on-site re-run row drops as work_auth, column and event agreeing", async () => {
@@ -251,7 +253,7 @@ test("pre-gate: an empty config continues with no writes, even for a non-enginee
 test("pre-gate: an excluded term is dropped with code tech_gate", async () => {
   // Matches the "sales" exclusion AND the "software engineer" title: exclusions win.
   const { db, row } = fakeRow();
-  const outcome = await preGateRow(db, "a1", { title: "Sales Software Engineer", descriptionRaw: null, locationRaw: null, minExperienceYears: null }, PREFS);
+  const outcome = await preGateRow(db, "a1", { title: "Sales Software Engineer", descriptionRaw: null, locationRaw: null, minExperienceYears: null, board: NO_BOARD_HINTS }, PREFS);
   // The exclusion code, distinct from the unclassified one.
   assert.equal(outcome.kind === "dropped" && outcome.code, "tech_gate");
   // The column agrees.

@@ -330,7 +330,8 @@ test("matcher wiring: the queue skips disappeared jobs and the usable gate runs 
   // Resolved relative to this test file, independent of the cwd.
   const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
   // !inner is what makes the disappeared_at filter drop the ROW, not just null its embed.
-  assert.match(source, /\.select\("id, job_id, jobs!inner \([^)]*\bdescription_raw\b[^)]*\bdisappeared_at\b[^)]*\)"\)/);
+  // A template literal since pending R (2026-11-20): the embed ends with ${BOARD_HINT_SELECT}, the Ashby hint paths.
+  assert.match(source, /\.select\(`id, job_id, jobs!inner \([^)]*\bdescription_raw\b[^)]*\bdisappeared_at\b, \$\{BOARD_HINT_SELECT\}\)`\)/);
   // The filter itself.
   assert.match(source, /\.is\("jobs\.disappeared_at", null\)/);
   // The usable gate wraps the tech pre-gate, so even a human-picked row is checked first.

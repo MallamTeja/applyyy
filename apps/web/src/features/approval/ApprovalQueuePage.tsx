@@ -1758,6 +1758,9 @@ export function ApprovalQueuePage(): ReactElement {
     client: NonNullable<typeof supabase>,
     // Who decided it (a hand click or the AI chat), for the history note (2026-11-04).
     editSource: EditSource,
+    /* The bullet swap (2026-11-20): printed bullets this same save takes off, so the pair is judged on its end
+       state (attestBullet.alsoRemove). Required, so no caller drops a swap's removal by omission; [] = plain attest. */
+    alsoRemove: readonly string[],
     // The same result shape as any edit, so DiffView locks and reports it the same way.
   ): Promise<EditResult> {
     // Emptied first, so the same sentence twice is still re-announced.
@@ -1793,6 +1796,8 @@ export function ApprovalQueuePage(): ReactElement {
         jdKeywords: source.application.selected_jd_keywords,
         // Into the history note's detail.source.
         source: editSource,
+        // The swap's removals, folded into this one save (empty for a plain new line).
+        alsoRemove,
       });
     // Runs on success, refusal and throw alike.
     } finally {
@@ -1940,7 +1945,18 @@ export function ApprovalQueuePage(): ReactElement {
     // Vouching for a missing skill also writes the master, so it has its own path (attestRow above).
     if (only?.kind === 'attest_skill') return attestRow(applicationId, only, source, source.original, current, stamp, supabase, editSource);
     // A brand-new bullet writes the master too, so it has the same kind of path (attestBulletRow above).
-    if (only?.kind === 'attest_bullet') return attestBulletRow(applicationId, only, source, source.original, current, stamp, supabase, editSource);
+    if (only?.kind === 'attest_bullet') return attestBulletRow(applicationId, only, source, source.original, current, stamp, supabase, editSource, []);
+    /* THE BULLET SWAP (2026-11-20, tailor pending #3): one new line plus the bullet removes it replaces, sent
+       together by the chat (aiEdit.swapPartners). The removes are folded into the attest's own save, so the
+       floor ("exp_aczen: 3 bullets, needs 4") and the page fit are judged on the END state, never on one half.
+       Only bullet removes may ride along: anything else in a batch with a master write is still refused below. */
+    const attests = actions.filter((action) => action.kind === 'attest_bullet');
+    // The bullet refs those removes name.
+    const swapRemoves = actions.flatMap((action) => (action.kind === 'remove' && action.target.kind === 'bullet' ? [action.target.ref] : []));
+    // Exactly one new line, and every other action a bullet remove: a swap.
+    const swapAttest = attests.length === 1 && swapRemoves.length === actions.length - 1 ? attests[0] : undefined;
+    // Routed as one attest save with the removals in it.
+    if (swapAttest?.kind === 'attest_bullet') return attestBulletRow(applicationId, swapAttest, source, source.original, current, stamp, supabase, editSource, swapRemoves);
     // T10: the batch's resume-only actions; an attest inside a batch cannot be folded (it writes the master).
     const pure = actions.flatMap((action) => (action.kind === 'attest_skill' || action.kind === 'attest_bullet' ? [] : [action]));
     // Refused whole rather than saving the rest: a partial batch is what T10 exists to prevent.

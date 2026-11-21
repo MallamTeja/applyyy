@@ -42,7 +42,14 @@ import { corsHeaders, withErrorBoundary } from "../_shared/cors.ts";
 import { parseApplicationIdParam } from "../_shared/http/application-id.ts";
 
 // The matcher's pre-gate, re-run as the last check before a human sees the row (leak 1, 2026-11-05)
-import { auditorContentRulesDrop, auditorPreGateDrop, type AuditorJobEmbed } from "./pregate.ts";
+// plus the same-ATS-posting re-check and its history-key builder (W2, 2026-11-21)
+import { auditorAlreadyAppliedDrop, auditorAppliedKeys, auditorContentRulesDrop, auditorPreGateDrop, type AuditorJobEmbed } from "./pregate.ts";
+
+// The three Ashby JSON paths the work-auth gate reads, selected beside each job (pending R, 2026-11-21)
+import { BOARD_HINT_SELECT } from "../_shared/screen/work-auth-gate.ts";
+
+// The screener's own history read, so the auditor's "already applied" set is the screener's set (W2)
+import { supabaseScreenQueries } from "../_shared/screen/supabase-queries.ts";
 
 // The approval-queue re-gate (2026-11-11): today's work-auth gate over rows already waiting for Teja
 import { regateQueue, type QueueRow } from "./regate-queue.ts";
@@ -214,7 +221,8 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
       // The queue lives on applications, read under the app user's RLS.
       .from("applications")
       // updated_at is the stamp the drop write is guarded by; the embed carries the gate's inputs.
-      .select("id, status, updated_at, jobs(title, description_raw, location_raw, min_experience_years, discovered_via)")
+      // ats_job_id and BOARD_HINT_SELECT (pending R, 2026-11-21): without the hint paths the Ashby locks read as empty here.
+      .select(`id, status, updated_at, jobs(title, description_raw, location_raw, min_experience_years, discovered_via, ats_job_id, ${BOARD_HINT_SELECT})`)
       // Approved rows are read only to be reported; regate-queue.ts never moves them.
       .in("status", ["awaiting_approval", "approved"]);
     // An unread queue is a failed run, never "nothing to drop".
@@ -294,7 +302,8 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
     // The job's four gate inputs plus discovered_via, for the pre-gate re-check below. A plain
     // (left) embed, not `!inner`: a row whose job is missing must surface as a per-row failure,
     // not vanish from the queue (auditorPreGateDrop throws on a null embed).
-    .select("id, status, tailored_profile, tailor_refs, jobs(title, description_raw, location_raw, min_experience_years, discovered_via)")
+    // ats_job_id + BOARD_HINT_SELECT (which carries ats_provider): the already-applied key (W2) and the Ashby hints (R).
+    .select(`id, status, tailored_profile, tailor_refs, jobs(title, description_raw, location_raw, min_experience_years, discovered_via, ats_job_id, ${BOARD_HINT_SELECT})`)
     // `audit_clean`/`audit_flagged` are only ever left behind by a failed second hop
     .in("status", ["tailored", "audit_clean", "audit_flagged"])
     // Narrow to the one requested row; the status filter stays, so a wrong-status id yields
@@ -339,6 +348,15 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
   const gateConfig = needsGate ? await loadPreGatePreferences(db as unknown as ConfigReader) : null;
   // A failed read is a run failure, never "no config" (which would pass every row).
   if (gateConfig?.kind === "error") return await failRun(503, gateConfig.code, gateConfig.message);
+
+  // W2 (2026-11-21): today's application history, read once and only when a `tailored` row will be checked. The
+  // screener's own query, so the set the auditor checks is exactly the set the screener checks at insert time.
+  // The cast: the port takes any `from`-shaped client; supabase-js's generic builder overflows tsc against it (TS2589).
+  const historyKeys = needsGate ? auditorAppliedKeys(await supabaseScreenQueries(db as unknown as { from(table: string): unknown }, new Date()).applicationHistory()) : null;
+  // A failed read stops the run before any row moves: an empty set would pass every retitled copy.
+  if (historyKeys !== null && !historyKeys.ok) return await failRun(503, "history_unreadable", historyKeys.reason);
+  // The set itself; empty only when no row needs it (needsGate false), in which case the loop never reads it.
+  const appliedKeys: ReadonlySet<string> = historyKeys?.ok ? historyKeys.keys : new Set<string>();
 
   // Initialize total audited counter
   let auditedCount = 0;
@@ -411,6 +429,30 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
         // A refused move leaves the row in place; report it rather than count it
         if (gateMove.error) failures.push({ applicationId: row.id, error: gateMove.error.message });
         // Counted with the other permanent failures; the drain reads `failed` as advanced
+        else failedCount += 1;
+        // Never audited, never shown to Teja
+        continue;
+      }
+
+      // ALREADY APPLIED, RE-CHECKED (W2, 2026-11-21): a retitled copy inserted before its original was applied
+      // (Canonical 111d1ff4 vs 8e9d58ce) passed the screener's insert-time check; this is the last chance to stop it.
+      const appliedDrop = auditorAlreadyAppliedDrop(row.jobs as unknown as AuditorJobEmbed | null, appliedKeys);
+      // A match: off the queue through the same `tailored -> failed` exit as the pre-gate above.
+      if (appliedDrop !== null) {
+        // No migration needed: tailored -> failed is already the auditor's edge.
+        const appliedMove = await db.rpc("advance_application_status", {
+          // Application ID
+          p_application_id: row.id,
+          // Off the queue; a human can still send it back (failed -> passed_filters)
+          p_to_status: "failed",
+          // Acting agent identity
+          p_agent: "auditor",
+          // The screener's code, with this stage named so the event log says where it was caught
+          p_detail: { reason: appliedDrop.code, stage: "auditor_already_applied", detail: appliedDrop.reason },
+        });
+        // A refused move leaves the row in place; report it rather than count it
+        if (appliedMove.error) failures.push({ applicationId: row.id, error: appliedMove.error.message });
+        // Counted with the other permanent failures
         else failedCount += 1;
         // Never audited, never shown to Teja
         continue;

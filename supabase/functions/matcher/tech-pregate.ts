@@ -28,7 +28,7 @@
 // The single shared verdict function, plus its drop codes.
 import { screenTechRole, type TechGateDropCode } from "../_shared/screen/tech-gate.ts";
 // Stage 0b, the screener's work-auth gate, called with the same three inputs.
-import { screenWorkAuth, type WorkAuthDropCode } from "../_shared/screen/work-auth-gate.ts";
+import { screenWorkAuth, type BoardLocationHints, type WorkAuthDropCode } from "../_shared/screen/work-auth-gate.ts";
 // The matcher's twin of the cascade's experience_ceiling rule (same parser, same max_years).
 import { screenRequiredExperience, type ExperienceDropCode } from "../_shared/screen/required-experience.ts";
 // The screener's preference shape, extended below rather than redefined, so the fields match.
@@ -66,6 +66,8 @@ export interface PreGateJob {
   readonly descriptionRaw: string | null;
   // The board's location string, for the work-auth gate. Required: null states "missing".
   readonly locationRaw: string | null;
+  // The board's structured location hints (Ashby, pending R 2026-11-20). Required: NO_BOARD_HINTS states "none".
+  readonly board: BoardLocationHints;
   // jobs.min_experience_years as stored (PostgREST sends numerics as strings); null is the norm.
   readonly minExperienceYears: number | string | null;
 }
@@ -80,7 +82,7 @@ export function firstPreGateDrop(job: PreGateJob, preferences: PreGatePreference
   // Stage 0b: where the work is, under the user's list and remote policy.
   const auth = screenWorkAuth(
     // The same three texts the screener passes.
-    { title: job.title, locationRaw: job.locationRaw, description: job.descriptionRaw },
+    { title: job.title, locationRaw: job.locationRaw, description: job.descriptionRaw, board: job.board },
     // The user's list; null keeps the gate open.
     preferences.workAuthorizedCountries,
     // Teja's 11-04 remote reading, or 'any'.

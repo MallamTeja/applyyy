@@ -446,3 +446,82 @@ describe('attestBullet: one click puts the line in the master, then on the resum
     if (undone.ok) assert.deepEqual(undone.resume.experience, originalV3().experience);
   });
 });
+
+/* THE SWAP RULE (2026-11-20, tailor pending #3; spec docs/tailor/2026-11-18-architecture-changes.md §4).
+   Live BlackRock chat (2026-11-18): Teja asked to swap an irrelevant Aczen bullet for a new CI/CD one. The
+   remove was refused alone ("exp_aczen: 3 bullets, needs 4") and the new line was refused alone ("would run
+   past one page"), so the swap could never land. The floors stay (Teja's rulings); only WHERE they are
+   checked moves: the remove and the new line are judged together, on the end state, in one save. */
+describe('attestBullet: a swap is judged on its end state (BlackRock)', () => {
+  // The Aczen job, holding exactly the 4 bullets its floor (PAGE_FIT_FLOORS.minBulletsByRef) demands.
+  const ACZEN_BULLETS = [
+    // The line Teja called irrelevant for BlackRock.
+    { id: 'b-az1', text: 'Built an internal invoice OCR tool', tags: [] },
+    // Three lines that stay.
+    { id: 'b-az2', text: 'Shipped a ledger reconciliation API in Node.js', tags: [] },
+    { id: 'b-az3', text: 'Wrote integration tests for the GST filing flow', tags: [] },
+    { id: 'b-az4', text: 'Cut report generation time with PostgreSQL indexes', tags: [] },
+  ];
+  // MASTER_V3 with Aczen as its only job, under the ref the floor names.
+  const masterAczen = () => ({ ...clone(MASTER_V3), experience: [{ ...clone(MASTER_V3.experience[0]!), id: 'exp_aczen', company: 'Aczen', bullets: clone(ACZEN_BULLETS) }] });
+  // TAILOR_REFS printing all four Aczen bullets, verbatim.
+  const refsAczen = () => ({ ...clone(TAILOR_REFS), experience: [{ ref: 'exp_aczen', bullets: ACZEN_BULLETS.map((b) => ({ ref: b.id, text: b.text })) }] });
+  // The tailor's resume at v3, as the page holds it.
+  const currentAczen = () => {
+    // The validator's own rebuild.
+    const resume = edits.rebuildOriginal(refsAczen() as never, masterAczen() as never, V3);
+    // A null is a fixture bug.
+    assert.notEqual(resume, null, 'Aczen fixture must rebuild');
+    // Narrowed.
+    return resume!;
+  };
+  // Every override that points the attest at the Aczen fixture.
+  const aczen = () => ({ parentRef: 'exp_aczen', current: currentAczen(), original: currentAczen(), tailorRefs: refsAczen(), text: 'Built a CI/CD pipeline for AuthScore with GitHub Actions' });
+  // The latest master the double serves: the Aczen one.
+  const latestAczen = () => ({ latest: { data: { profile: masterAczen(), version: V3 }, error: null } });
+
+  it('BlackRock swap: remove an Aczen bullet + add a new one lands as ONE save with 4 Aczen bullets', async () => {
+    // The pair: the new line, and the bullet it replaces, in one call.
+    const { done, calls } = run(latestAczen(), { ...aczen(), alsoRemove: ['b-az1'] });
+    // Awaited.
+    const out = await done;
+    // Landed: the end state keeps the floor, so nothing refuses it.
+    assert.equal(out.ok, true, out.ok ? '' : out.message);
+    // Narrowed.
+    if (!out.ok) return;
+    // Exactly one application write carried both halves.
+    assert.equal(callsOf(calls, 'applications', 'update').length, 1);
+    // The Aczen job's printed bullets, by ref.
+    const printed = out.resume.experience[0]!.bullets.map((b) => b.ref);
+    // The irrelevant line is gone and the new one is in: still 4, the floor held.
+    assert.deepEqual(printed, ['b-az2', 'b-az3', 'b-az4', NEW_ID]);
+  });
+
+  it('BlackRock swap: the remove alone is still refused, and the refusal offers the swap', async () => {
+    // The page fit and rule gate the save runs.
+    const fit = await import('../src/features/approval/pageFitEdit.ts');
+    // The remove by itself, as the chat used to apply it.
+    const removed = edits.removeBullet(currentAczen(), { kind: 'bullet', ref: 'b-az1' });
+    // The pure edit accepts it.
+    assert.equal(removed.ok, true);
+    // Narrowed.
+    if (!removed.ok) return;
+    // The save's gate on that resume, against the stored one.
+    const gate = fit.fitEditToOnePage(removed.resume, [], { previous: currentAczen(), master: masterAczen() as never });
+    // Refused on the floor: the floor itself did not move.
+    assert.ok(!gate.ok && gate.reason.includes('exp_aczen: 3 bullets, needs 4'), gate.ok ? 'applied' : gate.reason);
+    // And not a dead end: it names the way out (the swap in one message).
+    assert.ok(!gate.ok && gate.reason.includes('in the same message'), gate.ok ? 'applied' : gate.reason);
+  });
+
+  it('BlackRock swap: a remove ref that is not printed refuses before any call', async () => {
+    // A stale card naming a bullet that is no longer on the resume.
+    const { done, calls } = run(latestAczen(), { ...aczen(), alsoRemove: ['b-gone'] });
+    // Refused.
+    const out = await done;
+    // Not saved.
+    assert.equal(out.ok, false);
+    // Nothing was read or written, so no master version was minted for a swap that cannot land.
+    assert.equal(calls.length, 0);
+  });
+});

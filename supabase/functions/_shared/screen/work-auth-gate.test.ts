@@ -27,7 +27,7 @@ import { test } from "node:test";
 // Strict, so `drop: false` never quietly compares equal to undefined.
 import assert from "node:assert/strict";
 // Extension-suffixed specifier so this runs under Deno and `node --test` alike.
-import { screenWorkAuth, type RemoteLocationPolicy } from "./work-auth-gate.ts";
+import { ashbyLocationFields, boardLocationHints, NO_BOARD_HINTS, screenWorkAuth, type RemoteLocationPolicy } from "./work-auth-gate.ts";
 
 // Teja's list as the migration seeds it.
 const TEJA = ["India", "Nepal", "Bhutan"] as const;
@@ -44,6 +44,8 @@ const job = (locationRaw: string | null, description: string | null = "We build 
   locationRaw,
   // The field under test in the text cases.
   description,
+  // No structured board hints: these cases are about the free text only.
+  board: NO_BOARD_HINTS,
 });
 
 // --- the setting ---------------------------------------------------------------------
@@ -589,7 +591,7 @@ test("2026-11-11: every live leak Teja listed now drops (location, region, umlau
   // Each row in turn, so a failure names the row.
   for (const row of ELEVEN_LIVE) {
     // The gate over that row with Teja's settings.
-    const verdict = screenWorkAuth({ title: row.title, locationRaw: row.locationRaw, description: "We build developer tools." }, TEJA, UNLOCKED);
+    const verdict = screenWorkAuth({ title: row.title, locationRaw: row.locationRaw, description: "We build developer tools.", board: NO_BOARD_HINTS }, TEJA, UNLOCKED);
     // Dropped.
     assert.equal(verdict.drop, true, `${row.id} "${row.locationRaw}" / "${row.title}" was kept`);
   }
@@ -616,7 +618,7 @@ test("2026-11-11 controls: India, bare remote, APAC remote, worldwide remote bes
   // Each control.
   for (const [label, title, locationRaw] of keeps) {
     // Kept.
-    assert.equal(screenWorkAuth({ title, locationRaw, description: "We build developer tools." }, TEJA, UNLOCKED).drop, false, label);
+    assert.equal(screenWorkAuth({ title, locationRaw, description: "We build developer tools.", board: NO_BOARD_HINTS }, TEJA, UNLOCKED).drop, false, label);
   }
 });
 
@@ -636,19 +638,19 @@ const ELEVENLABS_JD = "Location\nThis role is remote-first, so it can be execute
 
 test("2026-11-18 Quora 07b20985: \"Remote - Multiple Locations\" + JD \"remotely from anywhere in the US or Canada\" drops", () => {
   // The live board location and JD.
-  const verdict = screenWorkAuth({ title: "Full Stack Software Engineer, New Grad - Quora (Remote)", locationRaw: "Remote - Multiple Locations", description: QUORA_JD }, TEJA, UNLOCKED);
+  const verdict = screenWorkAuth({ title: "Full Stack Software Engineer, New Grad - Quora (Remote)", locationRaw: "Remote - Multiple Locations", description: QUORA_JD, board: NO_BOARD_HINTS }, TEJA, UNLOCKED);
   // Dropped, as work_auth.
   assert.deepEqual([verdict.drop, verdict.drop && verdict.code], [true, "work_auth"]);
 });
 
 test("2026-11-18 Quora 7bbcc499: the reversed order \"anywhere in Canada or the United States\" drops", () => {
   // The ML Platform row's wording.
-  assert.equal(screenWorkAuth({ title: "Software Engineer New Grad, Machine Learning Platform", locationRaw: "Remote - Multiple Locations", description: QUORA_ML_JD }, TEJA, UNLOCKED).drop, true);
+  assert.equal(screenWorkAuth({ title: "Software Engineer New Grad, Machine Learning Platform", locationRaw: "Remote - Multiple Locations", description: QUORA_ML_JD, board: NO_BOARD_HINTS }, TEJA, UNLOCKED).drop, true);
 });
 
 test("2026-11-18 ElevenLabs fb6d35e4: bare \"Remote\" + JD \"anywhere in Europe and the US East Coast\" drops", () => {
   // The live board location and JD.
-  assert.equal(screenWorkAuth({ title: "Full-Stack Engineer - ElevenMusic", locationRaw: "Remote", description: ELEVENLABS_JD }, TEJA, UNLOCKED).drop, true);
+  assert.equal(screenWorkAuth({ title: "Full-Stack Engineer - ElevenMusic", locationRaw: "Remote", description: ELEVENLABS_JD, board: NO_BOARD_HINTS }, TEJA, UNLOCKED).drop, true);
 });
 
 test("2026-11-18 time-zone window: a required GMT-5..GMT+1 window excludes IST (UTC+5:30) and drops on its own", () => {
@@ -687,6 +689,110 @@ test("2026-11-18 controls: these JD/location shapes all KEEP", () => {
   // Each control.
   for (const [label, locationRaw, description] of keeps) {
     // Kept.
-    assert.equal(screenWorkAuth({ title: "Software Engineer", locationRaw, description }, TEJA, UNLOCKED).drop, false, label);
+    assert.equal(screenWorkAuth({ title: "Software Engineer", locationRaw, description, board: NO_BOARD_HINTS }, TEJA, UNLOCKED).drop, false, label);
   }
+});
+
+// ---- Ashby structured location (pending R, 2026-11-20; orch ruling B at 23:55 IST) ----
+// Ashby's `location` string can be a bare "Remote" while the real lock sits in the structured fields beside it.
+// Measured live on 2026-11-20: 709 of 9985 Ashby rows carry secondaryLocations; of 158 bare-"Remote" rows, 39 (5
+// companies) carry addressCountry "United States" and none of their JDs says "anywhere"; 119 carry no country.
+
+// Ramp 644d66ae as stored in jobs.raw_payload on 2026-11-20 (only the location fields; the rest is irrelevant here).
+const RAMP_644D66AE = {
+  // The board's free-text location: a bare "Remote", which alone keeps the job.
+  location: "Remote",
+  // Ashby's arrangement field.
+  workplaceType: "Remote",
+  // Ashby's remote flag; not read by the hints (workplaceType is the stricter field).
+  isRemote: true,
+  // No secondary location, so addressCountry is the only place signal.
+  secondaryLocations: [],
+  // The only US signal on the row.
+  address: { postalAddress: { addressCountry: "United States" } },
+};
+// One Ashby secondary location entry, in the shape Ashby sends.
+const secondary = (location: string, addressCountry?: string) => ({
+  // The entry's own free-text location.
+  location,
+  // The structured country, when Ashby sends one.
+  address: addressCountry === undefined ? {} : { postalAddress: { addressCountry } },
+});
+// A job built the way the screener builds it: the hints come from the stored payload via the two helpers.
+const ashbyJob = (payload: unknown, locationRaw: string | null = "Remote", provider: string = "ashby") => ({
+  // Ramp's title; it names no place.
+  title: "Software Engineer, Backend, Comms Platform",
+  // The board's free-text location.
+  locationRaw,
+  // A JD with no lock sentence, as Ramp's has none.
+  description: "We build developer tools.",
+  // The structured hints, exactly as callers derive them.
+  board: boardLocationHints(provider, ashbyLocationFields(payload)),
+});
+
+test("R: Ramp 644d66ae (bare Remote, Ashby addressCountry United States, no secondaryLocations) drops as ashby_remote_hq_country", () => {
+  // The row as stored.
+  const verdict = screenWorkAuth(ashbyJob(RAMP_644D66AE), TEJA, UNLOCKED);
+  // Dropped under the gate's one code.
+  assert.equal(verdict.drop && verdict.code, "work_auth");
+  // With the greppable marker, so a veto can find and undo exactly this group.
+  assert.match(verdict.drop ? verdict.reason : "", /^ashby_remote_hq_country: /);
+});
+
+test("R: bare Remote with no addressCountry passes (unknown location keeps, Teja's ruling)", () => {
+  // The same row with the address removed.
+  assert.equal(screenWorkAuth(ashbyJob({ ...RAMP_644D66AE, address: {} }), TEJA, UNLOCKED).drop, false);
+  // A blank country is no country either.
+  assert.equal(screenWorkAuth(ashbyJob({ ...RAMP_644D66AE, address: { postalAddress: { addressCountry: "  " } } }), TEJA, UNLOCKED).drop, false);
+});
+
+test("R: bare Remote with addressCountry India passes", () => {
+  // An authorised country is never a lock.
+  assert.equal(screenWorkAuth(ashbyJob({ ...RAMP_644D66AE, address: { postalAddress: { addressCountry: "India" } } }), TEJA, UNLOCKED).drop, false);
+});
+
+test("R: non-empty secondaryLocations takes precedence over addressCountry", () => {
+  // An India secondary location beside a US HQ: the posting names where it is open, so the HQ is not consulted.
+  const payload = { ...RAMP_644D66AE, secondaryLocations: [secondary("Bengaluru", "India")] };
+  // Kept.
+  assert.equal(screenWorkAuth(ashbyJob(payload), TEJA, UNLOCKED).drop, false);
+});
+
+test("R: placeless remote + secondaryLocations only in the US and Canada drops (Quora shape)", () => {
+  // Quora's board shape: the place lives only in the secondary locations.
+  const payload = { location: "Remote - Multiple Locations", workplaceType: "Remote", secondaryLocations: [secondary("United States", "USA"), secondary("Canada", "Canada")] };
+  // Dropped by the board rules once the secondary locations are parts.
+  const verdict = screenWorkAuth(ashbyJob(payload, "Remote - Multiple Locations"), TEJA, UNLOCKED);
+  // Under the gate's code.
+  assert.equal(verdict.drop && verdict.code, "work_auth");
+});
+
+test("R: an India secondary location keeps a US-HQ on-site posting", () => {
+  // Board says New York; Ashby also lists Bengaluru.
+  const payload = { location: "New York, NY", workplaceType: "Hybrid", secondaryLocations: [secondary("Bengaluru, Karnataka", "India")] };
+  // One authorised part keeps it.
+  assert.equal(screenWorkAuth(ashbyJob(payload, "New York, NY"), TEJA, UNLOCKED).drop, false);
+});
+
+test("R: an unreadable secondary entry keeps rather than letting the readable ones decide", () => {
+  // One US entry and one malformed entry: the malformed one could have been India.
+  const payload = { location: "Remote", workplaceType: "Remote", secondaryLocations: [secondary("United States", "USA"), { nonsense: 1 }] };
+  // Kept: missing data is never a drop (CLAUDE.md section 6).
+  assert.equal(screenWorkAuth(ashbyJob(payload), TEJA, UNLOCKED).drop, false);
+});
+
+test("R: the addressCountry lock applies only to Ashby, a Remote workplaceType, a bare Remote location and policy unlocked_or_authorized", () => {
+  // Another provider's payload is never read as Ashby's.
+  assert.equal(screenWorkAuth(ashbyJob(RAMP_644D66AE, "Remote", "greenhouse"), TEJA, UNLOCKED).drop, false);
+  // Hybrid at a US HQ with a bare "Remote" string: the country is an office, not a remote lock.
+  assert.equal(screenWorkAuth(ashbyJob({ ...RAMP_644D66AE, workplaceType: "Hybrid" }), TEJA, UNLOCKED).drop, false);
+  // A location that is not a bare "Remote" is judged by its own text, not the HQ.
+  assert.equal(screenWorkAuth(ashbyJob(RAMP_644D66AE, "Remote - Multiple Locations"), TEJA, UNLOCKED).drop, false);
+  // Policy 'any' keeps every remote by definition.
+  assert.equal(screenWorkAuth(ashbyJob(RAMP_644D66AE), TEJA, ANY).drop, false);
+});
+
+test("R: ashbyLocationFields reads a non-object payload as absent fields", () => {
+  // null, a string and an array all yield no hints, never a throw or a guessed value.
+  for (const payload of [null, "Remote", [1]]) assert.deepEqual(boardLocationHints("ashby", ashbyLocationFields(payload)), NO_BOARD_HINTS);
 });

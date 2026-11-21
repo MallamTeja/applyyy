@@ -25,7 +25,7 @@ import { atsJobKeyOf } from "../filter/cascade.ts";
 // the cascade not change, and a title comparison is cheaper than any rule in it.
 import { screenTechRole, type TechGatePreferences } from "./tech-gate.ts";
 // Stage 0b, the work-authorisation gate: same outside-the-cascade placement, same reason.
-import { screenWorkAuth, type RemoteLocationPolicy } from "./work-auth-gate.ts";
+import { ashbyLocationFields, boardLocationHints, screenWorkAuth, type RemoteLocationPolicy } from "./work-auth-gate.ts";
 // The JD's required years, the producer the cascade's experience_ceiling rule never had (11-04).
 import { requiredExperienceYears } from "./required-experience.ts";
 // Row shapes from the schema owner. Never redefined — a redefined type drifts.
@@ -263,7 +263,8 @@ export function planScreenedApplications(
     // before any rule or Gemini call is spent on it.
     const authVerdict = screenWorkAuth(
       // The three texts the gate judges by; nothing else about the job matters to it.
-      { title: entry.row.title, locationRaw: entry.row.location_raw ?? null, description: entry.row.description_raw ?? null },
+      // board: Ashby's structured locations out of the stored payload (pending R, 2026-11-20); NO_BOARD_HINTS elsewhere.
+      { title: entry.row.title, locationRaw: entry.row.location_raw ?? null, description: entry.row.description_raw ?? null, board: boardLocationHints(entry.row.ats_provider, ashbyLocationFields(entry.row.raw_payload)) },
       // The user's list; null (never set) opens the gate and warns.
       preferences.workAuthorizedCountries,
       // Teja's remote reading: country-locked remote drops under 'unlocked_or_authorized'.

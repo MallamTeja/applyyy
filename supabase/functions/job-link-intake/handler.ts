@@ -32,7 +32,7 @@ import { companyFor, slugFromToken, type FetchBoardFn, type WatchlistName } from
 // The URL rule shared by the pasted link and every redirect hop (SSRF guard).
 import { checkPublicUrl } from "./fetch-page.ts";
 // The screener's work-auth gate, run on a NEW pasted job before any write (Teja, 2026-11-05 14:12).
-import { screenWorkAuth, type RemoteLocationPolicy } from "../_shared/screen/work-auth-gate.ts";
+import { ashbyLocationFields, boardLocationHints, screenWorkAuth, type RemoteLocationPolicy } from "../_shared/screen/work-auth-gate.ts";
 // Page-to-text, the prompt, and the shape check on the model's answer.
 import { buildExtractPrompt, MAX_SOURCE_CHARS, MIN_JOB_TEXT_CHARS, pageText, parseExtraction } from "./extract.ts";
 // The readers past a plain fetch: LinkedIn's and X's public endpoints, and the browser render.
@@ -576,7 +576,8 @@ export async function handleJobLinkIntake(req: Request, deps: IntakeDeps): Promi
   // Unreadable: refuse rather than add ungated.
   if (!authConfig.ok) return json(503, { status: "error", message: `Reading your work-authorised countries failed: ${authConfig.reason}` });
   // The screener's verdict on the pasted job's location and JD.
-  const authVerdict = screenWorkAuth({ title: built.row.title, locationRaw: built.row.location_raw ?? null, description: built.row.description_raw ?? null }, authConfig.countries, authConfig.policy);
+  // board: a pasted Ashby link carries the same structured locations as a scouted one (pending R, 2026-11-20).
+  const authVerdict = screenWorkAuth({ title: built.row.title, locationRaw: built.row.location_raw ?? null, description: built.row.description_raw ?? null, board: boardLocationHints(built.row.ats_provider, ashbyLocationFields(built.row.raw_payload)) }, authConfig.countries, authConfig.policy);
   // Outside the countries and not yet confirmed: ask, write nothing.
   if (authVerdict.drop && !parsed.value.confirmed.has("work_auth")) {
     // The gate's own words, capitalised, then the question.

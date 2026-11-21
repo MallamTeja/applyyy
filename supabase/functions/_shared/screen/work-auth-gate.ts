@@ -73,7 +73,102 @@ export interface WorkAuthJob {
   readonly locationRaw: string | null;
   // The JD text; read only for the US-specific requirement phrases.
   readonly description: string | null;
+  // Structured location facts the board sent beside the free text. REQUIRED (pass NO_BOARD_HINTS when there are none)
+  // so a caller cannot forget it and silently switch the Ashby locks off (CLAUDE.md section 6, 2026-11-20).
+  readonly board: BoardLocationHints;
 }
+
+/* BOARD LOCATION HINTS (pending R, 2026-11-20; orch ruling B at 23:55 IST). Ramp 644d66ae is "remote US only" but its
+   Ashby `location` is a bare "Remote"; the only US signal is raw_payload.address.postalAddress.addressCountry. Quora's
+   places live only in raw_payload.secondaryLocations. Measured live on 2026-11-20: 709 of 9985 Ashby rows carry
+   secondaryLocations; 39 bare-"Remote" rows (5 companies) carry addressCountry "United States", none saying
+   "anywhere"; 119 carry no country and keep. Ashby only: no other adapter's payload is read. */
+export interface BoardLocationHints {
+  // Extra places the posting is open in (Ashby secondaryLocations), each "<location>, <country>"; judged as location
+  // parts. An unreadable entry becomes a placeless part, which keeps the job rather than letting the readable ones decide.
+  readonly secondaryLocations: readonly string[];
+  // Ashby's addressCountry, kept ONLY for a workplaceType "Remote" posting with no secondary location; null otherwise.
+  // The gate applies it only when the free-text location is a bare "Remote" (see screenWorkAuth).
+  readonly remoteHqCountry: string | null;
+}
+
+// "No hints": every non-Ashby job, and every Ashby payload that carries none.
+export const NO_BOARD_HINTS: BoardLocationHints = Object.freeze({ secondaryLocations: Object.freeze([]) as readonly string[], remoteHqCountry: null });
+
+// The three Ashby payload fields the hints read, as UNKNOWN: callers hand over either the whole stored raw_payload
+// (via ashbyLocationFields) or three JSON paths a PostgREST select picked out, and both are untrusted shapes.
+export interface AshbyLocationFields {
+  // raw_payload.secondaryLocations.
+  readonly secondaryLocations: unknown;
+  // raw_payload.workplaceType.
+  readonly workplaceType: unknown;
+  // raw_payload.address.postalAddress.addressCountry.
+  readonly addressCountry: unknown;
+}
+
+// A plain object, or null: arrays and primitives are not a payload with fields.
+const objectOrNull = (value: unknown): Record<string, unknown> | null =>
+  // typeof null is "object", so it is excluded explicitly; an array is an object too.
+  typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+
+// A non-blank trimmed string, or null: a blank country is no country.
+const nonBlank = (value: unknown): string | null => (typeof value === "string" && value.trim() !== "" ? value.trim() : null);
+
+// The three fields out of a stored Ashby raw_payload. Anything missing or mis-shaped reads as undefined.
+export function ashbyLocationFields(payload: unknown): AshbyLocationFields {
+  // The payload itself.
+  const root = objectOrNull(payload);
+  // The nested postal address, when there is one.
+  const postal = objectOrNull(objectOrNull(root?.address)?.postalAddress);
+  // Unknown values handed on; boardLocationHints validates them.
+  return { secondaryLocations: root?.secondaryLocations, workplaceType: root?.workplaceType, addressCountry: postal?.addressCountry };
+}
+
+// The hints for one job. `provider` is jobs.ats_provider; only "ashby" yields any.
+export function boardLocationHints(provider: unknown, fields: AshbyLocationFields): BoardLocationHints {
+  // Another board's payload is never read as Ashby's.
+  if (provider !== "ashby") return NO_BOARD_HINTS;
+  // Each secondary entry as one location part; absent or non-array means none.
+  const secondaryLocations = Array.isArray(fields.secondaryLocations)
+    ? fields.secondaryLocations.map((entry) => {
+      // The entry object, if it is one.
+      const item = objectOrNull(entry);
+      // Its free text and its structured country.
+      const [text, country] = [nonBlank(item?.location), nonBlank(objectOrNull(objectOrNull(item?.address)?.postalAddress)?.addressCountry)];
+      // Both, joined with a comma so the gate keeps them one part; either alone; or a placeless marker that keeps.
+      return [text, country].filter((part) => part !== null).join(", ") || "(unreadable secondary location)";
+    })
+    : [];
+  // The HQ country counts only for a fully remote posting that lists no secondary place (secondary takes precedence).
+  const remoteHqCountry = secondaryLocations.length === 0 && fields.workplaceType === "Remote" ? nonBlank(fields.addressCountry) : null;
+  // Nothing found: the shared empty value, so callers and tests compare equal.
+  return secondaryLocations.length === 0 && remoteHqCountry === null ? NO_BOARD_HINTS : { secondaryLocations, remoteHqCountry };
+}
+
+// The `jobs` columns a PostgREST embed adds to carry the hints: three JSON paths, never the whole raw_payload (an Ashby
+// payload holds the full HTML JD, so selecting it per queue row would multiply the read for three small fields).
+// One constant so the matcher and the auditor select the same aliases boardHintsFromSelect reads.
+export const BOARD_HINT_SELECT = "ats_provider, ashby_secondary:raw_payload->secondaryLocations, ashby_workplace:raw_payload->workplaceType, ashby_country:raw_payload->address->postalAddress->addressCountry";
+
+// The selected aliases, as a row carries them. Unknown: they are JSON from the payload, validated by boardLocationHints.
+export interface BoardHintColumns {
+  // jobs.ats_provider.
+  readonly ats_provider?: unknown;
+  // raw_payload->secondaryLocations.
+  readonly ashby_secondary?: unknown;
+  // raw_payload->workplaceType.
+  readonly ashby_workplace?: unknown;
+  // raw_payload->address->postalAddress->addressCountry.
+  readonly ashby_country?: unknown;
+}
+
+// The hints from a row selected with BOARD_HINT_SELECT.
+export const boardHintsFromSelect = (row: BoardHintColumns): BoardLocationHints =>
+  // Same validation as the full-payload path.
+  boardLocationHints(row.ats_provider, { secondaryLocations: row.ashby_secondary, workplaceType: row.ashby_workplace, addressCountry: row.ashby_country });
+
+// A board location that is exactly "Remote" and nothing else: the only string the Ashby HQ lock reads past.
+const BARE_REMOTE = /^\s*remote\s*$/i;
 
 // Separators between DIFFERENT locations in one string ("Seattle, WA; Austin, TX",
 // "United States | Canada", "SF or Remote"). Commas are NOT here: they separate city, state and
@@ -510,8 +605,11 @@ export function screenWorkAuth(
     return remotePolicy === "unlocked_or_authorized" || !REMOTE.test(part);
   };
 
-  // The board location's parts.
-  const parts = splitParts(job.locationRaw ?? "");
+  // The board location's parts, plus Ashby's secondary locations as parts of their own (pending R, 2026-11-20): they
+  // are places the posting names, so every rule below judges them exactly as it judges the free text.
+  const parts = [...splitParts(job.locationRaw ?? ""), ...job.board.secondaryLocations];
+  // The location as the reasons quote it, secondary places included, so a drop is diagnosable from the run summary.
+  const shownLocation = parts.join("; ");
   // True when some part is in a country the user may work in.
   const anyAuthorized = parts.some((part) => [...places(part)].some((name) => authorized.has(name)));
 
@@ -521,7 +619,7 @@ export function screenWorkAuth(
     // Say which kind of lock matched, so the run summary reads truthfully.
     const kind = parts.some((part) => REMOTE.test(part)) ? "remote, locked to places" : "on-site/hybrid";
     // Quote the location so a wrong drop is diagnosable from the run summary.
-    return { drop: true, code: "work_auth", reason: `location "${job.locationRaw}" is ${kind} outside the work-authorised countries` };
+    return { drop: true, code: "work_auth", reason: `location "${shownLocation}" is ${kind} outside the work-authorised countries` };
   }
 
   /* REMOTE BESIDE FOREIGN OFFICES (2026-11-11, Anthropic ec3a6b39: "Remote-Friendly (Travel-Required) | San Francisco,
@@ -537,7 +635,24 @@ export function screenWorkAuth(
   // Drop when every placed part is elsewhere and every other part is a bare remote with no open or India-holding region.
   if (remotePolicy === "unlocked_or_authorized" && placed.length > 0 && unplaced.length > 0 && placed.every(isElsewhere) && unplaced.every((part) => REMOTE.test(part) && !OPEN_OR_INDIA_REGION.test(part))) {
     // Quoted, so a wrong drop is diagnosable from the run summary.
-    return { drop: true, code: "work_auth", reason: `location "${job.locationRaw}" is remote alongside offices outside the work-authorised countries only` };
+    return { drop: true, code: "work_auth", reason: `location "${shownLocation}" is remote alongside offices outside the work-authorised countries only` };
+  }
+
+  /* ASHBY REMOTE HQ COUNTRY (orch ruling B, 2026-11-20 23:55 IST; Ramp 644d66ae). A bare "Remote" whose Ashby payload
+     says workplaceType "Remote", lists no secondary location (boardLocationHints leaves remoteHqCountry null otherwise)
+     and names an addressCountry outside the list is remote from that country. A missing or unrecognised country keeps
+     (Teja: unknown location passes). Only under 'unlocked_or_authorized'. The reason starts "ashby_remote_hq_country:"
+     so a veto can find this group by grep and undo it as one. */
+  const hq = job.board.remoteHqCountry;
+  // Applied only past a bare "Remote"; any other text has already been judged on its own words above.
+  if (remotePolicy === "unlocked_or_authorized" && hq !== null && BARE_REMOTE.test(job.locationRaw ?? "")) {
+    // The country, resolved through the same table as everything else ("USA" and "United States" alike).
+    const hqPlaces = places(hq);
+    // Named and none authorised: the lock.
+    if (hqPlaces.size > 0 && ![...hqPlaces].some((name) => authorized.has(name))) {
+      // The marker first, then the evidence.
+      return { drop: true, code: "work_auth", reason: `ashby_remote_hq_country: bare "Remote" posting whose Ashby addressCountry is "${hq}", outside the work-authorised countries` };
+    }
   }
 
   // JD LOCATION LINE: only when the board location names no place at all and does not say

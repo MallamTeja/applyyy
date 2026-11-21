@@ -20,7 +20,8 @@
 
 import { supabase } from './supabase';
 // Every browser edge call goes through it: a revoked session refreshes once, else signs out with a plain sentence.
-import { invokeEdge } from './edgeCall';
+// EDGE_CLIENT_TIMEOUT_MS + EdgeTimeoutError (pending S, 2026-11-21): the scan stops waiting on a hung call.
+import { EDGE_CLIENT_TIMEOUT_MS, EdgeTimeoutError, invokeEdge } from './edgeCall';
 
 /* What every remote-feed button shows instead of a scan. One sentence, so the modal and the
    tests agree on it; the time matches the cron in .github/workflows/scout-remote.yml. */
@@ -207,6 +208,26 @@ async function responseTextOf(error: unknown): Promise<string> {
   }
 }
 
+/* The one "did not answer in time" result, shared by the server's own 504/546 and the browser's own
+ * timeout (pending S, 2026-11-21), so both say the same true thing: the outcome is unknown, the scan may
+ * still be running, and boards it finished are saved. `cause` names which limit ran out. */
+function serverTimeoutResult(cause: string): WatchlistScanResult {
+  return {
+    // Not a confirmed success: the outcome is unknown to the browser.
+    ok: false,
+    // Where to look, instead of a retry that would start a second scan on top of the first.
+    message: `Scout-ATS did not answer in time (${cause}). The scan may still be running on the server, and boards it finished are already saved: check the Discovered page in a few minutes before scanning again.`,
+    // Unknown, reported as zero alongside ok:false so nothing reads it as success.
+    boardsScanned: 0,
+    // Same.
+    jobsInserted: 0,
+    // Same.
+    appsCreated: 0,
+    // Machine-readable reason.
+    error: 'server_timeout',
+  };
+}
+
 /**
  * Asks the scout-ats Edge Function to scan the Watchlist ATS boards (Greenhouse, Lever,
  * Ashby, Workday; SmartRecruiters is off since the 2026-11-01 robots ruling) and reports what it said. Never scans or writes from the browser.
@@ -216,6 +237,9 @@ export async function runWatchlistScan(
   // The app's client by default; a test passes a fake whose invoke answers { data, error }
   // like functions-js, since node --test has no module mocks without an experimental flag.
   client: typeof supabase = supabase,
+  // How long the browser waits before it gives up (pending S): above the platform's own limit, see edgeCall.ts.
+  // A parameter only so a test can use milliseconds; the app passes nothing.
+  timeoutMs: number = EDGE_CLIENT_TIMEOUT_MS,
 ): Promise<WatchlistScanResult> {
   // No client means no env: report it rather than call anything.
   if (client === null) {
@@ -234,7 +258,8 @@ export async function runWatchlistScan(
   // invoke() attaches the session JWT, which scout-ats requires. It never throws: HTTP,
   // relay and network failures all come back as `error` (functions-js FunctionsClient).
   // Through invokeEdge, so a session revoked elsewhere refreshes once before it is a 401 here.
-  const answer = await invokeEdge(client, 'scout-ats', { body: {} });
+  // The timeout is invokeEdge's fourth argument, never part of invoke's options (pending S).
+  const answer = await invokeEdge(client, 'scout-ats', { body: {} }, timeoutMs);
   // The session is gone for good and this browser is signed out: say so, nothing was scanned.
   if (answer.kind === 'signed_out') {
     // Same shape as the 401 branch below, with the plain sentence instead of the raw refusal.
@@ -245,6 +270,9 @@ export async function runWatchlistScan(
 
   // Non-2xx responses arrive as an error carrying the raw Response in `context`.
   if (error) {
+    // The browser stopped waiting (pending S): a hung connection, since the platform's 504 comes first on a live one.
+    // Checked before the status read: this error carries no Response, so it would otherwise read as a network failure.
+    if (error instanceof EdgeTimeoutError) return serverTimeoutResult(`no answer after ${Math.round(error.timeoutMs / 1000)} s`);
     // Read the HTTP status defensively; not every invoke error carries a Response.
     const status = httpStatusOf(error);
     // Auth failures are the user's to fix (sign in again), so say exactly that.
@@ -270,22 +298,8 @@ export async function runWatchlistScan(
     // 504 = the gateway stopped waiting; 546 = the function hit a resource limit. Either way the
     // server got the request and may have saved boards before the answer was lost, so "nothing
     // happened" would be wrong. The scan writes per board, so finished boards are already in.
-    if (status === 504 || status === 546) {
-      return {
-        // Not a confirmed success: the outcome is unknown to the browser.
-        ok: false,
-        // Where to look, instead of a retry that would start a second scan on top of the first.
-        message: `Scout-ATS did not answer in time (HTTP ${status}). The scan may still be running on the server, and boards it finished are already saved: check the Discovered page in a few minutes before scanning again.`,
-        // Unknown, reported as zero alongside ok:false so nothing reads it as success.
-        boardsScanned: 0,
-        // Same.
-        jobsInserted: 0,
-        // Same.
-        appsCreated: 0,
-        // Machine-readable reason.
-        error: 'server_timeout',
-      };
-    }
+    // The shared sentence; "HTTP 504" stays in it, which the e2e suite matches.
+    if (status === 504 || status === 546) return serverTimeoutResult(`HTTP ${status}`);
     // Every other failure is reported as it is: the function's own body when it sent one,
     // otherwise the client's message (a network failure has no status and no body).
     const detail = (await responseTextOf(error)) || (error instanceof Error ? error.message : String(error));

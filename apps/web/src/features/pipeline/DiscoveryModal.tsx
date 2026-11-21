@@ -1,5 +1,9 @@
-import { useState } from 'react';
+// useEffect + useRef drive the elapsed-time ticker (pending S, 2026-11-21).
+import { useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
+
+// The browser's own give-up limit, so the running note can say when it stops waiting (pending S).
+import { EDGE_CLIENT_TIMEOUT_MS } from '../../data/edgeCall';
 
 // The watchlist scan, and the sentence remote mode shows instead of a scan (2026-10-24).
 // topDropReasons too (P1-5), so the summary's reason line says exactly what the step sentence says.
@@ -75,6 +79,20 @@ export function ScanSummary({ result }: { readonly result: WatchlistScanResult }
   );
 }
 
+/* A span of milliseconds as m:ss (pending S, 2026-11-21). A scan takes about 100 s (measured 2026-11-20),
+   so a ticking clock is what tells "slow" from "stuck". Pure and exported, so test/scanClientTimeout.test.ts
+   pins it without a DOM. A negative or non-finite span (clock skew, a bad start) shows 0:00, never "NaN". */
+export function formatElapsed(ms: number): string {
+  // Whole seconds; anything not a finite, non-negative number is zero.
+  const total = Number.isFinite(ms) && ms > 0 ? Math.floor(ms / 1000) : 0;
+  // Minutes, unbounded (a 3-minute limit never needs hours).
+  const minutes = Math.floor(total / 60);
+  // Seconds within the minute, zero-padded so 1:05 never reads as 1:5.
+  const seconds = String(total % 60).padStart(2, '0');
+  // m:ss.
+  return `${minutes}:${seconds}`;
+}
+
 export interface DiscoveryModalProps {
   readonly mode: 'remote' | 'watchlist';
   readonly onClose: () => void;
@@ -98,7 +116,26 @@ export function DiscoveryModal({
   // The watchlist scan's summary; the only result this modal can show now.
   const [watchlistResult, setWatchlistResult] = useState<WatchlistScanResult | null>(null);
 
+  // Milliseconds since the running scan started; 0 when idle (pending S).
+  const [elapsedMs, setElapsedMs] = useState<number>(0);
+  // The start instant; a ref, so the ticker reads it without re-subscribing.
+  const startedAt = useRef<number>(0);
+
   const isRemote = mode === 'remote';
+
+  // While a scan runs, tick once a second so the elapsed time moves; stop the moment it ends.
+  useEffect(() => {
+    // Nothing to time when idle.
+    if (!running) return undefined;
+    // The clock starts now.
+    startedAt.current = Date.now();
+    // Shown as 0:00 at once, not the previous scan's last value.
+    setElapsedMs(0);
+    // One tick a second: the display has whole seconds.
+    const timer = setInterval(() => setElapsedMs(Date.now() - startedAt.current), 1000);
+    // Cleared when the scan ends or the modal unmounts, so no tick lands on a closed modal.
+    return () => clearInterval(timer);
+  }, [running]);
 
   // Watchlist only: remote mode renders no start button, so this is never reached for it.
   const handleStart = async () => {
@@ -172,6 +209,13 @@ export function DiscoveryModal({
           <div className={`discovery-step ${running ? 'discovery-step--running' : ''}`}>
             {running && <div className="discovery-step__spinner" />}
             <p className="discovery-step__text">{step}</p>
+            {/* The ticking clock (pending S): a scan takes about 100 s, so time moving means "working". */}
+            {running && (
+              <span className="discovery-step__elapsed" aria-live="off">
+                {/* m:ss since the click. */}
+                {formatElapsed(elapsedMs)}
+              </span>
+            )}
           </div>
 
           {/* Results Summary */}
@@ -244,7 +288,8 @@ export function DiscoveryModal({
 
             {running && (
               <span className="discovery-modal__scanning-note">
-                Agent is scanning live job feeds, please wait...
+                {/* Sets the expectation and names the end, so a long wait is never open-ended (pending S). */}
+                {`Scanning boards: this usually takes about 2 minutes. The browser stops waiting after ${formatElapsed(EDGE_CLIENT_TIMEOUT_MS)}.`}
               </span>
             )}
           </div>

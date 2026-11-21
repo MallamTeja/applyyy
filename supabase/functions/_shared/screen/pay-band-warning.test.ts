@@ -9,7 +9,7 @@ import { test } from "node:test";
 // Strict, so null never compares equal to undefined.
 import assert from "node:assert/strict";
 // The unit under test, and the gate it must not change.
-import { PAY_BAND_UK_US_ONLY, payBandRegionWarning, screenWorkAuth } from "./work-auth-gate.ts";
+import { NO_BOARD_HINTS, PAY_BAND_UK_US_ONLY, payBandRegionWarning, screenWorkAuth } from "./work-auth-gate.ts";
 
 // A remote job with the given JD; "Remote" is the board text these rows carry.
 const remote = (description: string | null) => ({ locationRaw: "Remote", description });
@@ -81,7 +81,8 @@ test("pay band: HTML in the JD is read as text, entities decoded", () => {
 
 test("pay band: the warning never changes the gate's verdict (option C, no drop)", () => {
   // Circuithub's whole case through the real gate under the live policy and countries.
-  const verdict = screenWorkAuth({ title: "Software Engineer", locationRaw: "Remote", description: "UK £80k–£125k · US $125k–$250k" }, ["India", "Nepal", "Bhutan"], "unlocked_or_authorized");
+  // board: NO_BOARD_HINTS, because the hints are a required field and this case has no Ashby payload.
+  const verdict = screenWorkAuth({ title: "Software Engineer", locationRaw: "Remote", description: "UK £80k–£125k · US $125k–$250k", board: NO_BOARD_HINTS }, ["India", "Nepal", "Bhutan"], "unlocked_or_authorized");
   // Kept, as before this change.
   assert.equal(verdict.drop, false);
 });

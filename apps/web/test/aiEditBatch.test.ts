@@ -237,3 +237,45 @@ describe('T10 review fixes', () => {
     assert.equal(attempted, 0);
   });
 });
+
+/* THE BULLET SWAP (2026-11-20, tailor pending #3). Live BlackRock chat: "remove the irrelevant Aczen bullet and
+   add the CI/CD AuthScore one" came back as a `remove` (auto-applied alone, refused "exp_aczen: 3 bullets, needs
+   4") and a `new_bullet` (its own click, judged on the 4-bullet resume, "would run past one page"). The fix
+   links the two as one swap, so they reach one end-state-checked save (attestBullet.alsoRemove). */
+describe('BlackRock swap: a bullet remove and a new line under the same entry are one unit', () => {
+  // The live answer's two halves, as the chat stores them.
+  const BULLET_SWAP: readonly StoredOp[] = [
+    // "Remove the irrelevant Aczen bullet".
+    { op: 'remove', ref: 'b-az1', before: 'Built an internal invoice OCR tool' },
+    // "Add the CI/CD AuthScore bullet" (owner-dictated text, so a new master line).
+    { op: 'new_bullet', section: 'experience', parentRef: 'exp_aczen', parentLabel: 'Aczen · Full Stack AI Engineer', text: 'Built a CI/CD pipeline for AuthScore with GitHub Actions' },
+  ];
+  // Which entry each printed bullet sits under, as the page reads it from the current resume's structure.
+  const PARENTS: ReadonlyMap<string, string> = new Map([['b-az1', 'exp_aczen'], ['b-other', 'exp_other']]);
+
+  it('BlackRock swap: the remove never auto-applies alone and one click takes both', () => {
+    // Linked both ways.
+    const partners = ai.swapPartners(BULLET_SWAP, PARENTS);
+    // 0 <-> 1.
+    assert.equal(partners.get(0), 1);
+    // And back.
+    assert.equal(partners.get(1), 0);
+    // The remove is a paired half, so the chat no longer applies it by itself (the floor refusal).
+    assert.equal(ai.isPairedHalf(BULLET_SWAP, 0, PARENTS), true);
+    // Apply on either card takes both, in answer order.
+    assert.deepEqual(ai.applyTogether(BULLET_SWAP, 1, () => false, PARENTS), [0, 1]);
+    // The page action pair: the remove and the attest, which the page folds into ONE attest save.
+    const actions = BULLET_SWAP.flatMap((op) => (op.op === 'rejected' ? [] : [ai.toEditAction(op)]));
+    // The kinds editRows routes as a swap.
+    assert.deepEqual(actions.map((a) => a.kind), ['remove', 'attest_bullet']);
+  });
+
+  it('BlackRock swap: a remove under a DIFFERENT entry is not linked', () => {
+    // The remove names a bullet of another job.
+    const other: StoredOp[] = [{ op: 'remove', ref: 'b-other', before: 'x' }, BULLET_SWAP[1]!];
+    // Unpaired: each card stays its own.
+    assert.equal(ai.swapPartners(other, PARENTS).size, 0);
+    // Without the parents map (no structure), nothing bullet-level pairs: the old behaviour.
+    assert.equal(ai.swapPartners(BULLET_SWAP).size, 0);
+  });
+});

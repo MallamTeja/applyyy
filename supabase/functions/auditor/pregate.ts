@@ -17,6 +17,10 @@
 
 // The matcher's pure verdict and its input shapes, reused rather than re-implemented.
 import { firstPreGateDrop, type PreGateDropCode, type PreGatePreferences } from "../matcher/tech-pregate.ts";
+// The Ashby location hints the work-auth gate reads, from the aliases BOARD_HINT_SELECT adds (pending R, 2026-11-20).
+import { boardHintsFromSelect, type BoardHintColumns } from "../_shared/screen/work-auth-gate.ts";
+// The screener's same-ATS-posting key, so the auditor and the screener build it identically (W2, 2026-11-20).
+import { atsJobKeyOf } from "../_shared/filter/cascade.ts";
 // "Teja pasted this himself": such rows skip every automatic gate (the matcher's rule).
 import { isHumanPicked } from "../_shared/match/score-threshold.ts";
 // Teja's content rules (2026-11-08): the tailor's own gate, reused so the auditor and the tailor cannot disagree.
@@ -25,7 +29,9 @@ import { checkContentRules } from "../_shared/tailor/content-rules.ts";
 import type { MasterProfile, ResolvedResume } from "../_shared/contracts/shared-types.ts";
 
 // The embedded `jobs(...)` the auditor's queue read selects for each row.
-export interface AuditorJobEmbed {
+export interface AuditorJobEmbed extends BoardHintColumns {
+  // The posting's id on its board; with ats_provider (from BoardHintColumns), the already-applied key (W2).
+  readonly ats_job_id?: string | null;
   // The posting title.
   readonly title: string | null;
   // The raw JD.
@@ -58,7 +64,65 @@ export function auditorPreGateDrop(job: AuditorJobEmbed | null, preferences: Pre
     locationRaw: job.location_raw,
     // Absent years: the experience gate falls back to the JD parser.
     minExperienceYears: job.min_experience_years,
+    // Ashby's structured locations; NO_BOARD_HINTS when the embed carries none.
+    board: boardHintsFromSelect(job),
   }, preferences);
+}
+
+/* ALREADY APPLIED, RE-CHECKED (W2, 2026-11-20). The screener's same-ATS-posting check (fa315449) runs only when a row
+   is inserted, so a retitled copy of an applied job inserted BEFORE the original was applied (Canonical 111d1ff4 vs
+   8e9d58ce) reached the queue. The auditor is the last agent before a human, so it asks again against today's
+   history. `appliedKeys` is built by the caller from the screener's own applicationHistory() read (committed and
+   awaiting_approval rows); a `tailored` row is never in it, so a row cannot match itself. */
+export type AuditorAlreadyAppliedDrop = { readonly code: "already_applied"; readonly reason: string } | null;
+
+// The verdict for one row's job against the history keys.
+export function auditorAlreadyAppliedDrop(job: AuditorJobEmbed | null, appliedKeys: ReadonlySet<string>): AuditorAlreadyAppliedDrop {
+  // No job: the pre-gate above has already thrown for this row; stated again so this function is safe alone.
+  if (job === null) throw new Error("auditor already-applied: no job embed for this row");
+  // Teja pasted it himself: re-applying is then his choice, exactly as every other automatic gate skips it.
+  if (isHumanPicked(job.discovered_via)) return null;
+  // The key, or null when either part is missing (null never matches: a degenerate key would drop real jobs).
+  const key = atsJobKeyOf(typeof job.ats_provider === "string" ? job.ats_provider : null, job.ats_job_id);
+  // Matched: already applied or awaiting approval under another title or location.
+  return key !== null && appliedKeys.has(key)
+    ? { code: "already_applied", reason: `already applied or awaiting approval for this ATS posting under another title or location (${key})` }
+    : null;
+}
+
+// The two history fields the key needs, as the screener's ApplicationHistoryRow carries them (a structural subset, so
+// the screener's rows fit without a cast and a test can pass just these two).
+export interface AppliedHistoryKeyRow {
+  // jobs.ats_provider of the history row's job.
+  readonly ats_provider: string | null;
+  // jobs.ats_job_id of the history row's job.
+  readonly ats_job_id: string | null;
+}
+
+// The history read's result: the screener's ScreenQueryResult shape, restated as the two fields used here.
+export interface AppliedHistoryResult {
+  // The query's error message, or null.
+  readonly error: string | null;
+  // The rows, or null when nothing came back.
+  readonly rows: readonly AppliedHistoryKeyRow[] | null;
+}
+
+// The keys `auditorAlreadyAppliedDrop` checks against, or a refusal. A failed or rowless read must stop the run: an
+// empty set would pass every row, which is the fail-open CLAUDE.md section 6 names (W2, 2026-11-21).
+export function auditorAppliedKeys(result: AppliedHistoryResult): { readonly ok: true; readonly keys: ReadonlySet<string> } | { readonly ok: false; readonly reason: string } {
+  // An error, or no rows array at all (supabase-js returns [] for "none", never null on success).
+  if (result.error !== null || !Array.isArray(result.rows)) return { ok: false, reason: `applications history query failed: ${result.error ?? "no rows returned"}` };
+  // Every keyed row, queued or committed, exactly as the screener's context.ts builds appliedAtsJobKeys.
+  const keys = new Set<string>();
+  // One pass over the history.
+  for (const row of result.rows) {
+    // Null for an id-less or aggregator row, which can never match.
+    const key = atsJobKeyOf(row.ats_provider, row.ats_job_id);
+    // Kept only when there is an identity to match on.
+    if (key !== null) keys.add(key);
+  }
+  // The set, read.
+  return { ok: true, keys };
 }
 
 // The content-rules verdict: its own code, because it judges the RESUME, not the job, so it is not a PreGateDropCode.

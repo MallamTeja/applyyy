@@ -917,9 +917,34 @@ export function toEditAction(stored: ApplicableOp): EditAction {
    Review fix (2026-11-10): ONLY in a section whose content rule CAPS the count (SWAP_CAPPED below), because
    only there does a lone add break a rule. Elsewhere (certifications: a floor, no cap) each card applies
    on its own, and linking would only make one click do two things nobody asked to join. */
-export function swapPartners(ops: readonly StoredOp[]): ReadonlyMap<number, number> {
+/* THE BULLET SWAP (2026-11-20, tailor pending #3): a bullet `remove` and a `new_bullet` under the SAME entry, in
+   one answer, are one swap too ("replace the invoice line with the CI/CD one"). Live BlackRock case: the remove
+   auto-applied alone and broke the Aczen floor ("exp_aczen: 3 bullets, needs 4"), and the new line, judged on
+   the untouched resume, ran past one page. Linked, they reach ONE save judged on the end state (the page folds
+   the remove into the attest: attestBullet.alsoRemove). Only new_bullet: a remove + add_bullet (a master line
+   back) are both pure, so they already auto-apply in one end-state batch; linking them would only stop that.
+   `parents` maps a printed bullet ref to its entry ref (bulletParents over the current structure). Absent, no
+   bullet pairs: a remove's parent cannot be known, so each card stays its own, exactly as before. */
+export function swapPartners(ops: readonly StoredOp[], parents?: ReadonlyMap<string, string>): ReadonlyMap<number, number> {
   // Both directions, filled as pairs are found.
   const partners = new Map<number, number>();
+  // Each bullet remove in order, when the page told us where its bullets sit.
+  if (parents !== undefined) ops.forEach((remove, i) => {
+    // Only a bullet removal starts a bullet swap.
+    if (remove.op !== 'remove') return;
+    // The entry that bullet is printed under; unknown (already gone) means no swap.
+    const entry = parents.get(remove.ref);
+    // Not printed now: nothing to pair.
+    if (entry === undefined) return;
+    // The first new line under that same entry not yet taken by an earlier remove.
+    const j = ops.findIndex((add, k) => add.op === 'new_bullet' && add.parentRef === entry && !partners.has(k));
+    // No new line there: the remove stands alone (and its refusal offers the swap).
+    if (j === -1) return;
+    // Linked one way.
+    partners.set(i, j);
+    // And back.
+    partners.set(j, i);
+  });
   // Each remove_entry in order.
   ops.forEach((remove, i) => {
     // Only a whole-entry removal starts a swap, and only in a capped section.
@@ -1028,9 +1053,9 @@ export function opLabel(op: ApplicableOp): string {
    resume a project short until the second click. A half whose partner already landed (applied earlier,
    or by hand) is an ordinary single op again. `applied` is injected (the panel passes isApplied over its
    diff), so this stays pure and testable. */
-export function applyTogether(ops: readonly StoredOp[], index: number, applied: (op: StoredOp) => boolean): number[] {
-  // This card's partner, if it has one.
-  const partner = swapPartners(ops).get(index);
+export function applyTogether(ops: readonly StoredOp[], index: number, applied: (op: StoredOp) => boolean, parents?: ReadonlyMap<string, string>): number[] {
+  // This card's partner, if it has one (a bullet swap needs `parents`; see swapPartners).
+  const partner = swapPartners(ops, parents).get(index);
   // Unpaired, or the partner is already on the resume: this card alone.
   if (partner === undefined || applied(ops[partner]!)) return [index];
   // Both, in the order the AI answered them (the order the batch folds them in).
@@ -1039,9 +1064,23 @@ export function applyTogether(ops: readonly StoredOp[], index: number, applied: 
 
 /* Whether this op is one half of a swap: the chat never auto-applies such a half by itself (an add_back
    would otherwise land alone and be refused on the project cap), and its card says it goes with its partner. */
-export function isPairedHalf(ops: readonly StoredOp[], index: number): boolean {
-  // Any partner at all.
-  return swapPartners(ops).has(index);
+export function isPairedHalf(ops: readonly StoredOp[], index: number, parents?: ReadonlyMap<string, string>): boolean {
+  // Any partner at all (a bullet swap needs `parents`; see swapPartners).
+  return swapPartners(ops, parents).has(index);
+}
+
+/* Printed bullet ref -> its entry ref, read from the current resume's structure: what swapPartners needs to
+   link a bullet remove with a new line under the same entry. Empty without a structure (nothing pairs). */
+export function bulletParents(structure: AssistStructure | null): ReadonlyMap<string, string> {
+  // Filled from every entry's printed bullets.
+  const parents = new Map<string, string>();
+  // Each entry on the resume, if the page passed one.
+  for (const entry of structure?.entries ?? []) {
+    // Each of its bullets points back at it.
+    for (const ref of entry.bulletRefs) parents.set(ref, entry.ref);
+  }
+  // The lookup.
+  return parents;
 }
 
 /* Whether the resume already shows this op's effect. Derived, never stored: the resume is the one

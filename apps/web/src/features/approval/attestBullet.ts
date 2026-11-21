@@ -33,6 +33,8 @@ import {
   resolveFullMaster,
   // A master bullet onto the resume by ref, copied whole from FULL.
   addMasterBullet,
+  // A printed bullet off the resume: the swap's other half (alsoRemove).
+  removeBullet,
   // The save boundary's own rule, run here before any write.
   tracesToMaster,
   // The five bullet-bearing sections, for the runtime guard on args.section.
@@ -74,6 +76,12 @@ export interface AttestBulletArgs {
   /* The row's JD keywords (selected_jd_keywords), for the one-page fit this save runs (2026-11-07).
      Required, so no caller can skip the fit by omission. */
   readonly jdKeywords: readonly string[];
+  /* THE SWAP (2026-11-20, tailor pending #3): printed bullets this same save takes OFF, so "replace line X
+     with this new line" is judged on its END state. Live BlackRock case: the remove alone broke the Aczen
+     floor ("exp_aczen: 3 bullets, needs 4") and the add alone ran past one page, so neither could ever land.
+     The floors are unchanged; the remove and the add simply reach ONE fit and ONE rule check together.
+     Optional: absent or empty is the plain attest, exactly as before. */
+  readonly alsoRemove?: readonly string[];
 }
 
 /* How an attest ends. On success the page gets the new pin's master and original, which it must
@@ -194,6 +202,13 @@ export async function attestBullet(client: Client, args: AttestBulletArgs): Prom
     // Refused before any read or write.
     return { ok: false, message: 'the entry this line belongs to is not on this resume. Add the entry first.', masterInserted: false };
   }
+  // The swap's removals, if any (absent = none).
+  const alsoRemove = args.alsoRemove ?? [];
+  /* Each removal proven on the stored resume BEFORE any read or write: a stale card naming a bullet that is
+     already gone must not mint a master version for a swap that can never land. */
+  const removable = withoutBullets(args.current, alsoRemove);
+  // Refused in the remove's own words, nothing touched.
+  if (!removable.ok) return { ok: false, message: removable.reason, masterInserted: false };
 
   // The NEWEST master, not the pinned one: versions are immutable, so the new one builds on the latest.
   const latest = await loadCurrentMasterProfile(client);
@@ -248,7 +263,12 @@ export async function attestBullet(client: Client, args: AttestBulletArgs): Prom
      may cut the very line just vouched for if it is the weakest; the notice then says so. Floors that
      overflow refuse here: the master version stays (immutable), the row is untouched. */
   // Content rules against the stored resume and the NEW pin's master (the one the row will be pinned to).
-  const fitted = fitEditToOnePage(proven.resume, args.jdKeywords, { previous: args.current, master: target });
+  // The swap's removals on the proven resume, so the fit and the rules below judge the END state of the pair.
+  const swapped = withoutBullets(proven.resume, alsoRemove);
+  // Proven removable above; a refusal here would mean the proof changed the printed bullets, so it stops.
+  if (!swapped.ok) return { ok: false, message: swapped.reason, masterInserted: true };
+  // The end state against the stored resume: only a rule this whole save newly breaks refuses it.
+  const fitted = fitEditToOnePage(swapped.resume, args.jdKeywords, { previous: args.current, master: target });
   // Refused before the write, in the check's own words.
   if (!fitted.ok) return { ok: false, message: fitted.reason, masterInserted: true };
 
@@ -294,4 +314,22 @@ export async function attestBullet(client: Client, args: AttestBulletArgs): Prom
     // So the page can say when only the history note is missing.
     eventRecorded: saved.eventRecorded,
   };
+}
+
+/* The resume with these printed bullets removed, in order, by the page's own removeBullet; the first
+   refusal (a ref not printed) refuses the whole set, so a swap never lands half. */
+function withoutBullets(resume: ResolvedResume, refs: readonly string[]): { readonly ok: true; readonly resume: ResolvedResume } | { readonly ok: false; readonly reason: string } {
+  // Folded from the given resume.
+  let current = resume;
+  // One removal at a time, each on the result of the last.
+  for (const ref of refs) {
+    // The same pure edit the bullet's own Remove makes.
+    const out = removeBullet(current, { kind: 'bullet', ref });
+    // Refused: the whole set is refused, in the edit's own words.
+    if (!out.ok) return { ok: false, reason: out.reason };
+    // Carried to the next removal.
+    current = out.resume;
+  }
+  // Every removal applied.
+  return { ok: true, resume: current };
 }

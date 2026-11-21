@@ -131,6 +131,20 @@
   }
 }
 
+/* The elapsed-time clock beside the step text (pending S, 2026-11-21). */
+.discovery-step__elapsed {
+  /* Pushed to the row's right edge, away from the sentence. */
+  margin-left: auto;
+  /* Same small size as the step text, so it reads as part of the row. */
+  font-size: var(--size-sm);
+  /* Secondary: the sentence is the message, the clock is context. */
+  color: var(--text-secondary);
+  /* Fixed-width digits, so 1:09 to 1:10 does not jitter. */
+  font-variant-numeric: tabular-nums;
+  /* Never shrinks under a long sentence. */
+  flex-shrink: 0;
+}
+
 .discovery-step__text {
   font-size: var(--size-sm);
   color: var(--text-primary);

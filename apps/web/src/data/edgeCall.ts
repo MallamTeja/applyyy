@@ -80,19 +80,79 @@ async function isSessionRefusal(error: unknown): Promise<boolean> {
   }
 }
 
+/* ---------------------------------------------------------------------------------------------------------
+ * The opt-in client timeout (2026-11-21, pending item S: "Scan Watchlist spins forever").
+ *
+ * WHY: a hung connection had no end; the scan's spinner turned until the tab closed. A client timeout must
+ * sit ABOVE the platform's own limit, or it cuts off an answer the server could still send.
+ * The platform limit (supabase.com/docs/guides/functions/limits, read 2026-11-21):
+ *   - request idle timeout 150 s on EVERY plan: a function that has not started its response by then gets a 504;
+ *   - wall clock 150 s on Free (this project's plan, measured 2026-11-21), 400 s on paid plans.
+ * Every caller here waits for a whole JSON answer (no streaming), so the 150 s idle timeout caps the wait on
+ * any plan: by then the gateway has sent a 504. Past that, only a dead connection is still "waiting".
+ *
+ * WHY a race and not an AbortSignal: functions-js 2.4.4 (the installed version) does not pass a signal to
+ * fetch, so a signal in invoke's options would be silently ignored. The race stops the WAIT; the request
+ * itself may still finish on the server, which is exactly what the scan's timeout sentence tells the user.
+ * Opt-in (a fourth parameter, never folded into invoke's options), so no other call site changes behaviour.
+ * ------------------------------------------------------------------------------------------------------- */
+
+// The platform's own limit: the idle timeout on every plan, and the Free plan's wall clock. Exported so a test pins the margin.
+export const EDGE_REQUEST_LIMIT_MS = 150_000;
+
+// The client's limit: 30 s past the platform's, so the platform's own 504 always arrives first when the connection is alive.
+export const EDGE_CLIENT_TIMEOUT_MS = EDGE_REQUEST_LIMIT_MS + 30_000;
+
+/* "The browser stopped waiting", as its own class, so a caller tells it apart from a network drop.
+   A FunctionsFetchError subclass, so a reader that only knows the SDK's classes still sees a failed fetch. */
+export class EdgeTimeoutError extends FunctionsFetchError {
+  // The limit that ran out, for the caller's sentence.
+  readonly timeoutMs: number;
+  constructor(timeoutMs: number) {
+    // The context mirrors what an aborted fetch would carry: a TimeoutError DOMException.
+    super(new DOMException(`No answer within ${timeoutMs} ms`, 'TimeoutError'));
+    // Its own name, so a log line says what happened.
+    this.name = 'EdgeTimeoutError';
+    // Kept for the caller.
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/* One invoke, raced against the timeout when one is given. Without one, it IS the plain invoke call. */
+async function invokeWithin(client: EdgeClient, name: string, options: { body: Record<string, unknown> } | undefined, timeoutMs: number | undefined): ReturnType<EdgeClient['functions']['invoke']> {
+  // No timeout asked for: exactly the call every other site has always made.
+  if (timeoutMs === undefined) return client.functions.invoke(name, options);
+  // The timer's handle, so a call that answers first clears it (no stray timer keeps a test or tab busy).
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // Resolves (never rejects) with invoke's own shape, so the caller reads a timeout like any other error.
+  const giveUp = new Promise<{ data: unknown; error: unknown }>((resolve) => {
+    // The deadline.
+    timer = setTimeout(() => resolve({ data: null, error: new EdgeTimeoutError(timeoutMs) }), timeoutMs);
+  });
+  // Whichever settles first; a late invoke answer is dropped (the race already attached its handler).
+  try {
+    // The race itself.
+    return await Promise.race([client.functions.invoke(name, options), giveUp]);
+  } finally {
+    // Always cleared: after a timeout it is a no-op, after an answer it stops the pending timer.
+    clearTimeout(timer);
+  }
+}
+
 /* Call an edge function; on a session 401, refresh once and retry once. Never throws on its own
-   account (invoke's own throws, which supabase-js does not do, reach the caller unchanged). */
-export async function invokeEdge(client: EdgeClient, name: string, options?: { body: Record<string, unknown> }): Promise<EdgeCallResult> {
+   account (invoke's own throws, which supabase-js does not do, reach the caller unchanged).
+   `timeoutMs` is opt-in: each attempt stops waiting after it, with an EdgeTimeoutError (see above). */
+export async function invokeEdge(client: EdgeClient, name: string, options?: { body: Record<string, unknown> }, timeoutMs?: number): Promise<EdgeCallResult> {
   // The first attempt.
-  const first = await client.functions.invoke(name, options);
+  const first = await invokeWithin(client, name, options, timeoutMs);
   // Anything but a session 401 is the caller's to read.
   if (!(await isSessionRefusal(first.error))) return { kind: 'answered', ...first };
   // One refresh: a token that simply expired comes back here.
   const refreshed = await client.auth.refreshSession();
   // A revoked refresh token (global logout) cannot recover; stop before any retry.
   if (refreshed.error !== null && refreshed.error !== undefined) return signedOut(client);
-  // One retry, carrying the new token.
-  const second = await client.functions.invoke(name, options);
+  // One retry, carrying the new token, under the same per-attempt limit.
+  const second = await invokeWithin(client, name, options, timeoutMs);
   // Still a session 401 after a good refresh: final, no second refresh.
   if (await isSessionRefusal(second.error)) return signedOut(client);
   // The retry's answer, whatever it is.

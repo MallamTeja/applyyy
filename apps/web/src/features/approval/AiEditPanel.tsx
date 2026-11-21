@@ -70,7 +70,7 @@ export const BatchPreviewContext = createContext<((applicationId: string, action
 /* The action kinds that put content ON the resume, the only ones a card previews (a remove or move never overflows). */
 const ADDING_KINDS: ReadonlySet<EditAction['kind']> = new Set<EditAction['kind']>(['add_skill', 'attest_skill', 'add_master_bullet', 'add_master_entry', 'attest_bullet']);
 // The pure halves: build the ask, resolve and apply ops, read applied state and outcomes, format the bill.
-import { applyTogether, batchRunLine, buildAssistDraft, formatUsage, holdReason, isApplied, isPairedHalf, outcomeNote, replyNote, resolveOps, sectionTitle, shouldAutoApply, opLabel, runApplyBatch, swapPartners, toEditAction } from './aiEdit';
+import { applyTogether, batchRunLine, bulletParents, buildAssistDraft, formatUsage, holdReason, isApplied, isPairedHalf, outcomeNote, replyNote, resolveOps, sectionTitle, shouldAutoApply, opLabel, runApplyBatch, swapPartners, toEditAction } from './aiEdit';
 // Types for the ask and its parts.
 import type { ApplicableOp, AssistBody, AssistProgress, AssistResult, AssistStructure, AuditAdvice, StoredOp } from './aiEdit';
 // The memory: grouping into chats and the window sent back as context.
@@ -472,6 +472,9 @@ export function AiEditPanel({
   const [error, setError] = useState<string | null>(null);
   // Applies in flight or refused, by op key.
   const [opStates, setOpStates] = useState<ReadonlyMap<string, OpState>>(new Map());
+  /* Printed bullet -> its entry, from the CURRENT structure (2026-11-20, the bullet swap): what links a bullet
+     remove with a new line under the same entry (aiEdit.swapPartners). Derived each render, never stored. */
+  const parents = bulletParents(structure ?? null);
   // An Apply-all run is in progress, so its buttons wait.
   const [applyingAll, setApplyingAll] = useState<boolean>(false);
   // Skill groups the operator picked on a card, by op key; absent means the AI's pick stands.
@@ -610,7 +613,7 @@ export function AiEditPanel({
       // Left as a card for a click (or a "Could not do" card, which has nothing to apply).
       /* T10: and half of a swap never applies by itself: its partner (a whole-entry removal) always waits for a
          click, and the add alone would be refused on the project cap. Both wait, and one click takes both. */
-      reply === undefined || op.op === 'rejected' || !shouldAutoApply(op, text) || isPairedHalf(reply.ops ?? [], index) ? [] : [{ op, key: opKey(reply, index) }]);
+      reply === undefined || op.op === 'rejected' || !shouldAutoApply(op, text) || isPairedHalf(reply.ops ?? [], index, parents) ? [] : [{ op, key: opKey(reply, index) }]);
     // The batch, judged on its end state by the atomic save; a refusal shows on its cards with Retry.
     if (auto.length > 0) await applyMany(auto, 'ai_chat_auto');
     // Unlocks.
@@ -699,7 +702,7 @@ export function AiEditPanel({
     // The reply's ops.
     const ops = message.ops ?? [];
     // The indices this click takes, in answer order.
-    const together = applyTogether(ops, index, (op) => isApplied(op, diff, structure ?? null));
+    const together = applyTogether(ops, index, (op) => isApplied(op, diff, structure ?? null), parents);
     // As applicable ops with their card keys; a rejected card never reaches a save.
     const items = together.flatMap((i) => {
       // The op at that index.
@@ -711,8 +714,25 @@ export function AiEditPanel({
     const single = items[0];
     // One op: the single guarded save, as before.
     if (items.length === 1 && single !== undefined) await apply(single.op, single.key, 'ai_chat_click');
+    /* A bullet swap (2026-11-20): a new line plus the remove it replaces. Sent to the page as ONE batch, which
+       folds the remove into the attest's own save (attestBullet.alsoRemove), so the floor and the page fit are
+       judged on the end state. applyMany would split them (an attest never rides in the pure batch) and the
+       remove alone is exactly the refusal this fixes. */
+    else if (items.length > 1 && items.some((item) => item.op.op === 'new_bullet')) await applySwap(items);
     // A pair: one atomic save of both.
     else if (items.length > 1) await applyMany(items, 'ai_chat_click');
+  }
+
+  /* One bullet swap as one save: every card shows progress, then lands or fails together with the page's reason. */
+  async function applySwap(items: readonly { readonly op: ApplicableOp; readonly key: string }[]): Promise<void> {
+    // In progress on each card.
+    for (const { key } of items) setOpState(key, { status: 'applying' });
+    // ONE save; the page routes [remove, attest_bullet] to the attest path with the removal folded in.
+    const result = await onEditBatch(items.map(({ op, key }) => actionFor(op, key)), 'ai_chat_click');
+    // Each card cleared, or shows the save's reason with Retry: both landed or neither did.
+    for (const { key } of items) setOpState(key, result.ok ? undefined : { status: 'failed', reason: result.reason });
+    // A refusal is also said above the composer, in the batch report's words.
+    if (!result.ok) setError(`Not applied: ${result.reason}`);
   }
 
   /* The page action for one op: an added skill files under the group the operator picked on its card. */
@@ -724,12 +744,17 @@ export function AiEditPanel({
   /* The ops Apply all takes, with their card keys, in order. A function (T10 review) so the save and the
      preview line by the button read the same list. */
   function allBatch(message: ChatMessage): { readonly op: ApplicableOp; readonly key: string }[] {
+    // The reply's ops.
+    const ops = message.ops ?? [];
+    // Its swap pairs, so a remove linked to a new line stays with that line's own click (2026-11-20).
+    const partners = swapPartners(ops, parents);
     // Every op of the reply that still waits.
-    return (message.ops ?? []).flatMap((op, index) =>
+    return ops.flatMap((op, index) =>
       /* Skipped: a "Could not do" card (nothing to apply), one already on the resume, and a new bullet,
          which writes a new claim into the MASTER and so always takes its own click, never a batch
          (review finding, 2026-11-01): a hostile job text that induces one cannot ride along. */
-      op.op === 'rejected' || isApplied(op, diff, structure ?? null) || op.op === 'new_bullet' ? [] : [{ op, key: opKey(message, index) }]);
+      /* And a remove linked to a new line (the bullet swap): alone it breaks the floor it was paired to keep. */
+      op.op === 'rejected' || isApplied(op, diff, structure ?? null) || op.op === 'new_bullet' || ops[partners.get(index) ?? -1]?.op === 'new_bullet' ? [] : [{ op, key: opKey(message, index) }]);
   }
 
   /* Apply every not-yet-applied op of one reply in order; stop at the first failure. */
@@ -942,9 +967,10 @@ export function AiEditPanel({
           // The reply's proposals, with their applied state read from the resume.
           const ops = message.ops ?? [];
           // T10: the reply's swap pairs (remove + add of one section), derived from its ops, never stored.
-          const partners = swapPartners(ops);
+          const partners = swapPartners(ops, parents);
           // Ops not yet on the resume that Apply all will take (a new bullet always needs its own click; a rejected card has none).
-          const open = ops.filter((op) => op.op !== 'new_bullet' && op.op !== 'rejected' && !isApplied(op, diff, structure ?? null)).length;
+          // (2026-11-20: read from allBatch itself, so a swap-linked remove it leaves out is not counted either.)
+          const open = allBatch(message).length;
           // Bullet edits the audit rule ran on: the denominator of the flag count.
           const audited = ops.filter((op) => op.op === 'edit' && op.advice?.kind === 'checked');
           // Of those, the ones it would flag: the number that decides whether the audit should ever block.

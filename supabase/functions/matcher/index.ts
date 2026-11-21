@@ -83,6 +83,8 @@ import { advanceScoredRow, writeMatchScore } from "./write-score.ts";
 // The permanent-failure exit (W2, 2026-11-01): the usable-job gate before Gemini, and the
 // settle step for answers that could not be read.
 import { settleModelFailures, withUsableJob, type MatcherFailureReason, type ModelAnswerFailure, type SettleClient } from "./fail-exit.ts";
+// The Ashby location hints the pre-gate needs: one select fragment and its reader (pending R, 2026-11-20).
+import { BOARD_HINT_SELECT, boardHintsFromSelect, type BoardHintColumns } from "../_shared/screen/work-auth-gate.ts";
 // Stage 0 re-applied before scoring, so a row the screener would now drop costs no Gemini call.
 import { nextSweepCursor, parseMatcherMode, PREGATE_ONLY_MAX_BATCH, selectScorer, withTechPreGate, type MatcherMode } from "./tech-pregate.ts";
 // The one loader of the gate config (search_preferences + experience_ceiling), shared with the auditor.
@@ -352,7 +354,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
     // the .is() below drop the ROW, where a plain embed would only null it and the dead job's
     // application would still arrive. disappeared_at is also what the usable-job gate's verdict
     // (planTailorBatch) reads; without the column every row is a reported defect, never scored.
-    .select("id, job_id, jobs!inner (title, company_name, description_raw, location_raw, min_experience_years, employment_type, discovered_via, disappeared_at)")
+    // BOARD_HINT_SELECT adds three Ashby JSON paths for the work-auth gate (pending R, 2026-11-20), never the whole payload.
+    .select(`id, job_id, jobs!inner (title, company_name, description_raw, location_raw, min_experience_years, employment_type, discovered_via, disappeared_at, ${BOARD_HINT_SELECT})`)
     // SKIPPED, NOT FAILED: a posting scout-ats saw drop off its board. planReappearances clears
     // disappeared_at on a repost and the row rejoins this queue untouched; failing it would make
     // that impossible. Filtered here, not per row, so 21 dead rows (2026-11-01) cannot fill the
@@ -524,7 +527,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
         location_raw?: string | null;
         // Numeric arrives as a string from PostgREST; null on every live row today.
         min_experience_years?: number | string | null;
-      } | null;
+        // The Ashby hint aliases from BOARD_HINT_SELECT.
+      } & BoardHintColumns | null;
       // Missing data stays missing.
       if (job === null) return null;
       // The four fields the three stages read; absent keys are stated as null (missing).
@@ -537,6 +541,8 @@ Deno.serve(withErrorBoundary("applyy-matcher", async (req: Request): Promise<Res
         locationRaw: job.location_raw ?? null,
         // Absent years: the experience twin falls back to the JD parser.
         minExperienceYears: job.min_experience_years ?? null,
+        // Ashby's structured locations from the three selected JSON paths (pending R, 2026-11-20).
+        board: boardHintsFromSelect(job),
       };
     },
     // Counted by kind, so each lands in the same place a scorer outcome of that kind would.

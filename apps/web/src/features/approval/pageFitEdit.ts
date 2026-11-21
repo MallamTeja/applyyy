@@ -107,7 +107,13 @@ export function fitEditToOnePage(next: ResolvedResume, jdKeywords: readonly stri
   // The content rules this save would newly break, judged on what would actually be stored.
   const broken = newlyBroken(rules.previous, fit.resume, rules.master);
   // Any: refuse before the save, naming each rule in the gate's own words.
-  if (broken.length > 0) return { ok: false, reason: `this breaks the resume content rules (${broken.join('; ')}).` };
+  /* THE SWAP OFFER (2026-11-20, tailor pending #3): a bullet floor broken by a removal is not a dead end. The
+     chat applies a removal and a new line under the same entry as ONE save judged on the end state
+     (aiEdit.swapPartners + attestBullet.alsoRemove), so the refusal names that way out. Matched on the gate's
+     own "N bullets, needs M" wording, the same message contract ruleKey reads. */
+  const swapHint = broken.some((rule) => / bullets, needs /.test(rule)) ? ' To replace a line, ask for the removal and the new line in the same message; they are applied together.' : '';
+  // Any: refuse before the save, naming each rule in the gate's own words (and the swap, when it applies).
+  if (broken.length > 0) return { ok: false, reason: `this breaks the resume content rules (${broken.join('; ')}).${swapHint}` };
   // One page: save this resume, and say what was cut.
   return { ok: true, resume: fit.resume, trimmed: fit.trimmed, notice: trimNotice(fit.trimmed) };
 }

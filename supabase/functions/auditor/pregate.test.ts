@@ -8,7 +8,9 @@ import { describe, test } from "node:test";
 // Strict deep equality, so a changed verdict shape fails here.
 import assert from "node:assert/strict";
 // The verdict the auditor calls (its config loader is tested in _shared/pregate-config-loader.test.ts).
-import { auditorContentRulesDrop, auditorPreGateDrop, type AuditorJobEmbed } from "./pregate.ts";
+import { auditorAlreadyAppliedDrop, auditorAppliedKeys, auditorContentRulesDrop, auditorPreGateDrop, type AuditorJobEmbed } from "./pregate.ts";
+// The screener's key builder, so the history set below is built exactly as the auditor's caller builds it.
+import { atsJobKeyOf } from "../_shared/filter/cascade.ts";
 // The two shapes the content-rules fixtures are cast to.
 import type { MasterProfile, ResolvedResume } from "../_shared/contracts/shared-types.ts";
 // The preference shape, so the fixture is checked against the real type.
@@ -176,5 +178,109 @@ describe("auditorContentRulesDrop", () => {
     assert.throws(() => auditorContentRulesDrop({ ...COMPLIANT, certifications: undefined } as unknown as ResolvedResume, MASTER), /resume.certifications is not an array/);
     // A master missing its skills (2026-11-10, T13): named, never a bare TypeError from the AI skills floor.
     assert.throws(() => auditorContentRulesDrop(COMPLIANT, { ...MASTER, skills: undefined } as unknown as MasterProfile), /master.skills is not an array/);
+  });
+});
+
+// W2 (2026-11-20): the same-ATS-posting check re-run at the auditor. Canonical 111d1ff4 is a retitled copy of the
+// applied 8e9d58ce (greenhouse 5150422, live 2026-11-18); it was inserted before the original was applied, so the
+// screener's insert-time check never saw it.
+describe("auditorAlreadyAppliedDrop", () => {
+  // The history set as the caller builds it from applicationHistory(): the applied Canonical posting.
+  const APPLIED = new Set([atsJobKeyOf("greenhouse", "5150422")!]);
+  // The retitled copy as the auditor's embed carries it.
+  const RETITLED: AuditorJobEmbed = { title: "Web Engineer - JS, TS, Flutter", description_raw: "Build web apps.", location_raw: "Home based - Worldwide", min_experience_years: null, discovered_via: ["greenhouse"], ats_provider: "greenhouse", ats_job_id: "5150422" };
+
+  test("W2: a retitled copy of an applied job is blocked by the auditor (already_applied)", () => {
+    // Same provider and id as an applied row, different title and location.
+    const drop = auditorAlreadyAppliedDrop(RETITLED, APPLIED);
+    // Blocked under the screener's own code.
+    assert.equal(drop?.code, "already_applied");
+  });
+
+  test("W2: another ATS id, another provider, a missing id and a pasted job all pass", () => {
+    // A different posting at the same board.
+    assert.equal(auditorAlreadyAppliedDrop({ ...RETITLED, ats_job_id: "9999999" }, APPLIED), null);
+    // Same id on another board is another posting.
+    assert.equal(auditorAlreadyAppliedDrop({ ...RETITLED, ats_provider: "lever" }, APPLIED), null);
+    // No id: no key, never a degenerate match.
+    assert.equal(auditorAlreadyAppliedDrop({ ...RETITLED, ats_job_id: null }, APPLIED), null);
+    // Teja pasted it: his choice.
+    assert.equal(auditorAlreadyAppliedDrop({ ...RETITLED, discovered_via: ["manual"] }, APPLIED), null);
+  });
+
+  test("W2: a null job embed throws instead of passing", () => {
+    // A per-row failure, never a silent pass (CLAUDE.md section 6).
+    assert.throws(() => auditorAlreadyAppliedDrop(null, APPLIED));
+  });
+});
+
+// PENDING R ON THE AUDITOR PATH (2026-11-21): the auditor embed carries the three Ashby JSON paths BOARD_HINT_SELECT
+// picks out, and the re-gate must read them, or a "remote US only" Ashby row reaches Teja through this last gate.
+describe("auditorPreGateDrop reads the Ashby hint columns (pending R)", () => {
+  // Ramp 644d66ae as the auditor embed carries it: bare "Remote", workplaceType Remote, HQ country United States.
+  const RAMP: AuditorJobEmbed = { title: "Software Engineer", description_raw: "Build React and TypeScript products.", location_raw: "Remote", min_experience_years: null, discovered_via: ["ashby"], ats_provider: "ashby", ashby_secondary: null, ashby_workplace: "Remote", ashby_country: "United States" };
+  // One Ashby secondaryLocations entry in its stored shape.
+  const secondary = (location: string, country: string) => ({ location, address: { postalAddress: { addressCountry: country } } });
+
+  test("R: Ramp's bare-Remote Ashby row with addressCountry United States is dropped as work_auth", () => {
+    // The HQ lock applies through the select aliases.
+    const drop = auditorPreGateDrop(RAMP, TEJA_LIVE);
+    // Dropped under the work-auth code.
+    assert.equal(drop?.code, "work_auth");
+    // With the marker a veto greps for, so the group can be undone as one.
+    assert.match(drop?.reason ?? "", /^ashby_remote_hq_country:/);
+  });
+
+  test("R: Quora-shaped secondary locations US and Canada drop; one in India keeps", () => {
+    // Quora's free text names no place; its places live only in secondaryLocations.
+    const QUORA: AuditorJobEmbed = { ...RAMP, location_raw: "Remote - Multiple Locations", ashby_secondary: [secondary("Remote", "United States"), secondary("Remote", "Canada")] };
+    // Dropped: every named place is foreign.
+    assert.equal(auditorPreGateDrop(QUORA, TEJA_LIVE)?.code, "work_auth");
+    // An India place keeps it.
+    assert.equal(auditorPreGateDrop({ ...QUORA, ashby_secondary: [secondary("Bengaluru", "India")] }, TEJA_LIVE), null);
+  });
+
+  test("R: an unknown or malformed country keeps the row (Teja 11-05), and a non-Ashby row ignores the aliases", () => {
+    // No country: an unknown location passes.
+    assert.equal(auditorPreGateDrop({ ...RAMP, ashby_country: null }, TEJA_LIVE), null);
+    // A mis-shaped payload value is not an answer (CLAUDE.md section 6).
+    assert.equal(auditorPreGateDrop({ ...RAMP, ashby_country: { country: "US" } }, TEJA_LIVE), null);
+    // Another board's columns are never read as Ashby's.
+    assert.equal(auditorPreGateDrop({ ...RAMP, ats_provider: "greenhouse" }, TEJA_LIVE), null);
+  });
+});
+
+// W2: the history set the auditor builds from the screener's own applicationHistory() read.
+describe("auditorAppliedKeys", () => {
+  test("W2: keys are built from every history row with a provider and an id", () => {
+    // Two keyed rows and one id-less row.
+    const result = auditorAppliedKeys({ error: null, rows: [{ ats_provider: "greenhouse", ats_job_id: "5150422" }, { ats_provider: "lever", ats_job_id: "abc" }, { ats_provider: "greenhouse", ats_job_id: null }] });
+    // Read.
+    assert.equal(result.ok, true);
+    // Exactly the two keyed rows, built as the screener builds them.
+    assert.deepEqual(result.ok ? [...result.keys].sort() : null, [atsJobKeyOf("greenhouse", "5150422"), atsJobKeyOf("lever", "abc")].sort());
+  });
+
+  test("W2: a failed or rowless history read is a refusal, never an empty set that passes every row", () => {
+    // The query errored.
+    assert.equal(auditorAppliedKeys({ error: "timeout", rows: null }).ok, false);
+    // No error but no rows either: malformed, not "no history".
+    assert.equal(auditorAppliedKeys({ error: null, rows: null }).ok, false);
+  });
+});
+
+// The wiring in index.ts (Deno.serve cannot be imported under node, so it is read as source, as the matcher's test does).
+describe("auditor index wiring (pending R + W2)", () => {
+  test("R + W2: both queue selects carry ats_job_id and the Ashby hint paths; the main run reads history and calls the check", async () => {
+    // node:fs, imported here so the module stays importable elsewhere.
+    const { readFileSync } = await import("node:fs");
+    // index.ts beside this file, independent of the cwd.
+    const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    // Both embeds (regate_queue and the main run) end with the job id and the hint fragment.
+    assert.equal(source.match(/jobs\(title, description_raw, location_raw, min_experience_years, discovered_via, ats_job_id, \$\{BOARD_HINT_SELECT\}\)/g)?.length, 2);
+    // History is read through the screener's own query.
+    assert.match(source, /supabaseScreenQueries\(db as unknown as \{ from\(table: string\): unknown \}, new Date\(\)\)\.applicationHistory\(\)/);
+    // Each tailored row is checked against it.
+    assert.match(source, /auditorAlreadyAppliedDrop\(row\.jobs as unknown as AuditorJobEmbed \| null, appliedKeys\)/);
   });
 });

@@ -448,7 +448,13 @@ describe('the page routes each structural EditAction (source shape: no DOM to cl
     // T10: the body lives in editRows (editRow is a batch of one); a lone attest arrives as `only`.
     const editRow = pageSrc.slice(pageSrc.indexOf('async function editRows('), pageSrc.indexOf('const outcome =', pageSrc.indexOf('async function editRows(')));
     // The route, carrying who decided it (editSource, 2026-11-04) into the history note.
-    assert.match(editRow, /if \(only\?\.kind === 'attest_bullet'\)\s*return attestBulletRow\(applicationId, only, source, source\.original, current, stamp, supabase, editSource\);/);
+    // A plain new line passes an EMPTY alsoRemove (required since the bullet swap, 2026-11-20), so it removes nothing.
+    assert.match(editRow, /if \(only\?\.kind === 'attest_bullet'\)\s*return attestBulletRow\(applicationId, only, source, source\.original, current, stamp, supabase, editSource, \[\]\);/);
+    // The swap is recognised only as exactly one new line with every other action a bullet remove,
+    // so a mixed batch with a master write still falls through to the whole-batch refusal.
+    assert.match(editRow, /const swapAttest = attests\.length === 1 && swapRemoves\.length === actions\.length - 1 \? attests\[0\] : undefined;/);
+    // And the swap route itself: the removes ride in the attest's one save, so deleting this route goes red here.
+    assert.match(editRow, /if \(swapAttest\?\.kind === 'attest_bullet'\)\s*return attestBulletRow\(applicationId, swapAttest, source, source\.original, current, stamp, supabase, editSource, swapRemoves\);/);
     // And a row without FULL is refused before anything is built.
     assert.match(editRow, /if \(source\.full === null\)\s*return notSaved\(FULL_UNRESOLVED_REASON\);/);
   });

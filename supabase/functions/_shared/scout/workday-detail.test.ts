@@ -215,7 +215,8 @@ test("only Workday rows without text are read", async () => {
 // reached the queue. The detail response the read above already fetches names every site.
 
 // The gate the screener runs on location_raw, so the tests prove the leak closes, not just a string.
-import { screenWorkAuth } from "../screen/work-auth-gate.ts";
+// NO_BOARD_HINTS: the gate's `board` field is required since pending R (2026-11-21); a Workday row carries no Ashby hints.
+import { NO_BOARD_HINTS, screenWorkAuth } from "../screen/work-auth-gate.ts";
 
 // A detail body with a description AND the posting's sites, shaped like Fiserv R-10405605 (read 2026-11-07).
 function detailWithSites(location: unknown, additionalLocations: unknown, country: unknown): string {
@@ -233,7 +234,7 @@ function multiRow(slug = "R-1"): JobInsert {
 }
 
 // India is Teja's authorised country; the screener passes it the same way.
-const verdict = (row: JobInsert) => screenWorkAuth({ title: row.title, locationRaw: row.location_raw ?? null, description: null }, ["India"], "unknown");
+const verdict = (row: JobInsert) => screenWorkAuth({ title: row.title, locationRaw: row.location_raw ?? null, description: null, board: NO_BOARD_HINTS }, ["India"], "unknown");
 
 test("a multi-location listing gets every site from the detail, primary qualified by its country", async () => {
   // US primary, one India site.
