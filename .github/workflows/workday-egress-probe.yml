@@ -1,0 +1,37 @@
+# Workday egress probe (2026-11-21): runs scripts/workday-egress-probe.mjs from a GitHub runner IP.
+# Why: since eb56d28e the scout skips a robots.txt 429 uncounted and never sends the jobs POST, so
+# only this probe can say whether Cloudflare blocks runner IPs for the POST too (egress decision).
+# Compare its log with the same script run locally from Teja's home IP, within minutes of each other.
+name: workday-egress-probe
+
+# Manual only: no schedule, so it never adds load on its own and only runs when someone wants an answer.
+on:
+  # Dispatched by the orchestrator: `gh workflow run workday-egress-probe.yml --ref main`.
+  workflow_dispatch:
+
+# Read-only token: the probe touches no repo state, secret or DB.
+permissions:
+  # Checkout needs read; nothing else is granted.
+  contents: read
+
+jobs:
+  # The single probe job.
+  probe:
+    # The same runner image the scout uses, so the egress IP pool matches.
+    runs-on: ubuntu-latest
+    # Six requests with 2 s gaps and 15 s caps finish well inside this; a hang cannot burn minutes.
+    timeout-minutes: 5
+    steps:
+      # The script lives in the repo; pinned to the SHA scout.yml uses (repo convention: full-SHA pins).
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Node 24 for global fetch + AbortSignal.timeout; same pin and version as scout.yml.
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          # Matches the scout's runtime.
+          node-version: '24'
+      # No install step: the script uses only Node built-ins, so no lockfile is read or written.
+      - name: Probe three Workday tenants
+        # Exit code is 0 whatever the statuses: a 429 is the finding, read it from the log.
+        run: node scripts/workday-egress-probe.mjs
