@@ -1,0 +1,22 @@
+-- Adds 'icims' to public.ats_provider, so company_watchlist and jobs rows can name iCIMS
+-- careers tenants (scout adapter: supabase/functions/_shared/scout/adapters/icims.ts).
+--
+-- WHY IT EXISTS. Pending item 7 (Teja, 2026-11-14: "we need to add that too"). Atlassian has
+-- no Greenhouse or Lever board: its greenhouse watchlist row failed 40 polls and was disabled.
+-- Its postings live on the iCIMS tenant careers-apac-atlassian.icims.com, whose robots.txt
+-- allows the sitemap and job pages (live probe 2026-11-21). Without this value a watchlist row
+-- cannot say "icims", so the adapter would never be selected.
+--
+-- WHY ITS OWN FILE. `add value` cannot be USED until its transaction commits, and the CLI
+-- wraps each migration in one. Nothing here uses the value and nothing else is bundled with
+-- it, so there is no partial-apply path (same shape as 20261101124500_ats_provider_workday).
+--
+-- `if not exists` makes a re-run a no-op. No BEFORE/AFTER: the value APPENDS after 'workday',
+-- which is the order packages/shared-types ATS_PROVIDERS mirrors (and the order
+-- enum-parity.test.ts asserts).
+--
+-- DEPLOY ORDER: this migration first, then the scout-ats deploy, then the Atlassian repoint
+-- SQL (docs/handoff/2026-11-21-peer-1-r2.md). Code that writes 'icims' must not run before
+-- the value exists.
+-- Appended after 'workday'; the TS mirror lists it last for the same reason.
+alter type public.ats_provider add value if not exists 'icims';
