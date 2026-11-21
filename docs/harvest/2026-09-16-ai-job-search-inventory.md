@@ -1,6 +1,6 @@
 # Upstream inventory — `MadsLorentzen/ai-job-search`
 
-> **Status 2026-11-08:** Historical. The per-file verdicts on upstream (`968fb1bd`) still stand; the clone is still at the gitignored `reference/ai-job-search-upstream/`. Its facts about `applyyy` (table count, daily volume, three adapters) are as of 2026-09-16, and one claim about upstream adapter tests was corrected in [2026-09-16-approach-comparison.md](2026-09-16-approach-comparison.md). Current truth: [README.md](README.md). The body below is the original record, unedited.
+> **Status 2026-11-08:** Historical. The per-file verdicts on upstream (`968fb1bd`) still stand; the clone is still at the gitignored `reference/ai-job-search-upstream/`. Its facts about `applyyy` (table count, daily volume, three adapters) are as of 2026-09-16, and one claim about upstream adapter tests was corrected in `2026-09-16-approach-comparison.md` (deleted 2026-11-21; `git show 3a86eada:docs/harvest/2026-09-16-approach-comparison.md`). Current truth: [README.md](README.md). The body below is the original record, unedited.
 
 **Recon date:** 2026-09-16 · **Upstream pinned at:** `968fb1bd` (2026-09-16)
 **Local checkout:** `reference/ai-job-search-upstream/` — **gitignored, never vendored**

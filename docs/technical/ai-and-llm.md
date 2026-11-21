@@ -1,6 +1,6 @@
 # AI and LLM usage (Gemini)
 
-_Written 2026-11-08 against 2a9ac31._
+_Written 2026-11-08 against 2a9ac31. Last verified: 2026-11-21 (3a86eada)._
 
 ## What it is
 
@@ -145,6 +145,11 @@ secret change, not a deploy.
   runs after every attempt. Success clears the failure streak. A 429 sets
   `cooldown_until` from `retry_after`. A transient 5xx passes NULL and leaves
   the cooldown alone, because the outage is the model's, not the key's.
+- **429 with no `retry_after`:** `cooldownFor429()` in `pool.ts` pauses the key
+  for `RATE_LIMIT_PAUSE_SECONDS` once it reaches `RATE_LIMIT_PAUSE_AFTER`
+  consecutive failures (this 429 included), read from
+  `gemini_key_state.consecutive_failures` (07067197). Before that, a key that
+  kept 429ing without a server delay was claimed again at once.
 - **Two NULLs:** `claimKey()` tells "all keys cooling / budget spent" (normal,
   self-healing) apart from "no rows at all" (needs a human) with one extra count,
   taken only on the NULL path.
@@ -176,7 +181,18 @@ the 150 s Edge Function kill, so callers shrink it:
   between rows. `deadline.test.ts` reads `client.ts` and fails if the copied
   defaults drift.
 - `job-link-intake`: `timeoutMs: 20_000`, `maxRetries: 2`.
-- `resume-assist`: `timeoutMs: 20_000`, `maxRetries: 2` (raised from 1 in 254d5f4).
+- `resume-assist` (`assist.ts`): `timeoutMs: 15_000`, `firstChunkTimeoutMs: 8_000`,
+  `maxRetries: 2`, `interactive: true`. 15 s replaced 20 s to fail fast;
+  `firstChunkTimeoutMs` applies to the streaming path only.
+
+### Streaming
+
+When a caller passes `onText`, `client.ts` calls
+`:streamGenerateContent?alt=sse` instead of `:generateContent`, and calls
+`onText` with candidate 0's accumulated text as chunks arrive. The parsed
+result has the same shape as the non-streaming body. `firstChunkTimeoutMs`
+cuts an attempt that sends no bytes in time and tries the next key. The only
+caller today is `resume-assist` (resume chat, 77ff4d03).
 
 Outcome reasons a caller can see: `ok`, `invalid_request`, `all_keys_cooling`,
 `no_keys_configured`, `key_env_missing`, `claim_failed`,

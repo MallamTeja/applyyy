@@ -18,6 +18,8 @@
  * manual-action lane (needs_verification, blocked_needs_human) has them too since 2026-11-07, and the
  * "After you apply" lane queues left this page: two sets of buttons for one row would mean two lock owners
  * that cannot see each other's moves. Those queues, with each row's cause and receipt, stay on System health.
+ * ONE CLICK (2026-11-21, Teja 14:45): "I applied" is MarkAppliedButton, which writes on the click (no confirm);
+ * only "Failed / skip" still goes through RecoveryMoves' inline confirm. Same write path (useRecoveryMoves).
  *
  * LEFT YOUR QUEUE (2026-11-07): below the cards, a collapsed audit list of approved jobs that left the queue
  * without being applied (leftQueue.ts reads it, LeftQueueSection.tsx draws it). Its one move, Re-open
@@ -39,7 +41,7 @@ import { safeHref } from '../../app/safeHref';
 // The shared client, for the signed resume URL.
 import { supabase } from '../../data/supabase';
 // The two manual-action lanes whose resolves this page offers, shared with System health and the badge.
-import { MANUAL_ACTION_STATUSES, screenMoves } from '../../data/humanLanes';
+import { MANUAL_ACTION_STATUSES, heldReason, screenMoves } from '../../data/humanLanes';
 // The working resolve queues, reused whole, and their manual-action wording.
 import { RecoveryMoves, RecoveryNotes, manualActionMeaning, manualActionVerb, useRecoveryMoves } from '../health/RecoveryQueue';
 // The kit's "Copy all" text.
@@ -255,8 +257,32 @@ export interface KitResolve {
   readonly locked: boolean;
   // Its last move ended unknown: reload before moving it again.
   readonly frozen: boolean;
-  // The write, called only from the inline confirm's Confirm.
+  // The write: "applied" calls it on the click itself, "failed" from the inline confirm's Confirm.
   readonly onMove: (to: ApplicationStatus) => void;
+}
+
+/* "I applied (mark applied)" as ONE click (Teja 2026-11-21 14:45: marking applied is one click everywhere, no
+   confirm). Same look, name and meaning line as the RecoveryMoves button it replaces, so the card reads the same.
+   Still safe without a confirm: the write is useRecoveryMoves.move (a ref lock drops a double click) and
+   advance_application_status carries the row's updated_at, so a row that changed meanwhile is refused (PT409). */
+export function MarkAppliedButton(props: { readonly row: ManualApplyRow; readonly resolve: KitResolve }): ReactElement {
+  // Destructured for readability.
+  const { row, resolve } = props;
+  // A held edge (HELD_HUMAN_EDGES) keeps the button off with its reason, as RecoveryMoves does.
+  const held = heldReason(row.status, 'applied');
+  // The id the button's description points at; distinct from RecoveryMoves' `${confirmId}:${to}` ids.
+  const noteId = `kit-applied:${row.id}`;
+  return (
+    /* The recovery move layout, so it lines up with Failed / skip below it. */
+    <div className="recovery__move">
+      {/* type=button: never a form submit. */}
+      <button type="button" className="health-recovery-button" disabled={held !== null || resolve.locked} aria-label={`${manualActionVerb('applied')}: ${row.label}`} aria-describedby={noteId} onClick={() => resolve.onMove('applied')}>
+        {manualActionVerb('applied')}
+      </button>
+      {/* The held reason if any, else what the move means. */}
+      <span id={noteId} className={held !== null ? 'recovery__held' : 'recovery__why'}>{held ?? manualActionMeaning('applied')}</span>
+    </div>
+  );
 }
 
 // The ISO-8601 shape PostgREST returns for a timestamptz. Proven before display because Date.parse is
@@ -486,8 +512,11 @@ export function KitCard(props: { readonly row: ManualApplyRow; readonly kit: Kit
           {/* A lane row's worker cause and any matched receipt email are shown on System health, not here: say
               where, so "applied" is checked before it is clicked. */}
           {MANUAL_ACTION_STATUSES.includes(row.status) ? <p className="panel__note">Not sure it went through? Its cause and any receipt email are on <Link to="/health">System health</Link>.</p> : null}
-          {/* No lease: only applying has one, and applying gets no buttons. */}
-          <RecoveryMoves confirmId={`kit:${row.status}:${row.id}`} status={row.status} row={row} moves={moves} verb={manualActionVerb} meaning={manualActionMeaning} locked={resolve.locked} frozen={resolve.frozen} lease={null} onMove={resolve.onMove} />
+          {/* "I applied" is ONE click, no confirm (Teja 2026-11-21 14:45: "dont build this sick stuff"). */}
+          {moves.includes('applied') ? <MarkAppliedButton row={row} resolve={resolve} /> : null}
+          {/* The other resolve (Failed / skip) keeps the shared confirm: it gives the job up. No lease: only applying
+              has one, and applying gets no buttons. */}
+          <RecoveryMoves confirmId={`kit:${row.status}:${row.id}`} status={row.status} row={row} moves={moves.filter((to) => to !== 'applied')} verb={manualActionVerb} meaning={manualActionMeaning} locked={resolve.locked} frozen={resolve.frozen} lease={null} onMove={resolve.onMove} />
         </div>
       ) : null}
       {/* The kit body: skipped, none, unreadable, or the full form. Never a partial form. */}

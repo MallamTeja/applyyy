@@ -470,7 +470,7 @@ test("the tailoring prompt forbids removing a job-posting keyword the master bul
 // The retry prompt had no prompt-text test at all; this one pins its keep rule.
 test("the bullet rewrite prompt drops only the listed words and keeps every other master keyword", () => {
   // One bullet in the live shape: the master text has "AI", the failed wording had an untraceable word.
-  const prompt = buildBulletRewritePrompt([{ ref: "bullet_aczen_backend", masterText: "Built AI orchestration pipelines using FastAPI.", firstText: "Built robust AI orchestration pipelines using FastAPI.", bannedTokens: ["robust"] }]);
+  const prompt = buildBulletRewritePrompt([{ ref: "bullet_aczen_backend", masterText: "Built AI orchestration pipelines using FastAPI.", firstText: "Built robust AI orchestration pipelines using FastAPI.", bannedTokens: ["robust"], keepNumbers: [] }]);
   // The rule sits in the trusted system region, never the fenced user region.
   assert.ok(prompt.systemInstruction.includes("Drop only the listed words: keep every other keyword of the master text"));
 });

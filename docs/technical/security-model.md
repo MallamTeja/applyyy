@@ -1,6 +1,6 @@
 # Security model: auth and trust boundaries
 
-_Written 2026-11-08 against 2a9ac31._
+_Written 2026-11-08 against 2a9ac31. Last verified: 2026-11-21 (3a86eada)._
 
 ## What it is
 
@@ -146,6 +146,11 @@ The functions that read it: `advance_application_status`, `claim_applications`,
 and the `answer_bank.attested_by_human` trigger (`stamp_answer_attestation`, which marks a
 row human only on `missing`).
 
+The apply bot fills a form field from the answer bank only with a row Teja attested
+(`attested_by_human = true`) or a `needs_human` placeholder (`worker/src/plan-fill.ts`, since
+1a2393ad). An unattested row counts as absent: the field falls back to the profile, and with
+no profile value it refuses `no_answer` instead of filling an answer nobody confirmed.
+
 **Why fail-closed.** Before `20261102210000`, an empty key table returned `unconfigured`,
 which every caller allowed. So deleting one row switched the gate **off**. Now deleting the
 key **locks every agent out**. Running agents without the key takes two deliberate
@@ -182,6 +187,13 @@ closed. CLAUDE.md §7 has the `pg_proc` query that proves each guarded function 
   - TRUNCATE is revoked from `anon` and `authenticated` on every public table, **and** from
     the default privileges, so the next new table does not get it back. RLS does not cover
     TRUNCATE, which is why this matters.
+- `20261110130000_revoke_anon_table_privileges.sql`: `anon` loses **every** table and
+  sequence privilege in `public`. RLS was the only barrier, and no policy names `anon`. An
+  in-transaction `has_*_privilege` assert fails the migration if any grant survives.
+- `20261110150000_default_privileges_no_anon_in_public.sql`: role `postgres`'s default
+  privileges in `public` stop granting `anon` on new tables and sequences, so the next
+  `create table` in a migration does not re-open the grant. `supabase_admin`'s defaults
+  still grant `anon`; a migration cannot change another role's defaults (see the file header).
 
 ### 5. Database guards on status
 
@@ -250,6 +262,19 @@ robots-strict.
   URL it will really open (`worker/src/claim-loop.ts`, `worker/src/form-url.ts`,
   `worker/src/apply-one.ts`). A robots refusal is counted apart from "outcome unknown", so
   it never reads as "maybe sent".
+- **A robots.txt 429 or 5xx on a scout is "retry later", not a counted board failure.** It
+  throws `RobotsUnavailableError` (`supabase/functions/_shared/http/robots-unavailable.ts`,
+  shared by the worker): still a refusal, so the board is never contacted, but it adds
+  nothing to the board's failure count. Edge `scout-ats` skips the board without touching
+  `company_watchlist` (3951ba06); the worker scout does the same (eb56d28e).
+- **Per-host robots cache.** The robots verdict, including a 429/5xx status, is cached per
+  origin for the run (`transport.ts`; worker `worker/src/scout/board-pages.ts`), so one board
+  run fetches robots.txt once per host.
+- **Pacing and one honest User-Agent** (8a99dbe6). `_shared/http/request-pacer.ts` spaces
+  requests 1 s apart per lane (`PACED_REQUEST_GAP_MS`); the edge transport paces robots.txt and
+  every attempt, and the worker imports the same pacer. Robots.txt and the jobs request both
+  send one identifying UA, `DEFAULT_USER_AGENT` in `transport.ts`
+  (`applyy-scout/1.0 (+repo URL)`), edge and worker.
 
 Design history: `docs/robots/2026-09-17-robots-gate-design.md` and
 `docs/robots/2026-09-17-robots-gate-first-caller.md`.
@@ -375,6 +400,6 @@ Open questions for Teja:
 - [docs/features/web-app.md](../features/web-app.md)
 - [docs/ops/ci-and-workflows.md](../ops/ci-and-workflows.md)
 - [docs/security/2026-11-05-vulnerability-remeasure.md](../security/2026-11-05-vulnerability-remeasure.md)
-- [docs/security/2026-09-17-pipeline-identity-gaps.md](../security/2026-09-17-pipeline-identity-gaps.md)
+- `docs/security/2026-09-17-pipeline-identity-gaps.md` (deleted 2026-11-21 as superseded: Gap 2 closed by migration `20260917130000`, Gap 1 by the agent key, `CLAUDE.md` §7; read it with `git show 3a86eada:docs/security/2026-09-17-pipeline-identity-gaps.md`)
 - [docs/audit/2026-11-01-wiring-audit.md](../audit/2026-11-01-wiring-audit.md)
 - [docs/robots/2026-09-17-robots-gate-design.md](../robots/2026-09-17-robots-gate-design.md)

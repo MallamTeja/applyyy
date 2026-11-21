@@ -201,6 +201,18 @@ is still `approved`. The row enters `applying` only for the click itself.
       then `applying -> applied` with the resume path, the resume sha256 and the confirmation
       evidence in the event.
 
+**One application per posting (2026-11-21, `953eb770`).** Migration
+`20261121140000_guard_one_application_per_posting.sql` refuses a move into `applying` (errcode
+`23505`) when the same user already has a row for the same provider and ATS job id at `applying`,
+`blocked_needs_human` or `applied`. The worker maps it to `DuplicatePostingAppliedError`
+(`worker/src/duplicate-posting.ts`): the claim is released, the row stays `approved`, and the run
+counts it as `duplicate_already_applied`, so the circuit breaker does not trip.
+
+**Other fill guards.** The bot fills only answers Teja attested himself; a row a machine wrote
+counts as no row (`worker/src/plan-fill.ts`, `1a2393ad`). A page with an email field but no resume
+upload is not an application form (`no_resume_field`, `86ad2cae`). On Lever, a required radio group
+the extractor did not cover raises a blocker instead of submitting past it (`4795874c`).
+
 `playwright-page.ts` decides "confirmed" only from a positively shaped confirmation. A click
 that returned is not proof. It also watches network requests after the click: a request that
 could carry the form (and is not captcha traffic) means the outcome is unknown, not "not sent".
@@ -301,9 +313,7 @@ with the single-row `apply.yml` command above.
 
 ## Known gaps and open questions
 
-- **Stage 5 is not proven by the bot.** The 2026-11-08 00:45 handoff says no bot submit has
-  landed yet. A ready row exists (TrueFoundry; 7/7 required fields filled, robots allow, no
-  captcha) and waits for Teja's approval. Check with
+- **Stage 5 proof by the bot.** As of 2026-11-08 no bot submit had landed. Check with
   `select status, count(*) from applications group by 1` and the row's events, not a stored count.
 - **CI and reCAPTCHA.** No fix exists for the datacenter IP. The working routes are the headed
   `assist.ts` path or the Manual apply lane.
@@ -312,12 +322,6 @@ with the single-row `apply.yml` command above.
   `system_settings` row); do not assume.
 - **`applying -> failed` is an unused applier edge.** The worker never "positively establishes"
   a non-send after `applying`; it parks or leaves the outcome unknown.
-- **Rehearsal can pass a page with 0 fields** (handoff "Pending P1"). At `2a9ac31`,
-  `rehearse.ts` has no zero-field guard, while `apply-one.ts` parks such a page. A fix that
-  reuses the applier's form-shape gate is in progress (uncommitted).
-- **In progress, uncommitted (2026-11-08):** edits to `worker/src/apply-one.ts`,
-  `worker/src/assist/rehearse.ts`, `supabase/functions/dispatch-apply/handler.ts` and the Manual
-  apply feature. This doc describes the committed behaviour at `2a9ac31`.
 - **Lever** text inputs and the late-rendering Ashby SPA are known extraction traps; a page with
   0 fields is not proof that a job is closed.
 
@@ -330,4 +334,4 @@ with the single-row `apply.yml` command above.
 - [CI and workflows](../../ops/ci-and-workflows.md)
 - [Vision and why](../vision-and-why.md)
 - [User journey](../user-journey.md)
-- Newest handoff: `docs/handoff/2026-11-08-1745-orchestrator-handoff.md`
+- Handoff: the newest `docs/handoff/*orchestrator-handoff.md` (`ls docs/handoff | tail`) and `docs/handoff/2026-11-12-1305-pending-tasks.md`

@@ -233,21 +233,29 @@ export interface LinkCandidate {
 // The real statuses, for the shape check.
 const STATUSES: ReadonlySet<string> = new Set(APPLICATION_STATUSES);
 
-/* The lookup's rows, validated: a row without a string id, a real status and a title is dropped, never guessed. */
+/* The lookup's rows, validated. The lookup reads JOBS by slug with their applications embedded (2026-11-21, S6):
+   the old applications-side read hit "statement timeout" live, because PostgREST puts an embedded filter inside a
+   LIMITed lateral, so Postgres scanned every application (7.2 s); filtering jobs first uses
+   jobs_user_company_slug_idx (32 ms). A job without a string title, or an application without a string id and a
+   real status, is dropped, never guessed. */
 export function parseLinkCandidates(raw: unknown): LinkCandidate[] {
   // Not a list: no candidates.
   if (!Array.isArray(raw)) return [];
-  // Each row proven field by field.
+  // Each job, then each of its applications, proven field by field.
   const out: LinkCandidate[] = [];
   for (const row of raw) {
     // Loose read, then checks.
-    const r = row as { id?: unknown; status?: unknown; jobs?: unknown } | null;
-    // The join is an object, or a one-element array in the to-many shape.
-    const job = (Array.isArray(r?.jobs) ? r.jobs[0] : r?.jobs) as { title?: unknown } | null | undefined;
-    // All three, or the row is skipped.
-    if (typeof r?.id !== 'string' || typeof r.status !== 'string' || !STATUSES.has(r.status) || typeof job?.title !== 'string') continue;
-    // Shaped.
-    out.push({ id: r.id, status: r.status as ApplicationStatus, title: job.title });
+    const job = row as { title?: unknown; applications?: unknown } | null;
+    // A job needs its title (the button names it) and a list of applications (the to-many embed).
+    if (typeof job?.title !== 'string' || !Array.isArray(job.applications)) continue;
+    for (const app of job.applications) {
+      // Loose read of one application.
+      const a = app as { id?: unknown; status?: unknown } | null;
+      // Both fields, and a status the app knows, or the application is skipped.
+      if (typeof a?.id !== 'string' || typeof a.status !== 'string' || !STATUSES.has(a.status)) continue;
+      // Shaped, titled by its job.
+      out.push({ id: a.id, status: a.status as ApplicationStatus, title: job.title });
+    }
   }
   // The valid ones, in the order read.
   return out;
@@ -264,7 +272,42 @@ export function companySlugOf(company: string): string {
 // Words a sender's display name adds after the company ("Acme Recruiting", "Globex Careers Team").
 const SENDER_SUFFIX = /\s+(?:recruiting|recruitment|careers?|talent(?:\s+acquisition)?|hiring(?:\s+team)?|hr|jobs|team|notifications?)(?:\s+team)?$/i;
 
-/* The Add to Applied form's starting values. Only a guess to edit: Teja confirms both before the call. */
+// The receipt wording ATS subjects wrap a role in. Longest first, so "we have received your application" wins over
+// "your application" at the same spot. Global: a subject can carry two ("Thank you for your application").
+const SUBJECT_WRAPPER = /\b(?:we(?:'ve|\s+have)\s+received\s+your\s+application|application\s+(?:received|submitted|confirmation|update)|thanks?(?:\s+you)?\s+for\s+(?:your\s+application|applying|your\s+interest)|your\s+application(?:\s+(?:has\s+been|was))?(?:\s+(?:received|submitted))?)\b/gi;
+
+/* The role out of an application email's subject (2026-11-21, orch ruling on S6: Add to Applied creates the job in
+   ONE click, so the title is written unseen and must not be "Backend Engineer - Application received").
+   The subject is split on its separators (" - ", "|", "||", ":"); the first part left with letters after the
+   receipt wording, a leading "to/for the", the company, a trailing "at <company>" and "position/role" are cut is
+   the title. Nothing left, or only the company: "<Company> role". Editable later on the Applied page. */
+export function titleFromSubject(subject: string, company: string): string {
+  // The company as typed, compared case-blind.
+  const co = company.trim();
+  // Regex-escaped, so "C++ Labs" or "A.B. Corp" match literally.
+  const coRe = co.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Reply/forward prefixes are never part of the role.
+  const parts = subject.replace(/^(?:(?:re|fwd?)\s*:\s*)+/i, '').split(/\s*(?:\|\|?|\s[-–—]\s|:)\s*/);
+  for (const part of parts) {
+    // The receipt wording out.
+    let t = part.replace(SUBJECT_WRAPPER, ' ').replace(/\s+/g, ' ').trim();
+    // "to the", "for", "for the" left in front by "applying to the X".
+    t = t.replace(/^(?:(?:to|for|in)\s+)?(?:(?:the|our|a|an)\s+)?/i, '');
+    // "Acme for ML Engineer" from "Your application to Acme for ML Engineer".
+    if (co !== '') t = t.replace(new RegExp(`^${coRe}\\s+(?:for|-)\\s+`, 'i'), '');
+    // "... at Acme!" / "... with Acme": the employer, not the role.
+    t = t.replace(/\s+(?:at|with)\s+.+$/i, '');
+    // Trailing punctuation, then a trailing role word ("Data Engineer position").
+    t = t.replace(/[\s!.,]+$/, '').replace(/\s+(?:position|role|job|opening)$/i, '').trim();
+    // Letters, and not just the company's name: this part is the role.
+    if (/[a-z]/i.test(t) && t.toLowerCase() !== co.toLowerCase()) return t.slice(0, 200);
+  }
+  // Nothing parsed: a placeholder that says what it is, never the wrapper.
+  return `${co !== '' ? co : 'Unknown'} role`.slice(0, 200);
+}
+
+/* Add to Applied's values: written on ONE click since 2026-11-21 (the form opens only when there is no usable
+   company slug or the duplicate lookup failed). Both stay editable afterwards on the Applied page. */
 export function prefillOf(event: EmailEventRow): { readonly company: string; readonly title: string } {
   // The display name without its recruiting suffix.
   const name = event.from_address.includes('<') ? senderOf(event.from_address).replace(SENDER_SUFFIX, '').trim() : '';
@@ -274,6 +317,6 @@ export function prefillOf(event: EmailEventRow): { readonly company: string; rea
   const label = domain.split('.').slice(-2, -1)[0] ?? '';
   // Name first, then the domain label.
   const company = name !== '' ? name : label.charAt(0).toUpperCase() + label.slice(1);
-  // The subject as the title, bounded to what the RPC accepts.
-  return { company: company.slice(0, 200), title: event.subject.trim().slice(0, 200) };
+  // The role out of the subject (never the raw wrapper), bounded to what the RPC accepts.
+  return { company: company.slice(0, 200), title: titleFromSubject(event.subject, company) };
 }

@@ -24,6 +24,10 @@ queries in §7.
 
 ## 2. Root causes (code first, prompt second)
 
+_Snapshot of 2026-11-18. Since then `SKILLS_PER_GROUP_CAP` is 10 (Teja 2026-11-21), `shapeSkillGroups` takes a
+`SkillProfile` (`skill-profile.ts`), and several §5 items shipped (provenance gates `e1f4b520`, `add_group`, tailor
+temperature, `empty_summary`). Read the code before quoting a line number below._
+
 1. Code, not the LLM, picks skills: `shapeSkillGroups`, `supabase/functions/_shared/tailor/tailorer.ts:224-327`.
 2. Every group must fit ONE printed line (`tailorer.ts:291`, `packages/resume-template/src/page-fit.ts`) = ~3-5 skills, despite `SKILLS_PER_GROUP_CAP = 7` (`tailorer.ts:204`).
 3. 6 group seats, AI forced into one; group relevance = exact master-name match in the JD (`tailorer.ts:240`); spare seats go in master order.

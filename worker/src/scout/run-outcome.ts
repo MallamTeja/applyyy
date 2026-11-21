@@ -22,15 +22,20 @@ import { deadlineNote, type BatchOutcome, type Deadline } from '../../../supabas
 // The one formatter every screening run uses to append rule warnings to error_detail.
 import { withRuleWarnings } from '../../../supabase/functions/_shared/screen/run-summary.ts';
 
-// 12 minutes, counted from main()'s start. Measured 2026-11-02: the scout step averages
-// ~3.7 s per board (917 s / 246), so 12 min reaches ~190 boards; two runs a day give ~380
-// board-polls against 262 enabled boards, and boards are read oldest-`last_polled_at` first,
-// so a board skipped now goes first next run and none waits past ~24 h. The job timeout in
-// .github/workflows/scout.yml (25 min) leaves ~13 min above this for setup (14 s measured)
-// and the board in flight. Change the two together.
-// ponytail: fixed constant; past ~380 enabled boards some wait >24 h, so raise this (and
-// the timeout) or add a run then.
-export const SCOUT_BUDGET_MS = 12 * 60_000;
+// 16 minutes, counted from main()'s start (S10, raised from 12 on 2026-11-21).
+// Why 16: run 44886173953 (2026-11-21) hit the 12-min deadline at 209 of 283 boards. The
+// 1 s Workday/iCIMS pacing (8a99dbe6) brought the average to ~3.4 s per board, and
+// 283 x 3.4 s = ~962 s = ~16 min, so 16 min reaches every enabled board in one run again.
+// History: 12 min was set 2026-11-02 (W40) from ~3.7 s per board (917 s / 246) when the
+// workflow ran twice a day. Boards are still read oldest-`last_polled_at` first, so any
+// board a run skips goes first in the next one (ten runs a day since 2026-11-12).
+// The job timeout in .github/workflows/scout.yml (25 min) leaves ~9 min above this for
+// setup (14 s measured) and the board in flight, which still covers undici's 300 s hang.
+// Change the two together. A test in worker/test/scout-run-outcome.test.ts pins 16.
+// ponytail: fixed constant; past ~280 boards at ~3.4 s a run stops short again, and the
+// oldest-first order spreads the rest over the next run. Raise this (and the timeout) if
+// boards start waiting more than a day.
+export const SCOUT_BUDGET_MS = 16 * 60_000;
 
 // The boards a run may start, and a tally of how far it got.
 export interface BudgetedBoards<T> {

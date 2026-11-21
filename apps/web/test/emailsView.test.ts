@@ -120,25 +120,55 @@ describe('unread count and Add to Applied eligibility', () => {
 
   it('prefills the company from the sender and the title from the subject, both editable later', () => {
     // A display name with a recruiting suffix.
-    assert.deepEqual(prefillOf(row({ from_address: 'Acme Recruiting <no-reply@greenhouse.io>', subject: 'Backend Engineer - Application received' })), { company: 'Acme', title: 'Backend Engineer - Application received' });
+    // The title is the subject's role with the ATS wrapper stripped (2026-11-21: Add to Applied writes on one click).
+    assert.deepEqual(prefillOf(row({ from_address: 'Acme Recruiting <no-reply@greenhouse.io>', subject: 'Backend Engineer - Application received' })), { company: 'Acme', title: 'Backend Engineer' });
     // No display name: the sender's domain label.
     assert.equal(prefillOf(row({ from_address: 'careers@globex.com' })).company, 'Globex');
   });
 });
 
+/* 2026-11-21 (orch ruling on S6): Add to Applied creates a new job in ONE click, so the title is written unseen.
+   It must be the role, not the ATS wrapper. RED-ON-REVERT: returning the raw subject fails every row below. */
+describe('titleFromSubject: the role out of a typical ATS subject', () => {
+  it('strips receipt wrappers, "at <company>" and role words; falls back to "<Company> role"', async () => {
+    // Imported here so the earlier tests do not depend on the new export.
+    const { titleFromSubject } = await import('../src/features/emails/emailView.ts');
+    // Subject -> expected title, for company Acme.
+    const cases: [string, string][] = [
+      ['Application received for Backend Engineer', 'Backend Engineer'],
+      ['Thank you for applying to the Senior Data Engineer position at Acme', 'Senior Data Engineer'],
+      ['Thanks for applying for Full-Stack Developer at Acme!', 'Full-Stack Developer'],
+      ['We have received your Application || AI Researcher Intern', 'AI Researcher Intern'],
+      ['Backend Engineer - Application received', 'Backend Engineer'],
+      ['Re: Your application: Platform Engineer, Infra', 'Platform Engineer, Infra'],
+      ['Your application to Acme for ML Engineer', 'ML Engineer'],
+      // "Application" inside a real title is kept: only the receipt PHRASES are cut.
+      ['Application received: Application Security Engineer', 'Application Security Engineer'],
+      // Nothing but the wrapper and the company: the fallback, never the wrapper.
+      ['Thank you for applying to Acme', 'Acme role'],
+      ['Application received', 'Acme role'],
+    ];
+    // Each one exactly.
+    for (const [subject, title] of cases) assert.equal(titleFromSubject(subject, 'Acme'), title, subject);
+  });
+});
+
 describe('link candidates: the duplicate guard before Add to Applied (2026-11-05)', () => {
-  it('keeps only well-formed applications, in either join shape, and drops the rest', async () => {
+  /* 2026-11-21 (S6): the lookup reads JOBS by slug and embeds their applications. The old applications-side read
+     timed out live (7.2 s EXPLAIN ANALYZE: a seq scan over every application, the jobs filter trapped inside a
+     LIMITed lateral); the jobs-side read uses jobs_user_company_slug_idx (32 ms). So the parser takes job rows. */
+  it('flattens job rows with their embedded applications, keeping only well-formed ones', async () => {
     // Imported here so the earlier tests do not depend on the new export.
     const { parseLinkCandidates } = await import('../src/features/emails/emailView.ts');
-    // PostgREST's object join, its array join, and three malformed rows.
+    // Job rows as PostgREST embeds a to-many join, plus malformed rows and applications.
     const parsed = parseLinkCandidates([
-      { id: 'a1', status: 'approved', jobs: { title: 'AI Researcher Intern' } },
-      { id: 'a2', status: 'applied', jobs: [{ title: 'Backend Engineer' }] },
-      { id: 'a3', status: 'not_a_status', jobs: { title: 'X' } },
-      { id: 4, status: 'applied', jobs: { title: 'Y' } },
+      { title: 'AI Researcher Intern', applications: [{ id: 'a1', status: 'approved' }] },
+      { title: 'Backend Engineer', applications: [{ id: 'a2', status: 'applied' }, { id: 'a3', status: 'not_a_status' }, { id: 4, status: 'applied' }] },
+      { title: 7, applications: [{ id: 'a5', status: 'applied' }] },
+      { title: 'No apps', applications: 'x' },
       null,
     ]);
-    // The two real ones, with their titles.
+    // The two real ones, with their job titles.
     assert.deepEqual(parsed, [{ id: 'a1', status: 'approved', title: 'AI Researcher Intern' }, { id: 'a2', status: 'applied', title: 'Backend Engineer' }]);
     // Not a list: none, never a crash.
     assert.deepEqual(parseLinkCandidates({}), []);

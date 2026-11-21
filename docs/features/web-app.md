@@ -1,6 +1,6 @@
 # Web app reference (`apps/web`)
 
-_Last verified against code: 2026-11-08 (2936e8c)._
+_Last verified against code: 2026-11-21 (3a86eada)._
 
 This page maps every screen of the operator console. For each folder in
 `apps/web/src/features/` (and the shell in `apps/web/src/app/`) it says what the
@@ -75,6 +75,10 @@ Run the web tests with `node --test "test/**/*.test.ts"` from `apps/web/`
 | Configuration | `/blocklist` | `BlocklistPage` | `settings/` |
 | (none) | `/` | redirects to `/approvals` | `src/App.tsx` |
 | (none) | any other path | `NotFound` ("Page not found") | `src/App.tsx` |
+
+Every route is code-split with `React.lazy` (`lazyPage` in `src/App.tsx`, since
+2026-11-08): page code lives in `/assets/<Page>-<hash>.js`, not in `index-*.js`, so a
+prod sentinel grep must read the page's own chunk.
 
 Folders with no route of their own: `auth/` (the sign-in gate), `resume-preview/`
 (shared component), `profile/` (PDF extraction helper).
@@ -181,6 +185,22 @@ Rules that matter:
 - After an approve, the page asks `dispatch-apply` to start the runs. The function
   decides what to start (the kit builder always; the live applier only when
   `system_settings.auto_apply_on_approve` is on) (`dispatchApply.ts`).
+- **AI chat** (`AiEditPanel.tsx`, `aiEdit.ts`):
+  - Prompts queue FIFO. Each one is sent only after the previous reply and its
+    auto-applied edits land (5414b39c).
+  - Replies stream: the panel asks `resume-assist` for NDJSON and shows the latest
+    status line and the reply as it is written (77ff4d03). A stream that ends without
+    its `result` line is reported in plain words.
+  - `set_role` changes one experience entry's job title to the owner's dictated
+    wording; it always waits for a click (c28c5ab8).
+- **Skill adds that would wrap.** A skill add (chat card, manual add, attest) that
+  would push its group onto a second line is refused, naming the full group. Saying
+  "all" allows the wrap with a notice (c01372e7).
+- **Rows pinned to an older master.** Adding a master skill saves at the row's pinned
+  master: only that skill changes, no repin (2523886a). A new bullet is refused with
+  a message naming the pinned version and the two ways forward: the Master Profile
+  page, or a re-tailor (714a3d72).
+- The approvals bulk drop was removed on 2026-11-21 (3a86eada, Teja's ruling).
 
 **Route.** `/approvals` (the default route).
 
@@ -305,7 +325,15 @@ buttons come from the human edges in `application_status_transitions`.
 **What the user does.** Browses scouted jobs in two lanes (`discoveredList.ts`):
 **Ready to tailor** (`passed_filters`, opens first) and **Discovered**
 (`discovered`). On each card the user can read the full JD as plain text, reject
-the job in one click (with Undo), or send it through the agents. Page-level tools:
+the job in one click (with Undo), or send it through the agents.
+
+Scouted jobs wait in Ready to tailor; only Add-job-link rows go straight on to
+approval. Jobs with no usable JD land there too, flagged with a **No description**
+pill (fa315449). The pill is `hasNoDescription()` in `discoveredList.ts`, which calls
+`isThinDescription()` from `supabase/functions/_shared/screen/jd-substance.ts`, the
+same thin-JD rule the screener uses, so the two never disagree.
+
+Page-level tools:
 
 - **Add a job by link** (`AddJobLinkPanel.tsx`): paste one job URL. The
   `job-link-intake` function adds the row at `passed_filters` and runs matcher,
@@ -392,6 +420,10 @@ the stuck rows in one status, with one working button per human move:
 `applying`, `needs_verification`, `blocked_needs_human`, `failed`. Moves with no
 way back ask for an inline confirm.
 
+Agent freshness thresholds live in `src/data/agentFreshness.ts` as
+`staleAfterHours` per agent. `scout_ats` goes stale after 12 h since the scout runs
+ten times a day (06ab7913).
+
 **Route.** `/health`.
 
 **Calls.**
@@ -422,6 +454,14 @@ on demand, and uses **Add to Applied** for a job email about an application the
 pipeline does not track. Each email shows its real class label, not a blanket
 "Interview Invite" (`emailView.ts` header).
 
+- **Insights panel** (`EmailInsights.tsx`, numbers from `emailStats.ts`, 232356dc):
+  job emails, companies, interviews and offers, rejections, tracked share and sent by
+  you, plus bar cards by type, top companies and job emails per week.
+- **"Sent by you" badge.** Mail Teja sent (a reply or forward) is badged and never
+  offered to Applied. The page recognises it by the signed-in user's address; the
+  tracker keeps such mail unclassified as `owner_sent` (ffa32af1).
+- Received times are shown in IST.
+
 **Route.** `/emails`.
 
 **Calls.**
@@ -435,7 +475,7 @@ pipeline does not track. Each email shows its real class label, not a blanket
 | Edge function | `gmail-sync` | `emailSync.ts` |
 
 **Key files.** `EmailMonitoringPage.tsx`, `emailView.ts` (pure view rules),
-`emailSync.ts`.
+`EmailInsights.tsx`, `emailStats.ts`, `emailSync.ts`.
 
 **Tests.** `emailsView.test.ts`, `emailsTrack.test.ts`, `emailsE2e.test.ts`,
 `emailSync.test.ts`.

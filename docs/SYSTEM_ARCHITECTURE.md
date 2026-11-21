@@ -1,6 +1,6 @@
 # applyyy — System Architecture
 
-_Last verified against code: 2026-11-08 (2a9ac31)._
+_Last verified against code: 2026-11-21 (3a86eada)._
 
 The current architecture of the job-application pipeline. **This file holds no counts.** Every
 inventory points at the command that regenerates it, so run the command rather than trusting
@@ -104,7 +104,7 @@ posture is set per function in `supabase/config.toml` (`verify_jwt`).
 | `screener` | `screener` | `deduped` | `passed_filters`, `dropped_filter` (tech gate → work-auth/country gate → cascade, incl. `experience_ceiling` read from the JD) | Run pipeline · `prescreen-drain.yml` (dispatch); `?application_id=` targets one row |
 | `matcher` | `matcher` | `passed_filters` | `scored`, `dropped_filter`, `failed`. A score below `MATCH_ADVANCE_FLOOR` (`_shared/match/score-threshold.ts`) does not advance | Run pipeline · run-one · `postscreen-drain.yml` · `pregate-sweep.yml` (`?mode=pregate_only`) · job-link-intake (background) |
 | `tailor` | `tailor` | `scored` | `tailored` (+ `tailored_profile`, `tailor_refs`, `master_version`) | Run pipeline · run-one · `postscreen-drain.yml` · job-link-intake (background) |
-| `auditor` | `auditor` | `tailored`, `audit_clean`, `audit_flagged` | `audit_clean`/`audit_flagged` → `awaiting_approval` | Run pipeline · run-one · `postscreen-drain.yml` · job-link-intake (background) |
+| `auditor` | `auditor` | `tailored`, `audit_clean`, `audit_flagged`; `awaiting_approval` (`?mode=regate_queue`) | `audit_clean`/`audit_flagged` → `awaiting_approval`. `?mode=regate_queue` re-runs today's work-auth gate over the approval queue and drops already-applied copies: `awaiting_approval` → `dropped_filter`, only with `drop_reason` `work_auth` or `already_applied` (trigger `guard_auditor_queue_drop_reason`; migrations `20261111220000`, `20261121110000`) | Run pipeline · run-one · `postscreen-drain.yml` (full drain manual; daily cron = `regate_queue` only) · job-link-intake (background) |
 | `job-link-intake` | `human` (user-triggered) | — (inserts, or revives `discovered`/`deduped`/`dropped_filter`/`failed`) | inserts or moves to `passed_filters` as `human`, then runs matcher → tailor → auditor via `EdgeRuntime.waitUntil` | Add-a-job-by-link panel |
 | `resume-assist` | — | — | none (proposes edit ops; the human applies them through the guarded save) | approval page AI edit box |
 | `dispatch-apply` | — | counts `approved` rows whose job is still live | none. Starts `apply-kit.yml` on every call; starts `apply.yml` as a live drain only when `system_settings.auto_apply_on_approve` is exactly true | approval page, once after a successful approve |
@@ -132,7 +132,7 @@ Notes:
   in-flight rows with no ATS when their own posting page answers 404 or 410. The page fetch
   goes through the SSRF guard in `scout-ats/page-fetch.ts`. Both are capped per run.
 - **ATS adapters** live in `supabase/functions/_shared/ats/registry.ts`: Greenhouse, Lever,
-  Ashby, and Workday (discovery only). SmartRecruiters is not registered: its robots.txt says
+  Ashby, iCIMS (sitemap listing + JSON-LD detail pages), and Workday (discovery only). SmartRecruiters is not registered: its robots.txt says
   `Disallow: /` (ruling 2026-11-01). Re-check: `grep -n import supabase/functions/_shared/ats/registry.ts`.
 - **Gemini callers:** `grep -rlE "_shared/gemini|gemini/client" supabase/functions/*/index.ts supabase/functions/_shared/follow-up`.
 
@@ -161,8 +161,8 @@ browser, a worker CLI or a GitHub Actions workflow invokes them.
 | Class | Workflows |
 |---|---|
 | CI | `ci.yml` |
-| Scheduled (+ dispatch) | `scout`, `scout-remote`, `scout-ats-daily` (liveness only), `apply`, `apply-kit`, `satellites`, `keepalive`, `jobs-tombstone` |
-| Dispatch only | `run-one`, `prescreen-drain`, `postscreen-drain`, `pregate-sweep` |
+| Scheduled (+ dispatch) | `scout`, `scout-remote`, `scout-ats-daily` (liveness only), `apply`, `apply-kit`, `satellites`, `keepalive`, `jobs-tombstone`, `postscreen-drain` (cron runs the approval-queue re-gate only; the full drain is manual) |
+| Dispatch only | `run-one`, `prescreen-drain`, `pregate-sweep`, `workday-egress-probe` (runs `scripts/workday-egress-probe.mjs` from a runner IP) |
 
 Schedules: `grep -n "cron:" .github/workflows/*.yml`. GitHub's scheduled runs can start
 hours late; read actual start times with `gh run list --workflow <file>`.
@@ -176,10 +176,11 @@ Gates that decide whether a run does anything real:
   re-dispatches itself (the `redispatch` job), so leftovers go to the next run.
 - **`satellites.yml`**. The scheduled job runs only while the repo variable
   `APPLYY_SATELLITES_LIVE` is exactly `true`. A manual dispatch always runs.
-- **The drains:** `prescreen-drain` and `pregate-sweep` are manual only. `postscreen-drain` runs
-  after each scout finishes, once a day at 04:30 UTC, and on manual dispatch. That is Teja's ruling of
-  2026-11-09, which reversed the 2026-11-05 manual-only ruling; the trigger set is pinned by
-  `apps/web/test/postscreenDrainTriggers.test.ts`. They call edge functions with the app-user secrets and fail closed.
+- **The drains:** `prescreen-drain` and `pregate-sweep` are manual only. `postscreen-drain` drains
+  (matcher → tailor → auditor) only on manual dispatch: scouted passes wait at `passed_filters` for Teja
+  (ruling 2026-11-18, which reversed the 2026-11-09 drain-after-every-scout ruling). Its daily cron
+  (`30 4 * * *`) calls `auditor?mode=regate_queue` once and exits before any stage call. Nothing starts on a
+  scout finishing. The trigger set is pinned by `apps/web/test/postscreenDrainTriggers.test.ts`. They call edge functions with the app-user secrets and fail closed.
 - **`jobs-tombstone.yml`** runs weekly. It purges the heavy payload (`description_raw`,
   `raw_payload`) of old `dropped_filter` jobs through `public.tombstone_dropped_jobs` and logs
   to `agent_runs` as `jobs_tombstone`. The row stays, so its fingerprint still dedupes the
@@ -217,7 +218,7 @@ stateDiagram-v2
   audit_flagged --> tailored: human
   awaiting_approval --> passed_filters: human
   awaiting_approval --> approved: human
-  awaiting_approval --> dropped_filter: human
+  awaiting_approval --> dropped_filter: auditor, human
   approved --> passed_filters: human
   approved --> applying: applier
   approved --> applied: human
@@ -236,6 +237,7 @@ stateDiagram-v2
   employer_screening --> rejected: tracker, human
   oa_pending --> interview: tracker, human
   oa_pending --> rejected: tracker, human
+  interview --> applied: human
   interview --> oa_pending: tracker, human
   interview --> offer: tracker, human
   interview --> rejected: tracker, human
@@ -378,15 +380,15 @@ which writes `answer_bank`. A row there is a report, never an answer: the planne
 - **Web:** Vercel auto-deploys on push to `main`. Prove what is live with a present and an
   absent bundle sentinel (repo `CLAUDE.md` §4). The Vercel Node function
   `api/render-job-page.ts` (headless Chromium, SSRF-layered) ships on the same push.
-- **Database and functions:** deployed only by the orchestrator session, from a **pinned clean
-  worktree** — never the shared tree, which carries peers' uncommitted edits. A peer never
-  deploys. Recipe in repo `CLAUDE.md` §3:
-  1. `git worktree add --detach <tmp> <sha>`; copy `supabase/.temp/{project-ref,pooler-url,linked-project.json,postgres-version}` in.
+- **Database and functions:** deployed only by the orchestrator session, from a **clean export
+  pinned to a SHA** — never the shared tree, which carries peers' uncommitted edits. A peer never
+  deploys. Supabase CLI stays on v2 (2.119.0); always pass `--linked`. Recipe in repo `CLAUDE.md` §3:
+  1. `git archive <sha> | tar -x -C <dir>` into a fresh folder (Git Bash: build `<dir>` with `cygpath -u "$TEMP"`); copy `supabase/.temp/{project-ref,pooler-url,linked-project.json,postgres-version}` in.
   2. Unset the wrong-account `SUPABASE_ACCESS_TOKEN`.
   3. `supabase db push --linked --dry-run` → push only if it lists exactly the expected files.
   4. `supabase functions deploy <fn> --project-ref xynqxekcqizwhtskzqrq --use-api --import-map supabase/functions/deno.json`.
      The `--import-map` flag is mandatory: `--use-api` does not read `deno.json` by itself.
-  5. Verify by a SQL **shape** check, then `git worktree remove <tmp>`.
+  5. Verify by a SQL **shape** check. The export registers nothing in `.git/worktrees`, so there is nothing to remove from git.
 - **Deploy order.** Code that calls a new DB object ships after its migration (for example,
   `20261105230000` before the worker hook that calls `record_unanswered_questions`). For an
   edge function and the web, the strict reader of a new response shape ships first.

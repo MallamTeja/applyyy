@@ -27,7 +27,7 @@ It needs the Supabase CLI to be logged in to the right account. Check with
 `env -u SUPABASE_ACCESS_TOKEN supabase functions list --project-ref xynqxekcqizwhtskzqrq`.
 
 Run it **before every deploy session** (CLAUDE.md §3). A function with `commits_since > 0`
-is missing that many commits. Redeploy it from a clean worktree pinned to the SHA you reviewed.
+is missing that many commits. Redeploy it from a `git archive` export of the SHA you reviewed (CLAUDE.md §3).
 
 ## Reading the output
 

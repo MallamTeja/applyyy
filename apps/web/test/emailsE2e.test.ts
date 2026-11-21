@@ -113,12 +113,13 @@ describe('Emails page in a browser (fake session, every Supabase call answered l
         // The changed rows, as return=representation gives them.
         return json(200, rows.filter((r) => changed.includes(String(r.id))));
       }
-      // The duplicate lookup: this user's applications at the email's company slug.
-      if (url.pathname === '/rest/v1/applications') {
+      // The duplicate lookup: this user's JOBS at the email's company slug, with their applications embedded
+      // (2026-11-21: the applications-side read timed out live; jobs-side uses the (user_id, company_slug) index).
+      if (url.pathname === '/rest/v1/jobs') {
         // Kept, to pin the filter.
         appReads.push(url.search);
         // HackerRank may already have one (live: approved, being marked applied by hand).
-        return json(200, url.searchParams.get('jobs.company_slug') === 'eq.hackerrank' ? existingApps : []);
+        return json(200, url.searchParams.get('company_slug') === 'eq.hackerrank' ? existingApps : []);
       }
       // The list read.
       if (url.pathname === '/rest/v1/email_events') return json(200, rows);
@@ -227,7 +228,8 @@ describe('Emails page in a browser (fake session, every Supabase call answered l
     assert.match(last.query, /read_at=is\.null/);
   });
 
-  it('4. Add to Applied: prefilled form, inline confirm, one RPC with the slug, then the row is tracked', async () => {
+  /* 2026-11-21 (S6, Teja 14:45: one click, no confirm steps). RED-ON-REVERT: restoring the confirm leaves rpcs empty. */
+  it('4. Add to Applied: ONE click creates it (parsed company + title, no form, no confirm), then the row is tracked', async () => {
     // The receipt unmatched again, and no existing HackerRank application.
     rows = [RECEIPT, ALERT, TRACKED];
     existingApps = [];
@@ -235,23 +237,14 @@ describe('Emails page in a browser (fake session, every Supabase call answered l
     await page.goto(`${base}/emails`, { waitUntil: 'domcontentloaded' });
     // The receipt's button (the alert has none: an alert is not about an application).
     const name = 'We have received your Application || AI Researcher Intern';
-    await page.getByRole('button', { name: `Add to Applied: ${name}`, exact: true }).click();
-    // The form, with the company from the sender (its "Careers" suffix dropped).
-    const company = page.getByLabel('Company', { exact: true });
-    await company.waitFor();
-    assert.equal(await company.inputValue(), 'HackerRank');
-    // A clean title.
-    await page.getByLabel('Job title', { exact: true }).fill('AI Researcher Intern');
-    // Submit arms the confirm; nothing is written yet.
-    await page.locator('form.email-track').getByRole('button', { name: 'Add to Applied', exact: true }).click();
-    const confirm = page.getByRole('button', { name: `Confirm: Add to Applied: ${name}`, exact: true });
-    await confirm.waitFor();
-    assert.equal(rpcs.length, 0, 'arming must not write');
-    // Confirm sends exactly one call.
+    // ONE click: no existing HackerRank application, so this click creates it (no form, no confirm).
     const write = page.waitForRequest('**/rest/v1/rpc/track_email_as_applied', { timeout: 5_000 }).catch(() => null);
-    await confirm.click();
+    await page.getByRole('button', { name: `Add to Applied: ${name}`, exact: true }).click();
     await (await write)?.response();
-    // The arguments: the email, the trimmed names, and the slug from the one slug rule.
+    // No form and no confirm step was drawn.
+    assert.equal(await page.locator('form.email-track').count(), 0, 'Add to Applied must not open a form');
+    assert.equal(await page.getByRole('button', { name: `Confirm: Add to Applied: ${name}`, exact: true }).count(), 0, 'Add to Applied must not ask');
+    // The arguments: company from the sender ("Careers" dropped), the ROLE parsed from the subject, the slug rule.
     assert.deepEqual(rpcs, [{ p_email_event_id: RECEIPT.id, p_company: 'HackerRank', p_company_slug: 'hackerrank', p_title: 'AI Researcher Intern' }]);
     // The re-read shows it tracked.
     await card('We have received your Application').locator('.email-card__tracked').waitFor();
@@ -262,7 +255,7 @@ describe('Emails page in a browser (fake session, every Supabase call answered l
   it('5. an email whose company already has an application offers "Link to ..." first; linking creates nothing', async () => {
     // The receipt unmatched, and HackerRank's existing application (live: approved).
     rows = [RECEIPT, ALERT, TRACKED];
-    existingApps = [{ id: 'a1000000-0000-4000-8000-000000000077', status: 'approved', jobs: { title: 'AI Researcher Intern', company_slug: 'hackerrank' } }];
+    existingApps = [{ title: 'AI Researcher Intern', applications: [{ id: 'a1000000-0000-4000-8000-000000000077', status: 'approved' }] }];
     // Fresh counts for this test.
     rpcs.length = 0;
     patches.length = 0;
@@ -275,20 +268,14 @@ describe('Emails page in a browser (fake session, every Supabase call answered l
     const link = page.getByRole('button', { name: `Link to AI Researcher Intern (approved): ${name}`, exact: true });
     await link.waitFor();
     // The lookup asked for this company's slug.
-    assert.ok((appReads.at(-1) ?? '').includes('jobs.company_slug=eq.hackerrank'), appReads.at(-1));
+    assert.ok((appReads.at(-1) ?? '').includes('company_slug=eq.hackerrank'), appReads.at(-1));
     // "Add as a new job" stays available, AFTER the link in reading order.
     await page.getByRole('button', { name: `Add as a new job: ${name}`, exact: true }).waitFor();
     const order = await page.locator('.email-link__options button').evaluateAll((els) => els.map((el) => el.getAttribute('aria-label') ?? ''));
     assert.ok(order[0]?.startsWith('Link to '), `first option: ${order[0]}`);
-    // Link: the inline confirm first.
-    await link.click();
-    const confirm = page.getByRole('button', { name: `Confirm: Link to AI Researcher Intern (approved): ${name}`, exact: true });
-    await confirm.waitFor();
-    // Nothing written on arming.
-    assert.equal(patches.length, 0);
-    // Confirm: one PATCH.
+    // Link: ONE click writes one PATCH (no confirm since 2026-11-21).
     const write = page.waitForRequest((r) => r.method() === 'PATCH' && r.url().includes('/rest/v1/email_events'), { timeout: 5_000 }).catch(() => null);
-    await confirm.click();
+    await link.click();
     await (await write)?.response();
     // It sets matched_application_id only, guarded to an unlinked email.
     const last = patches.at(-1) as { query: string; body: Record<string, unknown> };

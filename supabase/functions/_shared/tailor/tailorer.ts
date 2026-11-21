@@ -356,11 +356,15 @@ export function orderByJdRelevance(tailored: TailoredProfile, master: MasterProf
   };
 }
 
-/* The bullets a one-shot rewrite may fix, with their untraceable words, or null for "do not retry"
- * (2026-11-05). Retry ONLY when every violation is an unverifiable_token AND sits on a bullet of this
- * profile: the rewrite only rewrites bullets, so a summary, skill, ref or metric problem would waste the
- * call and fail anyway. Exported for the test. */
-export function retryableBullets(violations: readonly TailorViolation[], profile: TailoredProfile): Map<string, string[]> | null {
+/* The bullets a one-shot rewrite may fix, each with the words to drop and the numbers to keep, or null for
+ * "do not retry" (2026-11-05; widened 2026-11-21, S4b). Retry ONLY when every violation is a bullet-TEXT fault
+ * on a bullet of this profile:
+ *  - unverifiable_token: a word the master never says -> drop it;
+ *  - untraced_tech: a tech name no cited source states -> drop it (5/26 golden refusals were this or the next);
+ *  - dropped_metric: a number the master states that the rewrite cut -> keep it.
+ * The rewrite only rewrites bullet text, so a summary, skill, ref, citation (misattributed_bullet) or invented
+ * metric problem would waste the call and fail anyway. Exported for the test. */
+export function retryableBullets(violations: readonly TailorViolation[], profile: TailoredProfile): Map<string, { drop: string[]; keep: string[] }> | null {
   // Every bullet ref in the first attempt, across every bullet-carrying section.
   const bulletRefs = new Set<string>();
   // The five sections whose nodes carry bullets.
@@ -369,13 +373,23 @@ export function retryableBullets(violations: readonly TailorViolation[], profile
     for (const node of section as readonly { readonly bullets?: readonly { readonly ref: string }[] }[]) for (const b of node.bullets ?? []) bulletRefs.add(b.ref);
   }
   // Grouped by bullet, in the order reported.
-  const byBullet = new Map<string, string[]>();
+  const byBullet = new Map<string, { drop: string[]; keep: string[] }>();
   // Every violation must qualify, or none is retried.
   for (const v of violations) {
-    // Any other kind, or a word not on a bullet of this profile: no retry.
-    if (v.kind !== "unverifiable_token" || !bulletRefs.has(v.ref)) return null;
-    // The word, under its bullet.
-    byBullet.set(v.ref, [...(byBullet.get(v.ref) ?? []), v.token]);
+    // A closed set of text faults; any other kind means no retry at all.
+    if (v.kind !== "unverifiable_token" && v.kind !== "untraced_tech" && v.kind !== "dropped_metric") return null;
+    // A fault on a ref that is not a bullet of this profile: nothing a bullet rewrite can reach.
+    if (!bulletRefs.has(v.ref)) return null;
+    // The bullet's item, created on first sight.
+    const item = byBullet.get(v.ref) ?? { drop: [], keep: [] };
+    // A word or tech name to drop; a master number to put back.
+    if (v.kind === "unverifiable_token") item.drop.push(v.token);
+    // The untraced name is dropped the same way as an untraceable word.
+    else if (v.kind === "untraced_tech") item.drop.push(v.term);
+    // The dropped number is named as one the rewrite must keep.
+    else item.keep.push(v.value);
+    // Stored back under its bullet.
+    byBullet.set(v.ref, item);
   }
   // Nothing to fix is not a retry either.
   return byBullet.size > 0 ? byBullet : null;
@@ -658,7 +672,7 @@ export function createTailorer(deps: TailorDeps): Tailorer {
     // A refusal is DATA, not an exception: the violations are the dashboard's content
     // and the reason the row will be failed with something a human can act on.
     if (!validation.ok) {
-      // The one-shot rewrite (2026-11-05), only when every violation is an untraceable word on a bullet.
+      // The one-shot rewrite (2026-11-05; S4b 2026-11-21), only when every violation is a text fault on a bullet.
       const retryable = retryableBullets(validation.violations, tailored);
       // Anything else fails exactly as before, with no extra call.
       if (retryable === null) return { kind: "refused", violations: validation.violations, retry: null };
@@ -671,7 +685,7 @@ export function createTailorer(deps: TailorDeps): Tailorer {
         for (const node of section as readonly { readonly bullets?: readonly { readonly ref: string; readonly text: string }[] }[]) for (const b of node.bullets ?? []) firstTexts.set(b.ref, b.text);
       }
       // The rewrite request: only the failed bullets.
-      const items = [...retryable].map(([ref, tokens]) => ({ ref, masterText: masterTexts.get(ref) ?? "", firstText: firstTexts.get(ref) ?? "", bannedTokens: tokens }));
+      const items = [...retryable].map(([ref, fix]) => ({ ref, masterText: masterTexts.get(ref) ?? "", firstText: firstTexts.get(ref) ?? "", bannedTokens: fix.drop, keepNumbers: fix.keep }));
       // The SAME transport (key pool, fallback, usage row); a transport throw propagates exactly like the first call's.
       const reply = await deps.callLlm(buildBulletRewritePrompt(items));
       // A reply that does not answer exactly the asked bullets merges nothing.

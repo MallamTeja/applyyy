@@ -16,7 +16,7 @@ truth lives. This README is the living index.
 
 | Topic | Where the truth is now |
 |---|---|
-| ATS adapters that are polled | `supabase/functions/_shared/ats/registry.ts` (the `ADAPTERS` map): `greenhouse`, `lever`, `ashby`, `workday` |
+| ATS adapters that are polled | `supabase/functions/_shared/ats/registry.ts` (the `ADAPTERS` map): `greenhouse`, `lever`, `ashby`, `workday`, `icims` (registered 2026-11-21, f7d9cb43) |
 | SmartRecruiters | **OFF** by the 2026-11-01 robots ruling: its robots.txt is `Disallow: /`. Unregistered in fc5097f, adapter deleted in 2fe0264. Pinned by the test `smartrecruiters is not registered` in `supabase/functions/_shared/ats/adapters.test.ts`, and on the web by `apps/web/test/smartRecruitersNotAddable.test.ts` |
 | Workable | Adapter written (`supabase/functions/_shared/scout/adapters/workable.ts`), **not** registered (`registry.ts` comment) |
 | Workday | Adapter `supabase/functions/_shared/scout/adapters/workday.ts`; descriptions read by `supabase/functions/_shared/scout/workday-detail.ts`; the bot does not apply to Workday jobs (`worker/src/workday.ts` parks them for Manual apply) |
@@ -47,14 +47,11 @@ As of 2026-11-08 every `smartrecruiters` row is `enabled = false`, and some dead
 |---|---|---|
 | [2026-09-16-ai-job-search-inventory.md](2026-09-16-ai-job-search-inventory.md) | Per-file verdicts on upstream: portal adapters, Python tools, prompt skills, command specs. Also what upstream lacks that we have, so nobody "harvests" a downgrade | Historical |
 | [2026-09-16-ai-job-search-harvest-plan.md](2026-09-16-ai-job-search-harvest-plan.md) | Eight write-partitioned parcels (P1-P8), ordered by value / cost, plus the open questions | Partly superseded |
-| [2026-09-16-approach-comparison.md](2026-09-16-approach-comparison.md) | Area-by-area: which design is better, ours or upstream's | Partly superseded |
 
 ### Briefs built from the harvest plan (`briefs/`)
 
 | Brief | Plan parcel | Shipped? | Where in code |
 |---|---|---|---|
-| [brief-1-http-retry.md](briefs/brief-1-http-retry.md) | P1 | Yes (23d9abf) | `supabase/functions/_shared/http/` |
-| [brief-2-freehire-job-source.md](briefs/brief-2-freehire-job-source.md) | P6 | No, never built | none |
 | [brief-3-job-scoring-and-salary-gate.md](briefs/brief-3-job-scoring-and-salary-gate.md) | P3 | Rubric yes (b15d8e7); salary gate written, not wired (5751184) | `supabase/functions/_shared/match/` |
 | [brief-4-robots-gate.md](briefs/brief-4-robots-gate.md) | P2 | Yes (4ca08ef); apply-time gate a3b4115 | `packages/master-robots/` |
 | [brief-5-resume-node-selection.md](briefs/brief-5-resume-node-selection.md) | P7 | In part: keyword relevance only; the four auditor rules were not built | `supabase/functions/_shared/tailor/jd-keywords.ts`, `tailorer.ts`, `page-trim.ts` |

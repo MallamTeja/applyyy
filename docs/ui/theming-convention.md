@@ -57,10 +57,10 @@ OS gets the **light** half of the stylesheet painted onto a `#151924` card.
 
 `tokens.css` handles this correctly and explains itself in its header comment:
 
-- `:root { color-scheme: light dark }` (`tokens.css:56`) lets the browser resolve every
+- `:root { color-scheme: light dark }` (`tokens.css:101`) lets the browser resolve every
   `light-dark()` call live from `prefers-color-scheme`.
-- The two override rules, `:root[data-theme='light']` (`tokens.css:228`) and
-  `:root[data-theme='dark']` (`tokens.css:235`), flip `color-scheme`. They restate no colour.
+- The two override rules, `:root[data-theme='light']` (`tokens.css:273`) and
+  `:root[data-theme='dark']` (`tokens.css:280`), flip `color-scheme`. They restate no colour.
 
 `tokens.css` is imported before `base.css` in `apps/web/src/main.tsx:11-12`, because the
 primitives in `base.css` read the tokens.
@@ -86,10 +86,10 @@ The semantic families in `tokens.css` (each has a base, a `-strong` and a `-wash
 
 | Token | Meaning | Where |
 |---|---|---|
-| `--traced` | verified, traces to the master | `tokens.css:140-142` |
-| `--fabricated` | alarm | `tokens.css:145-147` |
-| `--signal` | needs a human | `tokens.css:150-152` |
-| `--accent` | interactive; carries **no** status meaning (`-strong`, `-subtle`) | `tokens.css:133-135` |
+| `--traced` | verified, traces to the master | `tokens.css:185-187` |
+| `--fabricated` | alarm | `tokens.css:190-192` |
+| `--signal` | needs a human | `tokens.css:195-197` |
+| `--accent` | interactive; carries **no** status meaning (`-strong`, `-subtle`) | `tokens.css:178-180` |
 
 Text and surface tokens (`--text-primary`, `--text-secondary`, `--text-muted`, `--ground`,
 `--panel`, `--sheet`, `--rule`) are also `light-dark()` pairs. Read the full list with
@@ -111,14 +111,14 @@ token that is not a colour (currently just `--lift`, a `box-shadow`) needs the l
 form. It needs both of these:
 
 1. a `@media (prefers-color-scheme: dark)` block guarded with
-   `:root:not([data-theme='light'])` (`tokens.css:248-252`), and
-2. a `:root[data-theme='dark']` rule (`tokens.css:254-256`).
+   `:root:not([data-theme='light'])` (`tokens.css:293-297`), and
+2. a `:root[data-theme='dark']` rule (`tokens.css:299-301`).
 
 Either alone leaves a state uncovered.
 
 **Not an exception, just a fixed colour.** A few tokens are not `light-dark()` pairs
 because the colour must not change with the theme (for example `--alarm-raised` and
-`--ink-inverse`, `tokens.css:74` and `:110`, which sit on the dark alarm surface in both
+`--ink-inverse`, `tokens.css:119` and `:155`, which sit on the dark alarm surface in both
 themes). That is fine. The rule is only about *which half wins*, and these have one half.
 
 ## How to check
@@ -129,8 +129,8 @@ Run from the repo root (Git Bash or PowerShell):
 git grep -nE "\[data-theme='[a-z]+'\][^*]*[{]" -- 'apps/web/src/*.css'
 ```
 
-Expected output, as of 2026-11-08: four hits, all in `apps/web/src/styles/tokens.css`
-(lines 228, 235, 249, 254), and each one only sets `color-scheme` or `--lift`.
+Expected output (re-checked 2026-11-21): four hits, all in `apps/web/src/styles/tokens.css`
+(lines 273, 280, 294, 299 at that date; line numbers drift, the file does not), and each one only sets `color-scheme` or `--lift`.
 **Any hit in another file is the bug.**
 
 Notes on the check itself:
@@ -159,7 +159,7 @@ and all three were visibly broken on a default-settings dark machine:
 | `apps/web/src/features/discovery/DiscoveredJobsPage.css` (`.job-card__drop-banner`) | `#b91c1c` on `#151924` |
 
 All three cleared in `286ea2e` (2026-09-17). Their replacement comments are still in the
-files (`SourceBadge.css:4`, `DiscoveredJobsPage.css:151` and `:403`), so the reason survives.
+files (`SourceBadge.css:4`, `DiscoveredJobsPage.css:151` and `:412`), so the reason survives.
 Newer stylesheets cite this file in their headers instead of adding a dark rule
 (`apps/web/src/features/applied/Applied.css:2`, `apps/web/src/features/manual-apply/ManualApply.css:2`).
 

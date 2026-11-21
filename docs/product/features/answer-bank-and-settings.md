@@ -100,9 +100,9 @@ loses its attestation and the worker refuses it. The failure is visible, not sil
 restores it. Migration `20261102210000_agent_key_fail_closed.sql` changed the empty-key-table behaviour for
 agents, and its header says `stamp_answer_attestation()` is unaffected: it marks a row human only on `missing`.
 
-Example from the 2026-11-08 handoff: 15 India answers were inserted by CLI at 22:20, so they are
-`attested_by_human = false`. They still fill ordinary questions, but not eligibility, EEO or opinion questions.
-Teja can stamp them by saving each one once in the browser.
+Example: on 2026-11-07, 15 India answers were inserted by CLI at 22:20, so they are
+`attested_by_human = false`. Since 2026-11-10 (`1a2393ad`) the bot fills nothing from such a row: `plan-fill.ts`
+counts a machine-written row as no row at all. Teja can stamp them by saving each one once in the browser.
 
 #### How the worker uses the bank
 
@@ -213,7 +213,10 @@ the other being empty.
 `FiltersPage.tsx` is the live editor of `public.filter_rules`. Nothing in the cascade is hard-coded. The rule
 types are the enum `public.filter_rule_type` (`supabase/migrations/20260909234500_enums.sql`):
 `experience_ceiling`, `title_blocklist`, `location_allowlist`, `employment_type`, `already_applied`,
-`company_blocklist`, `staleness`, `degree_mismatch`, `per_company_weekly_cap`. Rules run cheapest first and stop
+`company_blocklist`, `staleness`, `degree_mismatch`, `per_company_weekly_cap`. Two are retired (2026-11-10,
+`8ba2b06a`, Teja: never drop a job for its age or a per-company count): `staleness` and `per_company_weekly_cap`
+stay in the enum, because Postgres cannot drop an enum value, but `RETIRED_FILTER_RULE_TYPES` in
+`filtersStore.ts` keeps them out of load, save and the Filters page. Rules run cheapest first and stop
 at the first drop. `filtersStore.ts` holds the built-in defaults and the "Early Career SDE" preset; both use
 `EARLY_CAREER_MAX_YEARS = 1`, the same value the live rule has. Before 2026-11-04 the preset wrote 2, so one
 click would have let every "2+ years" job back in.
@@ -273,8 +276,6 @@ not as an error, so the page does not cry wolf.
   `disability_status` has no `eeo_*` replacement yet.
 - **`degree_mismatch`** exists as a rule type but is not produced yet (memory: experience-level screening).
 - **Locked-remote ruling still open** for some cases (memory: work-auth leaks 2026-11-04).
-- **In progress (uncommitted at writing time):** edits in `supabase/functions/_shared/screen/work-auth-gate.ts`
-  and `worker/src/apply-one.ts`. This doc describes the committed versions.
 - **Is the kit-rebuild call live?** `2936e8c` is committed. Whether `dispatch-apply` with `kit_only` is deployed
   needs a check before relying on it (the handoff says deploy it right after the push).
 

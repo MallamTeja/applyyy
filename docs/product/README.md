@@ -26,7 +26,7 @@ Read top to bottom the first time. Each line says what the doc answers.
 | 10 | [features/answer-bank-and-settings.md](features/answer-bank-and-settings.md) | The answer bank, attestation, and the six Settings pages. |
 | 11 | [features/tracking-and-email.md](features/tracking-and-email.md) | After submit: the Gmail tracker, email classes, and the Emails page. |
 | 12 | [decisions-and-rulings.md](decisions-and-rulings.md) | Every dated ruling by Teja, why, and where the code enforces it. |
-| 13 | [roadmap-and-open-gaps.md](roadmap-and-open-gaps.md) | What is done, in progress, next (P0 to P3) and blocked; progress %. |
+| 13 | [roadmap-and-open-gaps.md](roadmap-and-open-gaps.md) | The 7 stages, the query that proves each, and re-checked open gaps. Live work: `docs/handoff/2026-11-12-1305-pending-tasks.md`. |
 | 14 | [glossary.md](glossary.md) | One line per term: statuses, agents, resume, apply and process words. |
 | 15 | [history-timeline.md](history-timeline.md) | How the project grew, phase by phase, with the commits that mark each phase. |
 
@@ -45,7 +45,7 @@ Each one needs your ruling. None of them was decided by the writers.
 4. PROJECT_PLAN.md constraint 16 says "don't test with real applications". Should it be reworded, now that a real bot submit is planned to prove stage 5?
 5. Should PROJECT_PLAN.md stay listed as a "Living doc"? Its header marks it STALE as of 2026-11-07. Its locked decisions and constraints could move into [decisions-and-rulings.md](decisions-and-rulings.md).
 6. Is applyyy strictly single-user, or is a multi-user version ever planned? The docs say single-user.
-7. Nothing scores `passed_filters` rows on a schedule (you ruled drains are manual on 2026-11-05). Is that still how you want to work, or should a capped automatic drain come back?
+7. ANSWERED 2026-11-18 21:45: scouted jobs wait in Ready to tailor, with no automatic drain (fa315449). `postscreen-drain.yml` has no `workflow_run` trigger; its daily cron `30 4 * * *` only re-gates the approval queue. Re-check: `git grep -n "workflow_run\|cron" .github/workflows/postscreen-drain.yml`.
 8. Are the Phase 3 extras from 2026-09-19 (follow-up nudges, interview prep, referral queue) still part of the product, or parked?
 9. The first commit is dated 2025-12-29, and real work starts 2026-09-09. Was the repo first made for something else?
 10. Should the "100% Phase 1" claim (commit a8b6e02, docs/PROGRESS.md) be formally retracted in a status doc?
@@ -70,11 +70,11 @@ Each one needs your ruling. None of them was decided by the writers.
 23. The matcher eval set has 3 placeholder cases, and CI does not run it. Do you want to hand-label about 20 real cases?
 24. `matcher/freshness-queue.ts` is unused. Wire it in (newest jobs first) or delete it?
 25. Should the score floor become a per-user setting instead of a code constant?
-26. Achievements floor: memory says at least 2, code keeps every entry with at least 1 bullet. Which did you mean?
-27. Trim order: code trims certifications first, then project bullets over the cap, then the weakest bullet. Memory says the opposite. Is the code order what you want?
-28. "Max 2 projects" (your 2026-11-08 15:36 ruling) has no code yet. Enforce it at the tailor, the editor save and Approve?
+26. ANSWERED 2026-11-09 20:41: every achievement stays on every tailored resume. `page-trim.ts` sets `PAGE_FIT_FLOORS.minAchievements` to `Number.POSITIVE_INFINITY`.
+27. ANSWERED 2026-11-09 20:41: certifications are never trimmed (at least 5 stay, `PAGE_FIT_FLOORS.minCertifications`). `TRIM_ORDER` in `page-trim.ts` trims bullets only: project bullets over the cap, then the weakest bullet, then project bullets down to the floor.
+28. ANSWERED: "Max 2 projects" is enforced. `PAGE_FIT_FLOORS.maxProjects` is 2 in `page-trim.ts`, and `checkContentRules` in `content-rules.ts` gates the resolved resume.
 29. Should a master resume upload refuse, or only warn, when it carries a different email from the one app email?
-30. Is the tailor deployed from dc8ac5c? If yes, Tether and L&T can be re-run.
+30. SUPERSEDED (re-checked 2026-11-21): the tailor has been redeployed many times since dc8ac5c. Live work is tracked in `docs/handoff/2026-11-12-1305-pending-tasks.md`.
 
 ### Approval, apply and the Manual lane
 
@@ -103,7 +103,7 @@ Each one needs your ruling. None of them was decided by the writers.
 
 ### Process and docs
 
-50. Which commit rule is current: repo CLAUDE.md §2 "one commit per finished task", or the 2026-11-08 15:25 memory rule "one commit per 15 minutes, orchestrator only"? Merge them into one place.
+50. Which commit rule is current? Repo CLAUDE.md §2 says "one commit per finished task". Practice since 2026-11-09 22:49 is one orchestrator bundle commit per 15 to 30 minutes (soft); peers never commit. Merge them into one place.
 51. Deploy authority is worded three ways. Is it a standing grant to the orchestrator (2026-10-08), or does each deploy need your yes?
 52. Should each deployed edge function carry a SHA stamp, so we can tell which commit is live?
 53. Should repo CLAUDE.md §1 "cap of 3 per run" say 3 is the cron default and 25 is the apply-on-approve drain?

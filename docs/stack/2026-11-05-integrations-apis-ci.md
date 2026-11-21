@@ -73,15 +73,16 @@ JWT posture regenerate:
 
 ## CI/CD workflows
 
-13 workflows as of 2026-11-08 (`ls .github/workflows`). Every `uses:` line is pinned to a
+Count the workflows with `ls .github/workflows/*.yml | wc -l`. Every `uses:` line is pinned to a
 40-character commit SHA. Check with
-`git grep -hE "uses: " -- .github/workflows | grep -vcE "@[0-9a-f]{40}"` (expect 0). The
+`git grep -hE "^[[:space:]]*(- )?uses: " -- .github/workflows | grep -vcE "@[0-9a-f]{40}"` (expect 0;
+anchored, because an unanchored `uses: ` also matches comment text and reads 1). The
 repo does not enforce SHA pinning; it is a convention.
 
 | Workflow | Trigger (UTC → IST) | What runs |
 |---|---|---|
 | `ci.yml` | push + PR to `main` (not docs-only pushes: `paths-ignore`) | one job: deno check (v2.9.6, with a file-count assertion), edge tests, shared-types tests, package tests, web tsc + vite build + e2e build + tests, render-function check, worker tsc + vitest, **gitleaks** over the pushed commits |
-| `scout.yml` | `17 0,12 * * *` and `17 4 * * *` → 05:47, 17:47 and 09:47 | worker `scout` |
+| `scout.yml` | `17 0,2,5,7,10,12,14,17,19,22 * * *` → ten runs a day, 05:47 to 03:47 IST | worker `scout` |
 | `scout-remote.yml` | `30 1 * * *` → 07:00 | worker `scout:remote` |
 | `apply.yml` | `30 2 * * *` → 08:00 (GitHub often starts it hours late) + dispatch | worker `apply`. **Dry on schedule** unless the repo variable `APPLYY_CRON_LIVE` is `true`. A live dispatch needs `apply_only_id` or `drain_approved=true` |
 | `apply-kit.yml` | `0 12 * * *` → 17:30, `workflow_run` after apply, and dispatch (from `dispatch-apply`) | worker `apply-kit` |
@@ -89,10 +90,11 @@ repo does not enforce SHA pinning; it is a convention.
 | `keepalive.yml` | `15 6 */3 * *` → 11:45 every 3rd day | DB ping + push to `automation-keepalive` |
 | `jobs-tombstone.yml` | `45 6 * * 0` → Sunday 12:15 | `tombstone_dropped_jobs` RPC in batches |
 | `run-one.yml` | dispatch (`application_id`) | matcher → tailor → auditor for one row |
-| `ingest-links.yml` | dispatch (`list`, `dry_run`) | POSTs links to `job-link-intake` |
 | `prescreen-drain.yml` | dispatch | normalizer → screener |
-| `postscreen-drain.yml` | dispatch (`from_stage`) | matcher → tailor → auditor |
+| `postscreen-drain.yml` | `30 4 * * *` → 10:00 (approval-queue re-gate only, no Gemini) + dispatch (`from_stage`) | dispatch: matcher → tailor → auditor |
 | `pregate-sweep.yml` | dispatch | `matcher?mode=pregate_only` |
+| `scout-ats-daily.yml` | `41 1 * * *` → 07:11 | `scout-ats?mode=liveness` (no scan, no upserts) |
+| `workday-egress-probe.yml` | dispatch only | `scripts/workday-egress-probe.mjs` from a runner IP (read-only) |
 
 GitHub cron is best effort. Read real start times with `gh run list`.
 

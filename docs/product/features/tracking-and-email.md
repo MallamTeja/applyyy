@@ -137,6 +137,10 @@ Confidence gate (`passesConfidenceGate`): a move into a terminal status needs at
 other move needs at least 0.7. Below the gate the email is stored with its class, and nothing
 moves.
 
+**Mail Teja sent himself stays `unclassified`** (2026-11-12, `ffa32af1`). When the sender is the app
+user's own address, quoted employer text never classifies it. The intake stores it with the signal
+`owner_sent` (`email-tracker-intake/decide.ts`), so a forwarded rejection never moves a row.
+
 ### 4. Matching
 
 `matchApplication` in `decide.ts` returns one application id or `null`. `null` means none OR more
@@ -184,6 +188,8 @@ move, so "note exists" means "move committed". Rules:
 - Every move needs the kill switch on (`system_settings.system_enabled = true`, `mayAdvanceStatus`).
   Unreadable means off. Emails are always stored, even when moves are off.
 - A refused move adds to the run's `error_count`, so Health stops showing green.
+- If the tracker moves a row to `interview` by mistake, a human-only `interview -> applied` correction
+  edge exists (migration `20261112160000_interview_applied_human_correction.sql`, `9d35e048`).
 
 ### 7. `gmail-sync` (sync now)
 
@@ -211,6 +217,8 @@ Files: `apps/web/src/features/emails/EmailMonitoringPage.tsx`, `emailView.ts` (p
   same company and title; otherwise it creates one. The new application goes
   `discovered -> applied` as `human` in one transaction. That edge exists only for this RPC.
   Never automatic. A refusal says where the job is and what to do (`c0bdc6c`).
+- An Insights panel counts job emails, the tracked share, rejections, interviews and mail sent by
+  Teja. Mail he sent carries a "Sent by you" badge (`232356dc`, 2026-11-12).
 
 ### Data
 

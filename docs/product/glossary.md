@@ -88,7 +88,7 @@ later with `alter type public.agent_name add value` (grep the migrations for tha
 
 | Agent | What it does | Code |
 |---|---|---|
-| `scout_ats` | Polls company boards in the watchlist through ATS adapters (Greenhouse, Lever, Ashby; SmartRecruiters adapter exists but is OFF by the robots ruling). | `supabase/functions/scout-ats/`, `worker/src/cli/scout.ts` |
+| `scout_ats` | Polls company boards in the watchlist through ATS adapters (Greenhouse, Lever, Ashby, Workday, iCIMS). The SmartRecruiters adapter was deleted (`2fe0264`); SR is off by the robots ruling. | `supabase/functions/scout-ats/`, `worker/src/cli/scout.ts` |
 | `scout_aggregator` | Discovery from feeds and web search, not one company board. | `supabase/functions/scout-web/`, `worker/src/cli/scout-remote.ts` |
 | `normalizer` | Computes a job fingerprint, drops duplicates. `discovered -> deduped`. | `supabase/functions/normalizer/` |
 | `screener` | Deterministic filters, no LLM. `deduped -> passed_filters` or `dropped_filter`. | `supabase/functions/screener/`, `supabase/functions/_shared/screen/` |
@@ -118,7 +118,7 @@ Note: the DB name uses `_` (`scout_ats`), the function folder uses `-` (`scout-a
 | Unfaithful rewording / `summary_unsupported` | Auditor flags: a bullet names a skill its master entry never used, or summary skill words are not in the master. Teja ruled 2026-11-07. | `supabase/functions/_shared/audit/detector.ts` |
 | One-page rule | Every resume, tailored and after edits, must fit ONE page. Teja ruled 2026-11-07. | `supabase/functions/_shared/tailor/page-trim.ts`, `packages/resume-template/src/page-fit.ts` |
 | Typography ladder / rungs | Steps of smaller font and spacing tried before cutting content. The "dense rungs" shipped in `dc8ac5c`. | `packages/resume-template/src/render-resume-html.ts`, `packages/resume-template/src/page-fit.ts` |
-| `fitToOnePage` / trim order | Pure trim after the ladder: certifications first, then project bullets over cap, then weakest bullet. Skills, summary and education are never removed. | `supabase/functions/_shared/tailor/page-trim.ts` |
+| `fitToOnePage` / trim order | Pure trim after the ladder, bullets only: project bullets over the cap, then the weakest bullet, then project bullets down to the floor. Skills, summary, education, certifications and achievements are never removed (Teja 2026-11-09 20:41). | `supabase/functions/_shared/tailor/page-trim.ts` |
 | `page_overflow` | The tailor fails closed when the resume still overflows after trimming. | `supabase/functions/_shared/tailor/tailorer.ts` |
 | ATS panel / ATS score | The approval-page chip "ATS N% verified". Simulates an applicant-tracking keyword scan. | `supabase/functions/_shared/tailor/ats-simulator.ts`, `apps/web/src/features/approval/` |
 | Resume assist / AI edit | The AI edit panel on the approval page. The browser refuses an answer with an unknown op kind. | `supabase/functions/resume-assist/`, `apps/web/src/features/approval/aiEdit.ts` |
@@ -137,12 +137,15 @@ Note: the DB name uses `_` (`scout_ats`), the function folder uses `-` (`scout-a
 | Fingerprint | Canonical SHA-256 of a job used to find duplicates. Unique per user. | `jobs.fingerprint` in `supabase/migrations/20260909234700_core_tables.sql`; `supabase/functions/normalizer/` |
 | Filter cascade | The ordered deterministic filter rules. | `supabase/functions/_shared/filter/cascade.ts`, table `filter_rules` |
 | Tech gate (stage 0) | Screener stage that drops non-tech roles before other rules. | `supabase/functions/_shared/screen/tech-gate.ts` |
-| Work-auth gate | Drops jobs in countries Teja cannot work in. Unknown location passes (Teja ruled 2026-11-05). | `supabase/functions/_shared/screen/work-auth-gate.ts` (has uncommitted edits in progress) |
+| Work-auth gate | Drops jobs in countries Teja cannot work in. Unknown location passes (Teja ruled 2026-11-05). | `supabase/functions/_shared/screen/work-auth-gate.ts` |
+| Thin JD | A description with under `MIN_ROLE_TEXT_CHARS` of role text after boilerplate lines are stripped. Treated like a blank one: it waits in Ready to tailor with a "No description" pill. | `supabase/functions/_shared/screen/jd-substance.ts` (`isThinDescription`) |
+| iCIMS | ATS provider added 2026-11-21: sitemap listing plus JSON-LD detail pages. | `supabase/functions/_shared/scout/adapters/icims.ts` |
 | Experience ceiling | Drops jobs that require more experience than Teja has. | `supabase/functions/_shared/screen/required-experience.ts` |
 | Pre-gate | The matcher's Gemini-free check run before scoring, to avoid spending LLM calls. | `supabase/functions/matcher/tech-pregate.ts` |
 | Pre-gate sweep | A manual workflow that runs the pre-gate (`?mode=pregate_only`) over the whole `passed_filters` backlog. | `.github/workflows/pregate-sweep.yml` |
 | Pre-screen drain | Manual workflow: pages `discovered` through the normalizer, then `deduped` through the screener. | `.github/workflows/prescreen-drain.yml` |
-| Post-screen drain | Manual workflow: pages `passed_filters` through matcher, `scored` through tailor, `tailored` through auditor. | `.github/workflows/postscreen-drain.yml` |
+| Post-screen drain | Manual workflow: pages `passed_filters` through matcher, `scored` through tailor, `tailored` through auditor. Its daily cron runs only the queue re-gate. | `.github/workflows/postscreen-drain.yml` |
+| Queue re-gate | `auditor?mode=regate_queue`: re-runs today's gates over `awaiting_approval` rows, no Gemini. May drop a row only for `work_auth` or `already_applied`. | `supabase/functions/auditor/regate-queue.ts` |
 | Run one | Push ONE application through matcher, tailor, auditor on demand. | `.github/workflows/run-one.yml`, `worker/src/cli/run-one.ts` |
 | Score floor | The matcher drops rows below this score. Teja ruled 2026-11-07: 30 (was 45). Never remove it. | `supabase/functions/_shared/match/score-threshold.ts` |
 | Blocklist | Companies never to apply to. | table `company_blocklist`; page `apps/web/src/features/settings/BlocklistPage.tsx` |
@@ -170,9 +173,10 @@ Note: the DB name uses `_` (`scout_ats`), the function folder uses `-` (`scout-a
 | `advance_application_status()` | The only way to change a status. Checks the transition graph and the agent key. | `supabase/migrations/20260909235100_queue_and_pool_functions.sql` and later fix migrations |
 | Plan fill | Maps each form field to an answer from our data. | `worker/src/plan-fill.ts`, `worker/src/extract-fields.ts` |
 | Kit (manual apply kit) | For an approved row: opens the live form, plans every field, renders a fresh resume, and writes ONE `application_events` note. It never submits and never changes status. | `worker/src/apply-kit.ts`, `worker/src/apply-kit-sweep.ts`, `.github/workflows/apply-kit.yml` |
-| Manual lane / Manual apply page | Rows the bot cannot apply show "Bot can't apply: <reason>"; Teja applies by hand with the kit. Teja ruled 2026-11-07. | `apps/web/src/features/manual-apply/` (uncommitted edits in progress), `botCantApply.ts` |
+| Manual lane / Manual apply page | Rows the bot cannot apply show "Bot can't apply: <reason>"; Teja applies by hand with the kit. Teja ruled 2026-11-07. | `apps/web/src/features/manual-apply/`, `botCantApply.ts` |
 | Assist / assisted submit | Local, headed submit where Teja solves the captcha. Needs his stdin. | `worker/src/cli/assist.ts`, `worker/src/assist/assisted-submit.ts` |
-| Rehearse | A no-submit dress rehearsal of the assist path. Refuses Workday. | `worker/src/cli/rehearse-assist.ts`, `worker/src/assist/rehearse.ts` (uncommitted edits in progress) |
+| Rehearse | A no-submit dress rehearsal of the assist path. Refuses Workday. | `worker/src/cli/rehearse-assist.ts`, `worker/src/assist/rehearse.ts` |
+| One application per posting | The DB refuses a move into `applying` (`23505`) when the same posting already has a row at `applying`, `blocked_needs_human` or `applied`. The worker leaves the row `approved`. | migration `20261121140000_guard_one_application_per_posting.sql`, `worker/src/duplicate-posting.ts` |
 | Answer bank | Saved answers to application questions. Answers saved in the browser are marked human-attested. The bot never ticks declarations. | table `answer_bank` in `supabase/migrations/20260909234800_supporting_tables.sql`; `supabase/migrations/20261009160000_answer_bank_attested_by_human.sql`; page `apps/web/src/features/settings/AnswerBankPage.tsx` |
 | Unanswered questions | One row per normalised required question the bot could not answer. One card can "block 10 applications". | `supabase/migrations/20261105230000_unanswered_questions.sql`, `apps/web/src/features/settings/UnansweredQuestions.tsx` |
 
@@ -203,7 +207,7 @@ Note: the DB name uses `_` (`scout_ats`), the function folder uses `-` (`scout-a
 | Brief | The engineered task message to a peer: role, goal, owned files, facts, done-check, budget. | `~/.claude/CLAUDE.md` "Orchestrator mode" |
 | Write ownership | No two workers write the same file. | `~/.claude/CLAUDE.md` rule 4 |
 | Handoff pair | `docs/handoff/<date>-orchestrator-handoff.md` + `<date>-pending-tasks.md`. The newest pair is the resume point. | `docs/handoff/` |
-| Clean worktree deploy | Deploy from a detached worktree pinned to a SHA, never from the shared tree. | `CLAUDE.md` §3 |
+| `git archive` export deploy | Deploy from a `git archive` export of a pinned SHA, never from the shared tree. Before 2026-11-10 it was a detached worktree. | `CLAUDE.md` §3 |
 | Progress % | Share of 7 stages proven live end to end (discovered, screened, tailored, approved, submitted, confirmed, tracked). Re-derive at ask time. | `CLAUDE.md` §1; newest handoff |
 | Fail-open | The dominant bug here: missing data read as an answer. | `CLAUDE.md` §6 |
 
@@ -220,13 +224,14 @@ Note: the DB name uses `_` (`scout_ats`), the function folder uses `-` (`scout-a
 ## Known gaps and open questions
 
 - Bot submit (stage 5) has never been proven live. Receipt-confirm (stage 6) is on hold by Teja's
-  ruling. Source: `docs/handoff/2026-11-08-1745-orchestrator-handoff.md`.
+  ruling. Source: the newest `docs/handoff/*orchestrator-handoff.md` and `docs/handoff/2026-11-12-1305-pending-tasks.md`.
 - The repo `CLAUDE.md` §1 says "a cap of 3 per run". That is only the default. Apply-on-approve
   runs set `APPLY_MAX_SUBMITS=25` (`.github/workflows/apply.yml`).
 - Commit rule drift: repo `CLAUDE.md` §2 says "one commit per finished task"; the memory file
-  `fewer-commits-one-per-task.md` says (2026-11-08 15:25) one commit per 15 minutes, made by the
-  orchestrator only.
-- `scout-ats` still has a SmartRecruiters adapter while SmartRecruiters is off by ruling.
+  `fewer-commits-one-per-task.md` says (2026-11-09 22:49) one bundle commit per 15 to 30 minutes (soft),
+  made by the orchestrator only.
+- The SmartRecruiters adapter is deleted. Only a stale header comment in `supabase/functions/scout-ats/index.ts`
+  still names SmartRecruiters and says rows start at `discovered`.
 
 ## Related docs
 

@@ -1,6 +1,6 @@
 # Pipeline end to end: one job, from discovery to tracked
 
-_Last verified against code: 2026-11-08 (2a9ac31)._
+_Last verified against code: 2026-11-21 (3a86eada)._
 
 This page follows one job through every status in `applications.status`. For each step it
 names who moves the row, the file that does it, what starts it, and which gates can stop it.
@@ -107,7 +107,7 @@ There are three ways in. Each one inserts a new `applications` row; it never UPD
 
 | Way in | Code | Trigger | Starting status |
 |---|---|---|---|
-| ATS board scout | `worker/src/cli/scout.ts` | `.github/workflows/scout.yml`, cron `17 0,12 * * *` and `17 4 * * *` (UTC), or manual dispatch | `passed_filters` or `dropped_filter` |
+| ATS board scout | `worker/src/cli/scout.ts` | `.github/workflows/scout.yml`, cron `17 0,2,5,7,10,12,14,17,19,22 * * *` (UTC, ten a day since `06ab7913`), or manual dispatch | `passed_filters` or `dropped_filter` |
 | Remote feeds scout | `worker/src/cli/scout-remote.ts`, `worker/src/scout/remote-run.ts` | `.github/workflows/scout-remote.yml`, cron `30 1 * * *` (UTC) | `passed_filters` or `dropped_filter` |
 | Web search scout | `supabase/functions/scout-web/index.ts` | invoked on demand | `discovered` |
 | Pasted link | `supabase/functions/job-link-intake/handler.ts` | "Add a job by link" button (`apps/web/src/features/discovery/AddJobLinkPanel.tsx`); the bulk `ingest-links.yml` was deleted 2026-11-18 | `passed_filters` (human) |
@@ -147,6 +147,9 @@ Gates at discovery:
   2. ~~Missing description~~: removed 2026-11-18. A blank JD is no longer dropped
      (`missing_description`) or held at `discovered` (the 2026-11-12 hold, `cb774d83`). It runs the
      gates here; an unclassified title (`tech_gate_unclassified`) is not a drop when the JD is blank.
+     A **thin** JD counts as blank (`8a99dbe6`): `isThinDescription` (`_shared/screen/jd-substance.ts`)
+     strips a closed list of boilerplate lines and needs `MIN_ROLE_TEXT_CHARS` of role text. The web's
+     "No description" pill calls the same function, so the verdict and the card agree.
   3. **Work-auth gate:** `screenWorkAuth` (`_shared/screen/work-auth-gate.ts:351`). It drops an
      on-site or hybrid job outside the user's work-authorised countries, or a JD that needs
      a status the user lacks. An unknown location passes. If the country list was never set,
@@ -154,7 +157,9 @@ Gates at discovery:
   4. The rule cascade: `screenJob` (`_shared/filter/cascade.ts`), every enabled `filter_rules`
      row by `sort_order`. This includes the **experience ceiling** rule
      (`experience_ceiling`, `cascade.ts:155`), which reads the years parsed by
-     `requiredExperienceYears` (`_shared/screen/required-experience.ts:132`).
+     `requiredExperienceYears` (`_shared/screen/required-experience.ts`). An entry-level title
+     (graduate, entry-level, intern) keeps a JD whose hard minimum is under 3 years and drops at
+     3+ like any other title (`3a86eada`, Teja 2026-11-21).
 - **Exits:** `dropped_filter` (with `drop_reason`), `failed`.
 - **A pass waits.** A scouted row that passes rests at `passed_filters` (Ready to tailor) until
   Teja sends it on (Teja, 2026-11-18 21:45 IST). A blank-JD row shows a "No description" pill there.
@@ -227,9 +232,9 @@ Gates at discovery:
 
 ### 3.8 `approved -> applying -> applied` (applier)
 
-- **Code:** `worker/src/cli/apply.ts` -> `runApplierBatch` (`worker/src/claim-loop.ts:288`) ->
+- **Code:** `worker/src/cli/apply.ts` -> `runApplierBatch` (`worker/src/claim-loop.ts`) ->
   `worker/src/apply-one.ts`. Status writes go through `worker/src/guarded-advance.ts` and
-  `worker/src/supabase-gateway.ts` as agent `applier`.
+  `createSupabaseGateway` (`worker/src/supabase-gateway.ts`) as agent `applier`.
 - **Trigger:** `.github/workflows/apply.yml`: cron `30 2 * * *` (UTC; GitHub starts it late,
   often hours late), manual dispatch with `apply_only_id`, or the drain from `dispatch-apply`.
 - **Live or dry** (`apply.yml`): a scheduled run is DRY unless the repo variable
@@ -237,32 +242,39 @@ Gates at discovery:
   `drain_approved=true`, never both. A dry run never touches the status graph; it releases
   the claim. `SUBMISSION_IMPLEMENTED` is in `worker/src/playwright-page.ts`.
 - **Gates, in order, while the row is still `approved`** (`apply-one.ts` header):
-  1. **Pre-gate re-check** (`apply-one.ts:318`, `auditorPreGateDrop`) with today's settings.
+  1. **Pre-gate re-check** (`auditorPreGateDrop` in `apply-one.ts`) with today's settings.
   2. **Workday guard:** a Workday job needs a candidate account, which this system never
      creates. It is parked at `blocked_needs_human` for a human. The page is never opened.
   3. **Robots (applier):** `checkRobots` under the token `applyy-applier`
-     (`APPLIER_ROBOTS_TOKEN`, `apply-one.ts:63`). A live refusal parks the row at
+     (`APPLIER_ROBOTS_TOKEN` in `apply-one.ts`). A live refusal parks the row at
      `blocked_needs_human`. A transient failure releases it for the next run.
   4. Navigate, detect anti-bot walls, extract fields, plan the fill, fill, screenshot.
      Any blocker parks at `blocked_needs_human` with a `block_reason`.
-  5. Only then `approved -> applying`, one submit, then `applying -> applied`
-     (`apply-one.ts:940`), `blocked_needs_human` or `failed`.
+  5. Only then `approved -> applying`, one submit, then `applying -> applied`, `blocked_needs_human`
+     or `failed` (`apply-one.ts`).
+- **One application per posting** (`953eb770`). The DB trigger `guard_one_application_per_posting`
+  (migration `20261121140000`) refuses `-> applying` with 23505 when another row of the same user for the
+  same ATS posting (provider + ATS job id) holds a submitted-or-submitting status (`applying`,
+  `blocked_needs_human`, `needs_verification`, `applied` or a post-apply status; not `failed`). Pasted
+  jobs and jobs without an ATS key are exempt. The worker reads the refusal as the outcome
+  `duplicate_already_applied`: the claim is released, the row stays `approved`, the run log names it,
+  and it trips no breaker.
 - **Submit cap** (`claim-loop.ts`): `APPLY_MAX_SUBMITS`, default `DEFAULT_MAX_SUBMITS = 3`
-  (`claim-loop.ts:238`). A drain run sets it to 25 (`apply.yml`). The value is shape-checked;
+  (`claim-loop.ts`). A drain run sets it to 25 (`apply.yml`). The value is shape-checked;
   a bad value stops the run. `max_applications_per_day` (daily cap) also applies.
-- **Circuit breaker** (`claim-loop.ts:659`): in a live run, the first
-  `submit_outcome_unknown` or captcha stops all further claims in that run. Robots refusals
-  and unsupported ATS never trip it, because nothing was sent.
+- **Circuit breaker** (`breakerReason` in `claim-loop.ts`): in a live run, the first
+  `submit_outcome_unknown` or captcha stops all further claims in that run. Robots refusals,
+  unsupported ATS and `duplicate_already_applied` never trip it, because nothing was sent.
 - **Kill switch:** `checkKillSwitch` runs before each claim.
 - **Re-dispatch:** a live drain that sent at least one application and stopped at its batch
   cap or time budget starts another drain. It never does so after the breaker, the kill
-  switch or the daily cap (`shouldRedispatchDrain`, `claim-loop.ts:200`; job at the end of `apply.yml`).
+  switch or the daily cap (`shouldRedispatchDrain` in `claim-loop.ts`; job at the end of `apply.yml`).
 
 ### 3.9 Side lanes after approval
 
 | From | To | Who | Code / trigger |
 |---|---|---|---|
-| `applying` | `needs_verification` | `sweeper` | `sweep_stale_claims()` RPC, called by the applier at run start (`worker/src/supabase-gateway.ts:207`). A stale lease means nobody knows whether the submit landed, so it never goes back to the queue. |
+| `applying` | `needs_verification` | `sweeper` | `sweep_stale_claims()` RPC, called by the applier at run start (`createSupabaseGateway` in `worker/src/supabase-gateway.ts`). A stale lease means nobody knows whether the submit landed, so it never goes back to the queue. |
 | `needs_verification` | `approved` | human only | Teja checked: it did not go through. The only way back into the submit path. |
 | `needs_verification` | `applied` / `failed` | human | Teja checked the employer portal. |
 | `blocked_needs_human` | `applied` / `dropped_filter` / `failed` | human | Teja finishes by hand, or gives up. |
@@ -287,7 +299,7 @@ Gates at discovery:
 | Gate | Where it runs | File | Effect when it fails |
 |---|---|---|---|
 | Robots (scouting) | scouts, board fetches | `packages/master-robots/src/gate.ts` | board not read |
-| Robots (applier) | before the apply page opens | `worker/src/apply-one.ts:63` | `blocked_needs_human` (live) or released |
+| Robots (applier) | before the apply page opens | `APPLIER_ROBOTS_TOKEN` in `worker/src/apply-one.ts` | `blocked_needs_human` (live) or released |
 | Tech gate | screener, matcher pre-gate, auditor, applier | `_shared/screen/tech-gate.ts` | `dropped_filter` |
 | Work-auth | screener, job-link-intake, matcher pre-gate, auditor, applier | `_shared/screen/work-auth-gate.ts:351` | `dropped_filter` |
 | Experience ceiling | screener cascade, matcher pre-gate, auditor, applier | `_shared/filter/cascade.ts:155`, `_shared/screen/required-experience.ts:240` | `dropped_filter` |
@@ -297,8 +309,8 @@ Gates at discovery:
 | Human approval | Approval Queue | `apps/web/src/features/approval/ApprovalQueuePage.tsx` | stays `awaiting_approval` |
 | Auto-apply switch | dispatch-apply | `supabase/functions/dispatch-apply/handler.ts` | no live drain (kit still built) |
 | Live/dry switch | apply.yml | `.github/workflows/apply.yml` | dry run, no status change |
-| Submit cap | applier | `worker/src/claim-loop.ts:238` | run stops claiming |
-| Circuit breaker | applier | `worker/src/claim-loop.ts:659` | run stops claiming |
+| Submit cap | applier | `DEFAULT_MAX_SUBMITS` in `worker/src/claim-loop.ts` | run stops claiming |
+| Circuit breaker | applier | `breakerReason` in `worker/src/claim-loop.ts` | run stops claiming |
 | Stale-lease sweep | applier run start | `sweep_stale_claims()` | `needs_verification` |
 
 ## 5. How to check a claim on this page

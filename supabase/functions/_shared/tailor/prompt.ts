@@ -502,6 +502,9 @@ export interface BulletRewriteItem {
   readonly firstText: string;
   // The words the validator could not trace in that wording.
   readonly bannedTokens: readonly string[];
+  // TRUSTED. Numbers the master bullet states that the first wording cut (dropped_metric, S4b 2026-11-21).
+  // Required, not optional, so no caller can forget to pass the list; [] when nothing was cut.
+  readonly keepNumbers: readonly string[];
 }
 
 // The policy of the rewrite call: what to return and the one rule.
@@ -546,6 +549,8 @@ export function buildBulletRewritePrompt(items: readonly BulletRewriteItem[]): T
     "<candidate_truth>",
     // One line per bullet: the id and its master text.
     ...items.map((item) => `${item.ref}: ${item.masterText}`),
+    // The numbers each bullet must print again: master facts, so they sit in the trusted region (S4b).
+    ...items.filter((item) => item.keepNumbers.length > 0).map((item) => `${item.ref} must keep: ${item.keepNumbers.join(", ")}`),
     // Truth closed.
     "</candidate_truth>",
     // One string, as the transport takes it.
@@ -554,8 +559,9 @@ export function buildBulletRewritePrompt(items: readonly BulletRewriteItem[]): T
   const userContent = [
     // The fence opens: everything until the close is data, never instructions.
     UNTRUSTED_REWRITE_OPEN,
-    // One block per bullet.
-    ...items.map((item) => `${item.ref}\nfirst attempt: ${neutralizeFenceSequences(item.firstText)}\nwords to drop: ${item.bannedTokens.join(", ")}`),
+    // One block per bullet. A metric-only fix has no words to drop, so it says "(none)" rather than an empty list
+    // the model could read as "drop anything" (S4b 2026-11-21).
+    ...items.map((item) => `${item.ref}\nfirst attempt: ${neutralizeFenceSequences(item.firstText)}\nwords to drop: ${item.bannedTokens.length > 0 ? item.bannedTokens.join(", ") : "(none)"}`),
     // The fence closes.
     UNTRUSTED_REWRITE_CLOSE,
     // One string, as the transport takes it.

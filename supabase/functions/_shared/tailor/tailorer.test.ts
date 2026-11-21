@@ -506,13 +506,97 @@ test("retry: a word problem alongside a summary problem is not retried (one call
 test("retry: retryableBullets refuses any word violation that is not on a bullet of this profile", async () => {
   // Imported here so earlier tests do not depend on the new export.
   const { retryableBullets } = await import("./tailorer.ts");
-  // On the bullet: retryable, grouped by bullet.
-  assert.deepEqual(retryableBullets([{ kind: "unverifiable_token", ref: "bullet-rest-api", token: "robust" }], INVENTED_ONCE), new Map([["bullet-rest-api", ["robust"]]]));
+  // On the bullet: retryable, grouped by bullet. Re-pinned 2026-11-21 (S4b): each bullet now carries the words
+  // to drop AND the numbers to keep, because a dropped_metric is fixed by the same rewrite.
+  assert.deepEqual(retryableBullets([{ kind: "unverifiable_token", ref: "bullet-rest-api", token: "robust" }], INVENTED_ONCE), new Map([["bullet-rest-api", { drop: ["robust"], keep: [] }]]));
   // On the summary or a skill (refs that are not bullets here): no retry, the rewrite only fixes bullets.
   assert.equal(retryableBullets([{ kind: "unverifiable_token", ref: "skill-node", token: "robust" }], INVENTED_ONCE), null);
   assert.equal(retryableBullets([{ kind: "unverifiable_token", ref: "summary", token: "robust" }], INVENTED_ONCE), null);
   // Any other kind in the list: no retry.
   assert.equal(retryableBullets([{ kind: "unverifiable_token", ref: "bullet-rest-api", token: "robust" }, { kind: "empty_selection" }], INVENTED_ONCE), null);
+});
+
+// ---- S4b (2026-11-21): the one-shot rewrite also fixes untraced_tech and dropped_metric ----------------------
+// On the 26-row golden run (peer 3 r5) 5 of 26 tailorings were refused: 2 dropped_metric, 2 untraced_tech, 1
+// misattributed_bullet. The first two are bullet-TEXT faults the existing rewrite can repair (drop a tech name the
+// sources never state; put back a number the master states). misattributed_bullet needs a move or a source edit,
+// which a {ref, text} rewrite cannot express, so it stays a refusal with no extra call.
+
+// A bullet on the sources path, in the shape the live prompt asks for: it cites itself.
+const withSources = (text: string): TailoredProfile => ({ ...HONEST_TAILORING, experience: [{ ref: "exp-eventportal", bullets: [{ ref: "bullet-rest-api", text, sources: ["bullet-rest-api"] }] }] });
+
+test("S4b retry gate: untraced_tech joins the words to drop, dropped_metric the numbers to keep, both on one bullet", async () => {
+  // The gate under test.
+  const { retryableBullets } = await import("./tailorer.ts");
+  // Three faults on the same bullet: one invented word, one untraced tech name, one lost number.
+  const got = retryableBullets([
+    { kind: "unverifiable_token", ref: "bullet-rest-api", token: "robust" },
+    { kind: "untraced_tech", ref: "bullet-rest-api", term: "Docker" },
+    { kind: "dropped_metric", ref: "bullet-rest-api", value: "500" },
+  ], INVENTED_ONCE);
+  // One rewrite item carries all three.
+  assert.deepEqual(got, new Map([["bullet-rest-api", { drop: ["robust", "Docker"], keep: ["500"] }]]));
+});
+
+test("S4b retry gate: misattributed_bullet, or a fault off this profile's bullets, is never retried", async () => {
+  // The gate under test.
+  const { retryableBullets } = await import("./tailorer.ts");
+  // A source from another entry: a text rewrite cannot remove a citation.
+  assert.equal(retryableBullets([{ kind: "untraced_tech", ref: "bullet-rest-api", term: "Docker" }, { kind: "misattributed_bullet", ref: "bullet-other", parentRef: "exp-eventportal" }], INVENTED_ONCE), null);
+  // A number on a bullet this profile does not print: nothing to rewrite.
+  assert.equal(retryableBullets([{ kind: "dropped_metric", ref: "bullet-not-here", value: "500" }], INVENTED_ONCE), null);
+  // An untraced name on a ref that is not a bullet here.
+  assert.equal(retryableBullets([{ kind: "untraced_tech", ref: "summary", term: "Docker" }], INVENTED_ONCE), null);
+});
+
+test("S4b retry: a bullet that names a tech its sources never state is rewritten once and passes", async () => {
+  // First: Docker, which the master bullet never names. Retry: the master's own wording.
+  const { tailor, prompts } = tailorerReplying([
+    JSON.stringify(withSources("Built a REST API with Express, Node.js and Docker for a college event portal, handling 500 users")),
+    JSON.stringify({ bullets: [{ ref: "bullet-rest-api", text: "Built a REST API with Express and Node.js for a college event portal, handling 500 users" }] }),
+  ]);
+  const outcome = await tailor(POSTING);
+  // Tailored after exactly two calls.
+  assert.equal(outcome.kind, "tailored");
+  assert.equal(prompts.length, 2);
+  if (outcome.kind !== "tailored") return;
+  // The first verdict was the untraced name, and it is on record.
+  assert.ok(outcome.retry !== null && outcome.retry.firstViolations.some((v) => v.kind === "untraced_tech" && v.term === "Docker"));
+  // The rewrite prompt told the model to drop it.
+  assert.match(prompts[1]!.userContent, /words to drop: [^\n]*Docker/);
+});
+
+test("S4b retry: a bullet that lost the master's number is rewritten once with that number named as kept", async () => {
+  // First: the "500 users" fact cut. Retry: put back.
+  const { tailor, prompts } = tailorerReplying([
+    JSON.stringify(withSources("Built a REST API with Express and Node.js for a college event portal")),
+    JSON.stringify({ bullets: [{ ref: "bullet-rest-api", text: "Built a REST API with Express and Node.js for a college event portal, handling 500 users" }] }),
+  ]);
+  const outcome = await tailor(POSTING);
+  // Tailored after exactly two calls.
+  assert.equal(outcome.kind, "tailored");
+  assert.equal(prompts.length, 2);
+  if (outcome.kind !== "tailored") return;
+  // The first verdict was the dropped number.
+  assert.deepEqual(outcome.retry?.firstViolations, [{ kind: "dropped_metric", ref: "bullet-rest-api", value: "500" }]);
+  // The number to keep is TRUSTED (it comes from the master), so it sits in the system region, never the fence.
+  assert.match(prompts[1]!.systemInstruction, /bullet-rest-api must keep: 500/);
+  assert.doesNotMatch(prompts[1]!.userContent, /must keep/);
+});
+
+test("S4b retry: a rewrite that still drops the number is refused with both attempts on record", async () => {
+  // The retry ignores the keep line.
+  const { tailor, prompts } = tailorerReplying([
+    JSON.stringify(withSources("Built a REST API with Express and Node.js for a college event portal")),
+    JSON.stringify({ bullets: [{ ref: "bullet-rest-api", text: "Built a REST API with Express and Node.js for a college event portal" }] }),
+  ]);
+  const outcome = await tailor(POSTING);
+  // Refused after two calls: the gate itself is unchanged.
+  assert.equal(outcome.kind, "refused");
+  assert.equal(prompts.length, 2);
+  if (outcome.kind !== "refused") return;
+  // Both verdicts recorded.
+  assert.deepEqual(outcome.retry, { firstViolations: [{ kind: "dropped_metric", ref: "bullet-rest-api", value: "500" }], result: "still_invalid" });
 });
 
 test("retry: a reply naming a bullet that did not fail is unusable (no partial merge)", async () => {

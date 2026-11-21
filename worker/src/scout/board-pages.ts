@@ -59,7 +59,7 @@ export { RobotsUnavailableError };
 
 // The per-request timeout for every board page and detail read: the edge transport's own constant
 // (15 s), imported so the two scouts cannot drift (D5 drift #3, 2026-11-21). Without it one hung
-// socket stalled the CLI run to its 12-minute budget. A timeout THROWS, so scout.ts counts it.
+// socket stalled the CLI run to its budget (12 min then, 16 since 2026-11-21). A timeout THROWS, so scout.ts counts it.
 import { DEFAULT_TIMEOUT_MS as BOARD_PAGE_TIMEOUT_MS } from '../../../supabase/functions/_shared/http/transport.ts';
 // Exported for the test that pins it to the edge's value.
 export { BOARD_PAGE_TIMEOUT_MS };

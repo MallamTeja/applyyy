@@ -108,7 +108,7 @@ submitted, confirmed applied, tracked.
 Progress is measured against these seven stages, never against a stored percentage. The repo `CLAUDE.md` §1 says how:
 re-derive the number from the repo and the live state each time, and state the basis.
 
-As of the 2026-11-08 00:45 handoff ([docs/handoff/2026-11-08-1745-orchestrator-handoff.md](../handoff/2026-11-08-1745-orchestrator-handoff.md)),
+As of 2026-11-08,
 the claim was 5 of 7 stages live. The two gaps were:
 
 - **Stage 5, bot submit:** the code exists, but no real bot submit has been proven yet. The first candidate row was
@@ -243,8 +243,8 @@ kit. His answers there go into the answer bank, so next time the bot can answer 
 - The bot never ticks a declaration (for example "I did not use AI") on Teja's behalf.
 - Teja ruled 2026-11-07 (23:02 IST): his own hand-applying is not a task. Never list it as a to-do.
 
-In progress (uncommitted at 2a9ac31): rebuilding a kit right after an answer is saved (`dispatch-apply` with `kit_only`).
-See [docs/handoff/2026-11-08-1745-pending-tasks.md](../handoff/2026-11-08-1745-pending-tasks.md) P0 #2.
+Since `2936e8c` (2026-11-08): the kit is rebuilt right after an answer is saved (`dispatch-apply` with `kit_only`).
+Live work: [docs/handoff/2026-11-12-1305-pending-tasks.md](../handoff/2026-11-12-1305-pending-tasks.md).
 
 ### 4.7 Screen hard, but keep a human escape hatch
 

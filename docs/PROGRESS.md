@@ -1,8 +1,8 @@
 # `applyy` — live progress
 
-_Last verified against code: 2026-11-08 (2a9ac31)._
+_Last verified against code: 2026-11-21 (3a86eada)._
 
-This file holds the live progress figure, the live facts (each with the command that
+This file holds how to derive the progress figure, the live facts (each with the command that
 regenerates it) and the re-verified open items. The day-to-day work list lives in the
 newest pair under [`handoff/`](handoff/) (`ls docs/handoff | tail -2`). The September
 2026 log is archived verbatim in
@@ -14,37 +14,27 @@ regenerates it. **Counts date-stamp themselves. Re-measure, never quote.**
 
 ---
 
-## Progress: 71% (5 of 7 milestones), as of 2026-11-08
+## Progress: re-derive it, never store it
 
-The product goal (repo `CLAUDE.md` §1): one human-approved pipeline running end-to-end for
-real. Jobs are discovered, screened, tailored, approved, submitted, confirmed applied and
-tracked. Each milestone counts only when it has run on live rows.
+Repo `CLAUDE.md` §1 ("Progress reporting") is the rule: when Teja asks for a percentage,
+re-derive it at ask time from the repo and live state, and state the basis ("X of Y
+milestones; the gap is …"). This file stores no figure, because a stored % goes stale the day
+it is written.
 
-| # | Milestone | State | Evidence |
-|---|---|---|---|
-| 1 | Discovered | Live | `scout.yml`, `scout-remote.yml` on cron; `supabase/functions/scout-ats/`, `worker/src/cli/scout.ts` |
-| 2 | Screened | Live | Scouts screen at insert (`supabase/functions/_shared/screen/screen-batch.ts`); `supabase/functions/screener/` |
-| 3 | Tailored (and audited) | Live | `supabase/functions/tailor/`, `supabase/functions/auditor/`; rows sit at `awaiting_approval` |
-| 4 | Approved by the human | Live | Approval queue in `apps/web/src/features/`; rows at `approved` |
-| 5 | **Submitted by the bot** | **Not proven** | No live row has reached `applied` from a worker run (query below) |
-| 6 | **Confirmed applied (receipt)** | **On hold** | Teja's ruling; see the newest pending-tasks file in `handoff/` |
-| 7 | Tracked | Live | `supabase/functions/email-tracker-intake/`, `supabase/functions/gmail-sync/` |
-
-**The gap is milestones 5 and 6.** Every row that reached `applied` so far was moved there by
-a human (the Manual apply lane), never by the worker. Check it:
+The milestones toward the product goal (one human-approved pipeline running end-to-end for
+real): discovered → screened → tailored (and audited) → approved by the human → **submitted
+by the bot** → confirmed applied (receipt) → tracked. A milestone counts only when it has run
+on live rows. The milestone that has stayed open longest is the bot submit. Check who moved
+rows to `applied`:
 
 ```sql
 select from_status, agent, count(*), max(created_at)::date
 from public.application_events where to_status = 'applied' group by 1, 2;
 ```
 
-As of 2026-11-08 every row this returns has `agent = 'human'`. The first bot submit moves the
-figure to 86% (6 of 7). Its exact steps (approve, wait for the kit,
-`worker/src/cli/rehearse-assist.ts --id <uuid>`, then a single `apply.yml` dispatch) are in
-the newest `handoff/*-pending-tasks.md`.
-
-How to re-derive the figure: run the query above and the status count below, and read the
-newest handoff. Do not copy the 71% forward without doing so.
+Rows with `agent = 'human'` came from the Manual apply lane, not the worker. The first bot
+submit's steps (approve, wait for the kit, `worker/src/cli/rehearse-assist.ts --id <uuid>`,
+then a single `apply.yml` dispatch) are in the newest `handoff/*-pending-tasks.md`.
 
 ---
 
@@ -58,7 +48,7 @@ via `.github/workflows/apply.yml`). Read the status graph from the database, nev
 `select * from application_status_transitions where from_status = '<s>';`.
 
 **Submission controls:**
-- `SUBMISSION_IMPLEMENTED = true` since 2026-10-09 (`worker/src/playwright-page.ts:21`, commit `c557533`).
+- `SUBMISSION_IMPLEMENTED = true` since 2026-10-09 (constant `SUBMISSION_IMPLEMENTED` in `worker/src/playwright-page.ts`, commit `c557533`).
 - The per-run cap is `APPLY_MAX_SUBMITS` (default 3, `worker/src/claim-loop.ts`), behind a
   circuit breaker (`0c437e4`).
 - A robots.txt gate runs before the apply page opens (`a3b4115`; `checkRobots` in
@@ -99,11 +89,13 @@ re-enters at `passed_filters` through a `human`-only edge (migration `2026103120
 every machine agent out.** Running agents without the key needs two deliberate statements; the
 exact SQL is in that migration's header. Never "fix" a lockout by deleting the key.
 
-**What runs on a schedule** (as of 2026-11-08; re-check with the grep above):
+**What runs on a schedule** (re-check with the grep above; this table drifts):
 
 | Workflow | Cron (UTC) | What it does |
 |---|---|---|
-| `scout.yml` | `17 0,12 * * *` | ATS scout, screens at insert (twice a day since 2026-11-01) |
+| `scout.yml` | `17 0,2,5,7,10,12,14,17,19,22 * * *` | ATS scout, screens at insert (ten a day since `06ab7913`, oldest-polled boards first); passes wait at `passed_filters` |
+| `scout-ats-daily.yml` | `41 1 * * *` | Liveness only: retires queued rows whose posting closed |
+| `postscreen-drain.yml` | `30 4 * * *` | Approval-queue re-gate only (`auditor?mode=regate_queue`); the full drain is manual |
 | `scout-remote.yml` | `30 1 * * *` | Remote-feed scout |
 | `apply.yml` | `30 2 * * *` | Worker submit run; DRY unless `APPLYY_CRON_LIVE` is `true` |
 | `apply-kit.yml` | `0 12 * * *` | Builds apply kits; also dispatched on every approve |
@@ -114,9 +106,10 @@ exact SQL is in that migration's header. Never "fix" a lockout by deleting the k
 GitHub cron is best-effort; real start times are in `gh run list`. There is no `pg_cron`
 (ruled out, migration `20261009220000`).
 
-**Manual routes (no cron):** `run-one.yml` (matcher → tailor → auditor for one row,
+**Manual routes:** `run-one.yml` (matcher → tailor → auditor for one row,
 `worker/src/cli/run-one.ts`), `pregate-sweep.yml`, `prescreen-drain.yml`,
-`postscreen-drain.yml`, and the web app's batch runner (`ingest-links.yml` was deleted 2026-11-18). Normalizer, tailor
+`workday-egress-probe.yml`, the full `postscreen-drain.yml` drain (manual dispatch only since the
+2026-11-18 ruling; its cron runs the re-gate alone), and the web app's batch runner (`ingest-links.yml` was deleted 2026-11-18). Normalizer, tailor
 and auditor have no schedule of their own.
 
 **Screening rules:**
@@ -140,7 +133,7 @@ no CI (`paths-ignore`). Traps: [`verification-traps.md`](verification-traps.md).
 
 ---
 
-## Open items (each re-verified 2026-11-08)
+## Open items (live checks last re-measured 2026-11-08; code checks 2026-11-21)
 
 **Still open:**
 
@@ -153,23 +146,9 @@ no CI (`paths-ignore`). Traps: [`verification-traps.md`](verification-traps.md).
    The workflows use the new names (`.github/workflows/apply.yml`, `apply-kit.yml`). Only
    `gh secret list` confirms the GitHub side.
 3. **`degree_mismatch` has no producer** (see Screening rules).
-4. **Bot submit (milestone 5) is unproven.** Steps are in the newest pending-tasks file.
+4. **Bot submit is unproven** until the `applied` query above shows a non-human agent. Steps are in the newest pending-tasks file.
 
-**Resolved (dated):**
-
-- ~~Stale comments said `seed_user_defaults` never seeds `gemini_key_state`~~: corrected in
-  place 2026-10-24 (`CORRECTED 2026-10-24` in `_shared/gemini/pool.test.ts`); the old line in
-  `supabase/functions/STREAM_NOTES.md` is struck through.
-- ~~An empty agent-key table only raises a warning~~: false since migration
-  `20261102210000` (fail-closed).
-- ~~`experience_ceiling` can never fire~~: producer added 2026-11-04 (`required-experience.ts`).
-- ~~CI does not run `packages/*` tests~~: it does now (per-package step in `ci.yml`).
-- ~~`email_events` cannot store `thread_id`, `to`, or `label_ids`~~: resolved by 2026-10-23
-  (`4f55733`, `6c70c93`).
-- ~~`supabase/tests/invariants.sql` should exist~~: created 2026-10-23 (`37c6edb`).
-- ~~`sweep_stale_claims` double-counts~~: fixed (`20260910190000`, then `20260918213000`).
-- ~~Wrong migration comments~~: corrected in place 2026-10-23 (`cc333e7`, `CORRECTED 2026-10-23` markers).
-- ~~"Nothing is deployed", "typecheck is red"~~: false since the 2026-09/10 deploys.
+Resolved items are not kept here; `git log -p docs/PROGRESS.md` holds them.
 
 ---
 

@@ -199,7 +199,7 @@ export function watchlistPollUpdate(
 }
 
 // D10 (2026-11-18): a board this far into a failure streak is polled once a day, not every run.
-// On 11-18, 62 of 64 Workday boards sat at >= 5, and every run spent its 12-min budget on them.
+// On 11-18, 62 of 64 Workday boards sat at >= 5, and every run spent its 12-min budget on them (the budget is 16 min since 2026-11-21, S10).
 export const FAILING_BOARD_STREAK = 5;
 // How long a failing board rests between polls.
 export const FAILING_BOARD_REST_MS = 24 * 60 * 60 * 1000;
@@ -245,7 +245,7 @@ export interface WorkdayBackfillResult {
 
 // Fill descriptions on up to `limit` stored blank Workday jobs, oldest first, through the same
 // run (cap, deadline, pacing, robots gate) the new-row fill uses. Called BEFORE the board loop:
-// every run ends on the 12-min budget, so a pass after the loop would never get time.
+// every run ends on the run budget (SCOUT_BUDGET_MS, 16 min since 2026-11-21), so a pass after the loop would never get time.
 export async function backfillWorkdayDescriptions(
   // The scout's service client.
   db: SupabaseClient,

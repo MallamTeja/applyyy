@@ -30,7 +30,7 @@ Every agent above exists as an edge function. Read the edges, never assume them:
 directly (screened on insert); only the fallback/scout-web path inserts at `discovered`.
 
 **Submission is automatic after human approval** (since c557533, 2026-10-09).
-`SUBMISSION_IMPLEMENTED=true` (`worker/src/playwright-page.ts:21`). Teja hand-picks and
+`SUBMISSION_IMPLEMENTED=true` (`worker/src/playwright-page.ts:29`). Teja hand-picks and
 approves; the worker submits `approved` rows with a cap of 3 per run and a circuit breaker
 (0c437e4). Scheduled `apply.yml` runs stay DRY unless the repo variable `APPLYY_CRON_LIVE=true`.
 A single real submit: `gh workflow run apply.yml --ref main -f dry_run=false -f apply_only_id=<uuid>`

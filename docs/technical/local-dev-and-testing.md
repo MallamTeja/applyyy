@@ -1,6 +1,6 @@
 # Local development and testing
 
-_Written 2026-11-08 against 2a9ac31._
+_Written 2026-11-08 against 2a9ac31. Last verified: 2026-11-21 (3a86eada)._
 
 ## What it is
 
@@ -171,7 +171,7 @@ These tests guard the SSRF and auth rules of `api/render-job-page.ts`, which run
 
 ### 5. End-to-end suites
 
-There are two e2e kinds. Only the first runs in CI.
+There are two e2e kinds. Both run in CI.
 
 **Web e2e (in CI).** Files in `apps/web/test/` named `*E2e.test.ts` plus `e2eSuite.test.ts`. List them with:
 
@@ -191,7 +191,7 @@ Always build with `--mode e2e` right before you run web tests. A plain `vite bui
 
 `apps/web` has no DOM test library. A `useEffect` bug can only be proved in an e2e file with a `page.route` gate (memory `applyyy-web-effect-bugs-need-e2e.md`).
 
-**Worker e2e runner (local only).** `pnpm --filter @applyy/worker test:e2e` runs `worker/test/e2e-runner.mjs`. It reads `master-resume.pdf` at the repo root, which is gitignored personal data, and serves `apps/web/dist`. It is not part of `ci.yml`. It fails on a machine without that PDF.
+**Worker e2e runner (in CI since 30e1aa3c).** `pnpm --filter @applyy/worker test:e2e` (or, from `worker/`, `node --experimental-strip-types test/e2e-runner.mjs`) runs `worker/test/e2e-runner.mjs`. It renders an invented `syntheticResume` to a real PDF through the production print path, then clicks through `apps/web/dist`. It no longer reads the gitignored `master-resume.pdf`, so it runs on a clean checkout. `ci.yml` runs it as the `worker e2e runner` step, right after the e2e-mode build: its dist guard refuses any other bundle.
 
 ### 6. CI parity
 
@@ -203,7 +203,9 @@ CI is one job in `.github/workflows/ci.yml`. It needs no secrets. Every check st
 | edge function tests | `node --test "supabase/functions/**/*.test.ts"` from root |
 | shared-types tests | `node --test "packages/shared-types/test/**/*.test.ts"` from root |
 | package tests (each `packages/*/test` except shared-types) | `node --test "packages/<pkg>/test/**/*.test.ts"` per package |
-| web tsc, vite build, vite build (e2e mode), web tests | section 4, web, in that order |
+| web tsc, web tests tsc (`tsc --noEmit -p tsconfig.test.json`, since 5baf245a), vite build, vite build (e2e mode) | section 4, web, in that order; from `apps/web`, `./node_modules/.bin/tsc --noEmit -p tsconfig.test.json` for the tests |
+| worker e2e runner (after the e2e-mode build) | from `worker/`: `node --experimental-strip-types test/e2e-runner.mjs` (section 5) |
+| web tests | section 4, web |
 | render function tsc and tests | section 4, `api/` |
 | worker tsc, worker vitest | section 4, worker |
 | gitleaks secret scan of the pushed commits | no local step; CI only |
@@ -309,7 +311,7 @@ When peers have half-done edits in the tree, your gate may fail on their code, o
 
 Leak to know about: the junctioned `node_modules/@applyy/*` links point at the **main** tree's `packages/*`. So web and worker gates in the worktree still import the main tree's shared packages. Pin the worktree to the same commit the main tree's packages are at, and re-run on any surprise failure in a file you did not touch.
 
-Deploys use the same idea: a detached worktree pinned to a SHA, run only by the orchestrator. See repo `CLAUDE.md` §3.
+Deploys use the same idea with a different copy: since 2026-11-10 a `git archive` export pinned to a SHA (it registers nothing in `.git/worktrees`, so nothing piles up), run only by the orchestrator. See repo `CLAUDE.md` §3.
 
 ### 11. Windows and Git Bash traps
 

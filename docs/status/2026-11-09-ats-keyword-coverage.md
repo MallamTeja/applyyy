@@ -1,7 +1,7 @@
 # `applications.ats_keyword_coverage`: where it came from, and a drop draft (2026-11-09)
 
 **Status: awaiting Teja's ruling. Nothing applied, nothing dropped.**
-Asked in `docs/handoff/2026-11-08-1745-pending-tasks.md` item 11: "0 of 35,945 rows filled, no
+Asked in `docs/handoff/2026-11-08-1745-pending-tasks.md` (deleted 2026-11-21; `git show 3a86eada:docs/handoff/2026-11-08-1745-pending-tasks.md`) item 11: "0 of 35,945 rows filled, no
 reader or writer. Teja asked why it exists."
 
 ## Verdict

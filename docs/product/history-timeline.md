@@ -40,6 +40,7 @@ handoff file in `docs/handoff/`.
 | 5 | 2026-10-31 to 11-04 | Intake and AI review | Add-a-job-by-link, AI resume chat, Workday, fail-closed agent key, experience ceiling |
 | 6 | 2026-11-05 to 11-06 | Scale and space | Biggest day (96 commits): apply-on-approve, kits on every approve, DB space policy, answer bank |
 | 7 | 2026-11-07 to 11-08 | Resume quality and first bot submit prep | One-page rule, ATS panel, auditor tightening, rehearse, Manual lane reasons |
+| 8 | 2026-11-09 to 11-21 | Truthful resumes and a calmer pipeline | Never skip by age, AI skill group, Ready to tailor, daily liveness, iCIMS, provenance gates, one application per posting |
 
 ```mermaid
 timeline
@@ -51,6 +52,7 @@ timeline
     Oct 31-Nov 04 : Paste a job link, AI resume chat, Workday
     Nov 05-06 : Apply on approve, kits, DB space policy
     Nov 07-08 : One-page resumes, first bot submit queued
+    Nov 09-21 : Ready to tailor, iCIMS, provenance gates, one application per posting
 ```
 
 ## How it evolved
@@ -145,6 +147,16 @@ timeline
 - `4389f9a`, `2a9ac31` the 2026-11-08 00:45 wind-down handoff: progress 71% (5 of 7 stages).
 - `2936e8c` (after 2a9ac31) rebuild the kit when an answer is saved.
 
+### Phase 8 — Truthful resumes and a calmer pipeline (2026-11-09 to 11-21)
+
+- `8ba2b06a` never drop a job for its age or a per-company weekly count (Teja, 2026-11-10).
+- `dc9328b3` every resume carries an AI skill group of at least 5; the chat adds groups, skills and bullets truthfully.
+- `fa315449` scouted jobs wait in Ready to tailor; only pasted links go straight to approval (Teja, 2026-11-18).
+- `415881ec` daily queue liveness (`scout-ats?mode=liveness`, two proofs).
+- `f7d9cb43` iCIMS adapter, wired into both scouts.
+- `e1f4b520` provenance gates: AI-written bullets must trace to their master sources.
+- `953eb770` one application per posting: the DB refuses a second row into `applying`.
+
 ## Rules and guardrails the history produced
 
 Many rules in `CLAUDE.md` come from a dated incident. A few examples:
@@ -154,7 +166,7 @@ Many rules in `CLAUDE.md` come from a dated incident. A few examples:
 | Never `git add -A` | 2026-09-10, plan sections dropped (`a3c7426`) |
 | No agent fast paths that skip a stage | 2026-09-17, forged audit history (`bb6a988`) |
 | Agent key separates machine from human | 2026-10-08 (`b2a4a36`); fail-closed 2026-11-04 |
-| Deploy from a clean worktree pinned to a SHA | CLI ships uncommitted peer edits (memory "Deploy from a clean worktree") |
+| Deploy from a `git archive` export pinned to a SHA (a worktree before 2026-11-10) | CLI ships uncommitted peer edits (memory "Deploy from a clean export") |
 | `--import-map` on every function deploy | 2026-11-05 (`bb55391`) |
 | Grep the whole repo when moving an export | 2026-11-05, `7a98b79` broke the worker |
 | Never `git commit --amend` on the shared tree | 2026-11-06, an amend rewrote a peer commit |
@@ -162,11 +174,10 @@ Many rules in `CLAUDE.md` come from a dated incident. A few examples:
 ## Known gaps and open questions
 
 - **"Phase 1 100%" (2026-09-18, `a8b6e02`) was a claim, not a measurement.** As of 2026-11-08 the bot has
-  never submitted a real application (handoff 2026-11-08 00:45, stage 5 "never proven").
+  never submitted a real application (stage 5 "never proven").
 - **"Submission is automatic" (`c557533`, 2026-10-09) is code, not proof.** The first real submit target is
   TrueFoundry `d0a7d313`, waiting for Teja's approval.
 - Stage 6 (receipt confirmation) is on hold by Teja's ruling.
-- `rehearse-assist` has no zero-field guard (pending P1 in the 2026-11-08 pending list).
 
 ## Related docs
 
@@ -176,5 +187,5 @@ Many rules in `CLAUDE.md` come from a dated incident. A few examples:
 - [../functions/README.md](../functions/README.md)
 - [../features/web-app.md](../features/web-app.md)
 - [../ops/ci-and-workflows.md](../ops/ci-and-workflows.md)
-- [../handoff/2026-11-08-1745-orchestrator-handoff.md](../handoff/2026-11-08-1745-orchestrator-handoff.md)
+- The newest `docs/handoff/*orchestrator-handoff.md` (`ls docs/handoff | tail`) and [../handoff/2026-11-12-1305-pending-tasks.md](../handoff/2026-11-12-1305-pending-tasks.md)
 - [../status/2026-09-progress-log-archive.md](../status/2026-09-progress-log-archive.md)

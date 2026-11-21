@@ -16,8 +16,8 @@ Actions and Google Apps Script.
 |---|---|---|---|---|
 | Web console (static SPA) | Vercel | browser | push to `main` (Vercel Git integration) | — |
 | `api/render-job-page.ts` | Vercel Function, 60 s max (`vercel.json`) | Node + `@sparticuz/chromium` | same push | `ls api` |
-| Postgres 17 + Auth + Storage | Supabase | Postgres | `supabase db push` from a pinned worktree (orchestrator, `CLAUDE.md` §3) | MCP `list_migrations` |
-| Edge functions (18 as of 2026-11-08) | Supabase Edge | Deno | `supabase functions deploy … --import-map supabase/functions/deno.json` from a pinned worktree (orchestrator) | `ls supabase/functions/*/index.ts`; MCP `list_edge_functions` |
+| Postgres 17 + Auth + Storage | Supabase | Postgres | `supabase db push --linked` (dry run first) from a `git archive` export pinned to a SHA (orchestrator, `CLAUDE.md` §3) | MCP `list_migrations` |
+| Edge functions (18 as of 2026-11-08) | Supabase Edge | Deno | `supabase functions deploy … --import-map supabase/functions/deno.json` from a `git archive` export pinned to a SHA (orchestrator) | `ls supabase/functions/*/index.ts`; MCP `list_edge_functions` |
 | Worker CLIs (9 as of 2026-11-08) | GitHub Actions runners, or local | Node 24 + Playwright | run from the checked-out commit | `ls worker/src/cli` |
 | Gmail email tracker (`email-tracker.gs`) | Google Apps Script, hourly trigger + `doPost` web app | Apps Script (V8) | pasted into the script editor by hand | `git ls-files '*.gs'` |
 
@@ -53,7 +53,7 @@ Every caller signs in as the same app user (`CLAUDE.md` §7).
 | scout (ATS) | edge `scout-ats` + worker `scout.ts` | no | inserts at `passed_filters` / `dropped_filter` (screened on insert); retires rows whose posting closed (`_shared/scout/queue-liveness.ts`, `feed-liveness.ts`) | Discovery page · `scout.yml` (3× a day) |
 | scout (remote feeds) | worker `scout-remote.ts` | no | inserts, same screener path | `scout-remote.yml` (daily) |
 | scout (web search) | edge `scout-web` | **yes** (Google Search grounding) | inserts at `discovered` | Web Scout panel |
-| pasted-link intake | edge `job-link-intake` (acts as `human`) | **yes** (extraction) | inserts or revives to `passed_filters`, then runs matcher → tailor → auditor in the background | Add-a-job-by-link · `ingest-links.yml` |
+| pasted-link intake | edge `job-link-intake` (acts as `human`) | **yes** (extraction) | inserts or revives to `passed_filters`, then runs matcher → tailor → auditor in the background | Add-a-job-by-link (`ingest-links.yml` was deleted 2026-11-18) |
 | normalizer | edge | no | `discovered → deduped / dropped_duplicate` | Run pipeline · `prescreen-drain.yml` |
 | screener | edge | no (deterministic cascade) | `deduped → passed_filters / dropped_filter` | Run pipeline · `prescreen-drain.yml` |
 | matcher | edge | **yes** | `passed_filters → scored / dropped_filter / failed`; advance floor 30 (`_shared/match/score-threshold.ts`) | Run pipeline · `run-one` · `postscreen-drain` · `pregate-sweep` |

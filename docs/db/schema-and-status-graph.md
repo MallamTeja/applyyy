@@ -1,6 +1,6 @@
 # Database schema and status graph
 
-_Last verified against code: 2026-11-08 (2a9ac31)._
+_Last verified against code: 2026-11-21 (3a86eada)._
 
 This is the reference for the applyyy Postgres database (Supabase project
 `xynqxekcqizwhtskzqrq`). The source of truth is `supabase/migrations/`. This page explains
@@ -86,7 +86,9 @@ Rules the migrations follow:
    forced: `application_status_transitions`, `unanswered_questions`, and the two
    `applyy_internal` tables. Regenerate with the first SELECT in §2.
 2. **Policies are owner-only.** A policy checks `auth.uid() = user_id` and is granted to
-   `authenticated`. `anon` has no policy on any app table.
+   `authenticated`. `anon` has no policy on any app table, and holds no table or sequence grants
+   at all in `public` (`20261110130000_revoke_anon_table_privileges.sql`), including future
+   tables (`20261110150000_default_privileges_no_anon_in_public.sql`).
 3. **Append-only tables have only `SELECT` and `INSERT` policies** plus row triggers that
    raise on update/delete (§5).
 4. **A backstop turns RLS on for any new public table.** The event trigger `ensure_rls` calls
@@ -119,13 +121,16 @@ awaiting_approval, approved, applying, applied, employer_screening, oa_pending, 
 offer, rejected, dropped_filter, dropped_duplicate, blocked_needs_human, needs_verification,
 failed`
 
-Actors are the `agent_name` enum. As of 2026-11-08 it is: `scout_ats, scout_aggregator,
+Actors are the `agent_name` enum. As of 2026-11-21 it is: `scout_ats, scout_aggregator,
 normalizer, screener, matcher, tailor, auditor, applier, tracker, sweeper, human, keepalive,
-skill_gap, interview_prep, follow_up, referral, cover_letter, jobs_tombstone`. Only some of
+skill_gap, interview_prep, follow_up, referral, cover_letter, jobs_tombstone, scout_web,
+job_link_intake, resume_assist` (the last three: `20261109190000`, `20261109210000`). Only some of
 these take status edges; the rest write their own tables.
 
+The `ats_provider` enum (`20260909234500_enums.sql`) gained `'icims'` in `20261121113000`.
+
 ```sql
-select enum_range(null::application_status), enum_range(null::agent_name), enum_range(null::block_reason);
+select enum_range(null::application_status), enum_range(null::agent_name), enum_range(null::block_reason), enum_range(null::ats_provider);
 ```
 
 ### 4.2 Edges (who may take each move)
@@ -167,7 +172,7 @@ lets the UI hide impossible buttons.
 | From | To | Allowed | Added in |
 |---|---|---|---|
 | awaiting_approval | approved | human | `20260909234900` |
-| awaiting_approval | dropped_filter | human | `20260909234900` |
+| awaiting_approval | dropped_filter | auditor, human | `20260909234900`; auditor since `20261111220000` (queue re-gate), only with `drop_reason` `work_auth` or `already_applied` (trigger `guard_auditor_queue_drop_reason`, `20261121110000`) |
 | awaiting_approval | passed_filters | human | `20261101173000` (master change re-run) |
 | approved | applying | applier | `20260909234900` |
 | approved | blocked_needs_human | applier | `20260909234900` |
@@ -195,6 +200,7 @@ candidate back a stage (`20260909234900_status_transition_guard.sql`, header com
 
 | From | To | Note |
 |---|---|---|
+| interview | applied | Human correction: the "interview" was a misread email (`20261112160000`). |
 | dropped_filter | passed_filters | Pasted link for a job the screener dropped (`20261031200000`). |
 | blocked_needs_human | applied, dropped_filter, failed | Human resolves a blocked submit. |
 | needs_verification | approved, applied, failed | Human checks whether a possibly-submitted row went through. |
@@ -309,6 +315,9 @@ where proname in ('advance_application_status', 'sweep_stale_claims',
 | `guard_status_insert` | `BEFORE INSERT` on `applications` | A row may be born only at `discovered`, `passed_filters` or `dropped_filter`. Every later status must be reached through an edge. Closes the "insert straight at `approved`" bypass. | `20260917130000_guard_application_status_on_insert.sql` |
 | `guard_tailored_profile_freeze` | `BEFORE UPDATE` on `applications` | `tailored_profile` may change only while the row is at `scored`, `audit_flagged` or `awaiting_approval`. After approval the resume is frozen: what the human approved is what gets sent. | `20261006190000_freeze_tailored_profile_outside_review.sql` |
 | `guard_failed_rerun` | `BEFORE UPDATE` on `applications` | `failed -> passed_filters` only if `previous_status` is `discovered`, `deduped`, `passed_filters`, `scored` or `tailored`. A row that failed at or after approval may already be submitted; re-running it risks a second submit. NULL history is refused. | `20261102203000_failed_before_approval_reruns.sql` |
+| `guard_one_application_per_posting` | `BEFORE UPDATE` on `applications` | A move into `applying` is refused (23505) when another row of the same user for the same ATS posting (provider + ATS job id) is `applying`, `blocked_needs_human`, `needs_verification`, `applied` or past it. Pasted jobs and keyless jobs are exempt. | `20261121140000_guard_one_application_per_posting.sql` |
+| `guard_auditor_queue_drop_reason` | `BEFORE UPDATE` on `applications` | The auditor's `awaiting_approval -> dropped_filter` needs `drop_reason` `work_auth` or `already_applied`. | `20261121110000_auditor_queue_regate_already_applied.sql` |
+| `applications_failed_has_reason` (CHECK, not a trigger) | every write | A `failed` row must carry a non-blank `failure_reason`. Since `20261109233000_clear_failure_reason_on_leave.sql`, `advance_application_status` clears it on any move, so it is non-null exactly when the row is `failed`. | `20261109211000_failed_requires_reason_check.sql` |
 | `answer_bank_stamp_attestation` | `BEFORE INSERT OR UPDATE` on `answer_bank` | Stamps `attested_by_human` from `agent_key_state()`: no key header means a human wrote it. | `20261009160000_answer_bank_attested_by_human.sql` |
 
 Who inserts where (code side): scouts insert at `passed_filters` or `dropped_filter` (screened

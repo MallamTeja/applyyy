@@ -50,7 +50,8 @@ technology name in the text must appear in the cited sources. Aczen title comes 
 allow-list (Full Stack AI Engineer Intern, Software Engineer Intern, Backend Engineer Intern,
 AI Engineer Intern; approved 21:55). Prototype verifier: `scratchpad/retailor5/check.js`
 (proven on planted errors; whole-word tech matching so 1-letter skills like "C" cannot pass
-vacuously). It becomes the production validator in the tailor build.
+vacuously). It became the production validator: `e1f4b520` (provenance gates in
+`supabase/functions/_shared/tailor/validator.ts`).
 
 ## 3. Re-tailoring the approval queue: two-layer write (in progress)
 
@@ -71,7 +72,7 @@ first: `scratchpad/retailor5/backup-queue-2026-11-18.json`.
 Not representable without a master change: custom skill-group names (groups print by master
 category) and moving a skill between groups (e.g. Loop Engineering to AI).
 
-## 4. Rules as end-state invariants, not per-operation vetoes (next)
+## 4. Rules as end-state invariants, not per-operation vetoes (bullet swap shipped in `1dd56317`)
 
 Live case 2026-11-18 (BlackRock chat): Teja asked to swap an irrelevant Aczen bullet for a
 CI/CD one. Removing was refused ("exp_aczen: 3 bullets, needs 4") and adding was refused

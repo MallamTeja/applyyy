@@ -11,7 +11,7 @@ There are four ways a job enters the system:
 
 | Path | What it reads | Who starts it | Code |
 | --- | --- | --- | --- |
-| ATS scout (main path) | Company job boards on Greenhouse, Lever, Ashby and Workday, listed in `company_watchlist` | GitHub cron (`scout.yml`), or the dashboard scan button | `worker/src/cli/scout.ts` (cron), `supabase/functions/scout-ats/` (dashboard) |
+| ATS scout (main path) | Company job boards on Greenhouse, Lever, Ashby, Workday and iCIMS, listed in `company_watchlist` | GitHub cron (`scout.yml`), or the dashboard scan button | `worker/src/cli/scout.ts` (cron), `supabase/functions/scout-ats/` (dashboard) |
 | Remote-feed scout | Public remote-job feeds: RemoteOK, Jobicy, Arbeitnow | GitHub cron (`scout-remote.yml`) | `worker/src/cli/scout-remote.ts`, `worker/src/scout/remote-feeds.ts` |
 | Web scout | Gemini web search proposes Greenhouse/Lever/Ashby posting URLs; code checks each one on the live board | The Discovered page (`WebScoutPanel`) | `supabase/functions/scout-web/` |
 | Pasted job link | One link Teja pastes (careers page, LinkedIn/X post, ATS posting) | "Add a job by link" button on the Discovered page | `supabase/functions/job-link-intake/` |
@@ -38,6 +38,7 @@ because recruiters read in arrival order. A small watchlist plus a short window 
 | 2026-10-24 | Remote feeds run daily through the same safety and screening path as the ATS scout. | `e2fb026`, `446eb60`. |
 | 2026-10-31 | Teja: a pasted link is his choice, so "no more filter". | `job-link-intake` skips the screener, the matcher pre-gate and the score floor (`f5b3914`). |
 | 2026-11-01 | Teja ruled the scout runs twice a day, not every 6 hours (Actions minutes). A third run was added 2026-11-05 at 09:47 IST. | `401ab5c`, `f66a13c`. |
+| 2026-11-12 | The scout runs ten times a day (2 to 3 hour gaps), oldest-polled boards first. The Health threshold dropped to 12 h. | `06ab7913`. |
 | 2026-11-01 16:00 IST | Teja ruled "honor robots" for scouting. SmartRecruiters' `robots.txt` is `Disallow: /`, so SmartRecruiters is fully off. | SR rows disabled; adapter unregistered (`fc5097f`) and deleted (`2fe0264`, 2026-11-06); SR removed from the add-board forms (`8299ca5`, `a5f419e`). |
 | 2026-11-01 16:14 IST | Teja ruled a **401** `robots.txt` counts as "no rules" for board reads only (RFC 9309). This keeps Ashby, whose `robots.txt` answers 401. A 403 or a real `Disallow` still refuses. The applier stays strict. | `ad19be5`. |
 | 2026-11-01 ~17:19 IST | Teja ruled a link he **pastes** is a user-triggered fetch: no robots check for that URL and its redirects. The SSRF guard stays. | `job-link-intake` only. Scouts and applier stay strict. |
@@ -94,6 +95,7 @@ in one map, `ADAPTERS` in `supabase/functions/_shared/ats/registry.ts`.
 | Lever | `_shared/ats/lever.ts` | Real `createdAt`. No company field, so no identity check is possible. |
 | Ashby | `_shared/ats/ashby.ts` | Real publish date. `robots.txt` answers 401 (allowed for scouting by the 2026-11-01 ruling). |
 | Workday | `_shared/scout/adapters/workday.ts` | POST-only list endpoint, 20 per page, `total` only on page one. Discovery only. A title-passing posting gets its description from the detail endpoint (`_shared/scout/workday-detail.ts`, capped by `WORKDAY_DETAIL_CAP`). |
+| iCIMS | `_shared/scout/adapters/icims.ts` | Added 2026-11-21 (`f7d9cb43`). Lists postings from the board's sitemap and reads each detail page's JSON-LD. Wired into both scouts through the shared registry. |
 | SmartRecruiters | removed | Off by the robots ruling. Git history keeps the old adapter. |
 | Workable | `_shared/scout/adapters/workable.ts` | Written, **not registered, not reachable**. |
 | Adzuna, Jooble | deleted | Deleted as dead code on 2026-11-18, with `_shared/scout/tiers.ts` and `_shared/scout/freshness.ts`. The `adzuna`/`jooble` values in the job source enum remain. |
@@ -109,8 +111,9 @@ Adding a provider = one adapter file + one line in `ADAPTERS`. The scouts do not
 
 The same shared code runs in two places:
 
-- **Cron scout** `worker/src/cli/scout.ts`, run by `.github/workflows/scout.yml`. Schedule:
-  `17 0,12 * * *` and `17 4 * * *` UTC (05:47, 09:47 and 17:47 IST). GitHub cron is
+- **Cron scout** `worker/src/cli/scout.ts`, run by `.github/workflows/scout.yml`. Schedule
+  (re-checked 2026-11-21): ten runs a day, cron `17 0,2,5,7,10,12,14,17,19,22 * * *` UTC (`06ab7913`).
+  Read it live with `git grep -n "cron" .github/workflows/scout.yml`. GitHub cron is
   best-effort and often starts late. The run stops starting new boards after
   `SCOUT_BUDGET_MS` (12 minutes, `worker/src/scout/run-outcome.ts`). The boards it did not reach
   go first next time (oldest `last_polled_at` first). Respects the `system_settings` kill switch.
@@ -132,6 +135,12 @@ Per board, both do the same steps:
    `dropped_filter`. Only when the screener cannot load is it born at `discovered`, and the run
    is flagged.
 6. Liveness (below) marks postings that left the board.
+
+**Pacing and identity (2026-11-21, `8a99dbe6`).** Every request goes through one shared pacer,
+`_shared/http/request-pacer.ts`: 1 second per Cloudflare zone, used by the edge and the worker. Both
+send one honest user agent, `DEFAULT_USER_AGENT` in `_shared/http/transport.ts`, on robots.txt and the
+jobs request. A robots.txt that answers 429 or 5xx means "retry later", never a counted board failure
+(`eb56d28e`, `3951ba06`).
 
 ### 4. Remote feeds
 
@@ -195,7 +204,8 @@ lists) was deleted on 2026-11-18 (Teja: "Delete it"). Links go in one at a time 
 
 Queue and feed liveness run on a dashboard scan and, since 2026-11-18, daily without a scan:
 `.github/workflows/scout-ats-daily.yml` (07:11 IST) calls `scout-ats?mode=liveness`, which only
-checks in-flight rows and writes `jobs.disappeared_at` plus `posting_closed` events.
+checks in-flight rows and writes `jobs.disappeared_at` plus `posting_closed` events. A robots.txt
+429 or 5xx skips that row for the run, like the Scan (`953eb770`).
 
 The Discovered page shows a "Posting gone" mark (`ae5eac5`).
 

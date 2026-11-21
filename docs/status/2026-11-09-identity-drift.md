@@ -1,7 +1,7 @@
 # xai and aiven: why every poll failed, and the fix (2026-11-09)
 
 **Status: code fix written and gated (uncommitted, not deployed). Data repair SQL prepared, NOT run.**
-This corrects the "identity drift" finding in `2026-11-09-disappearance-gap.md`. These two boards were never
+This corrects the "identity drift" finding in `2026-11-09-disappearance-gap.md` (deleted 2026-11-21; `git show 3a86eada:docs/status/2026-11-09-disappearance-gap.md`). These two boards were never
 refused by the liveness planner. **Their polls fail before liveness runs.** `company_watchlist.consecutive_failures`:
 xai 45, aiven 20. `last_polled_at` moves on every failed attempt (`failureMark`, `_shared/ats/registry.ts:227`), and
 `last_poll_job_count` keeps its old value (298 and 44). That made them look like "polled, 0 re-stamped".

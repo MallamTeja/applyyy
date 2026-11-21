@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 // The shared countdown the matcher and tailor use; the clock is injected here.
 import { createDeadline } from '../../supabase/functions/_shared/agent/deadline.ts';
 // The units under test.
-import { boardsWithinBudget, scoutRunClose } from '../src/scout/run-outcome.ts';
+import { boardsWithinBudget, scoutRunClose, SCOUT_BUDGET_MS } from '../src/scout/run-outcome.ts';
 
 // A run that reached every board, so a test changes only the one input it is about.
 const FULL_RUN = { processed: 4, skippedForDeadline: 0, stoppedEarly: false };
@@ -106,6 +106,22 @@ describe('scout run outcome', () => {
     // Red either way.
     expect(close.update.status).toBe('failed');
     expect(close.exitCode).toBe(1);
+  });
+
+  // S10 (2026-11-21): run 44886173953 hit the 12-min deadline at 209 of 283 boards. At
+  // ~3.4 s a board, 283 boards need ~16 min, so the budget was raised to 16. This pins the
+  // value, so a silent change is caught (before this, no test held the number).
+  it('the scout budget is 16 minutes, and the scout.yml job timeout (25) stays above it', () => {
+    // The value itself: 16 minutes in milliseconds.
+    expect(SCOUT_BUDGET_MS).toBe(16 * 60_000);
+    // Read the workflow as text: the backstop timeout must leave room above the budget.
+    const workflow = readFileSync(new URL('../../.github/workflows/scout.yml', import.meta.url), 'utf8');
+    // Find the one job timeout in the file.
+    const timeout = workflow.match(/^\s*timeout-minutes:\s*(\d+)\s*$/m);
+    // A missing timeout is a failure, not a pass: GitHub would fall back to 360 minutes.
+    expect(timeout).not.toBeNull();
+    // At least 5 minutes above the budget: setup plus one board hanging on undici's 300 s.
+    expect(Number(timeout![1]) * 60_000 - SCOUT_BUDGET_MS).toBeGreaterThanOrEqual(5 * 60_000);
   });
 
   it('scout.ts (the file on cron) wires the budget gate, the honest close and its exit code', () => {

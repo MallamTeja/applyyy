@@ -156,7 +156,9 @@ describe('Manual apply kit card resolves in a browser (fake session, every Supab
   // One job's card, by its landmark name.
   const card = (label: string) => page.getByRole('region', { name: `Manual apply: ${label}`, exact: true });
 
-  it('1. an approved card marks applied through the inline confirm: one write, as human, stamp verbatim', async () => {
+  /* 2026-11-21 (S6, Teja 14:45: "marking applied is ONE click everywhere, no confirm steps"): the click itself
+     writes. RED-ON-REVERT: restoring the confirm in front of "I applied" leaves rpcCalls at 0 after the click. */
+  it('1. an approved card marks applied in ONE click: one write, as human, stamp verbatim', async () => {
     // Fresh state for this test.
     open = [ROW_APPROVED, ROW_APPLYING];
     // The page.
@@ -167,24 +169,18 @@ describe('Manual apply kit card resolves in a browser (fake session, every Supab
     const moveName = 'I applied (mark applied): E2E Platform Engineer at Initech';
     // Both resolves exist on the approved card (the give-up one too).
     assert.equal(await card('E2E Platform Engineer at Initech').getByRole('button', { name: 'Failed / skip: E2E Platform Engineer at Initech', exact: true }).count(), 1);
-    // Arm: the first click only asks.
-    await page.getByRole('button', { name: moveName, exact: true }).click();
-    // The confirm's Confirm, named for the move.
-    const confirm = page.getByRole('button', { name: `Confirm: ${moveName}`, exact: true });
-    // Rendered on arming.
-    await confirm.waitFor();
-    // Arming wrote nothing.
-    assert.equal(rpcCalls, 0, 'the first click must not write');
-    // The write that leaves on Confirm; a restored popup would block it (timeout -> null).
+    // The write that leaves on the click; a confirm or popup in front of it would block it (timeout -> null).
     const write = page.waitForRequest('**/rest/v1/rpc/advance_application_status', { timeout: 5_000 }).catch(() => null);
-    // Confirm.
-    await confirm.click();
+    // The one click.
+    await page.getByRole('button', { name: moveName, exact: true }).click();
     // Settled once the mocked answer exists.
     await (await write)?.response();
+    // No confirm step was drawn.
+    assert.equal(await page.getByRole('button', { name: `Confirm: ${moveName}`, exact: true }).count(), 0, 'marking applied must not ask');
     // No browser dialog at any step.
-    assert.equal(dialogs, 0, 'a browser dialog opened: every move must ask inline');
-    // Exactly one write for one Confirm.
-    assert.equal(rpcCalls, 1, 'Confirm must send exactly one advance_application_status');
+    assert.equal(dialogs, 0, 'a browser dialog opened');
+    // Exactly one write for one click.
+    assert.equal(rpcCalls, 1, 'one click must send exactly one advance_application_status');
     // As human, from approved to applied, logged as the Manual apply card, with the row's stamp verbatim.
     assert.deepEqual(rpcBody, { p_application_id: ROW_APPROVED.id, p_to_status: 'applied', p_agent: 'human', p_detail: { source: 'manual_apply', from: 'approved' }, p_expected_updated_at: ROW_APPROVED.updated_at });
     // The page re-read: the resolved card leaves.

@@ -1,6 +1,6 @@
 # The robots.txt compliance gate — design, deviations and evidence
 
-> **Status 2026-11-08:** Partly superseded. The gate design here still matches the code: `RobotsPolicy` (`packages/master-robots/src/gate.ts:60`), `verdictFor` (`gate.ts:125`) and `checkRobots` (`gate.ts:261`). Since then the gate runs inside the shared Deno transport (`supabase/functions/_shared/http/transport.ts:47`, commit `111791c`) and before the worker opens an apply page (`worker/src/apply-one.ts:47`, `a3b4115`); the §10 follow-ups are closed (`worker/scripts/capture-fixture.ts:166`, `pnpm-lock.yaml:94`, `.github/workflows/ci.yml:270`). Two §4 caller claims are stale: `supabase/functions/scout-ats/page-fetch.ts:70` is a fourth `'scouting'` caller, and `job-link-intake` does not gate a pasted page at all (Teja, 2026-11-01; `supabase/functions/job-link-intake/handler.test.ts:525`), only its ATS-board path through scout-web's fetcher.
+> **Status 2026-11-08:** Partly superseded. The gate design here still matches the code: `RobotsPolicy` (`packages/master-robots/src/gate.ts:60`), `verdictFor` (`gate.ts:125`) and `checkRobots` (`gate.ts:261`). Since then the gate runs inside the shared Deno transport (`supabase/functions/_shared/http/transport.ts`, import :51, call :369 on 2026-11-21; commit `111791c`) and before the worker opens an apply page (`worker/src/apply-one.ts`, import :49, call :81 on 2026-11-21; `a3b4115`); the §10 follow-ups are closed (`worker/scripts/capture-fixture.ts:166`, `pnpm-lock.yaml:94`, `.github/workflows/ci.yml:270`). Two §4 caller claims are stale: `supabase/functions/scout-ats/page-fetch.ts:70` is a fourth `'scouting'` caller, and `job-link-intake` does not gate a pasted page at all (Teja, 2026-11-01; `supabase/functions/job-link-intake/handler.test.ts:525`), only its ATS-board path through scout-web's fetcher.
 > The body below is the original record, unedited.
 
 **Package:** `packages/master-robots` (`@applyy/master-robots`)
@@ -61,7 +61,7 @@ still gets an answer, the answer is the permissive one, and nothing raises.
 | 200 + empty / whitespace / all-comments body | `policy` (zero rules) | **allow** | RFC 9309: an empty ruleset permits everything. |
 | 200 + HTML/JSON/markup body | `not-robots-txt` | **refuse** | The soft-200. Never parsed, never a ruleset. |
 | 404, 410 | `definitively-absent` | **allow** | A successful answer meaning "I publish no policy". |
-| 401, 403 | `refused-by-host` | **refuse** | **Deviation from RFC 9309** — see §4. |
+| 401, 403 | `refused-by-host` | **refuse** | **Deviation from RFC 9309** — see §4. Strict policy only: the `'scouting'` policy reads a 401 as no rules (2026-11-01 ruling, `gate.ts:60`, and the 401 note further down this doc). |
 | 429, `Retry-After` ≤ 5s | `rate-limited` | **wait** | Short enough to honour. |
 | 429, `Retry-After` > 5s, absent, or unreadable | `indeterminate` | **refuse** | Unknown when to return; we do not invent a delay. |
 | 5xx | `indeterminate` | **refuse** | RFC 9309 assigns *meaning* to a 5xx on robots.txt ("unavailable"), not transience. Not retried. |

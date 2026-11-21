@@ -2,6 +2,8 @@
 
 > **Status 2026-11-08:** Partly superseded. The teaching (reification, invariant-as-query, "not a graph database") still holds, and `approved -> applying` is still the only edge into `applying` (live `application_status_transitions`, read 2026-11-08); the §4.1 live-table contract test is still not built (`packages/shared-types/test/enum-parity.test.ts` checks the migration files only). Edge counts, agent lists and the session-era measurements here are dated: [`agents.md`](agents.md) holds the current per-agent edges and the queries that regenerate them. The body below is the original record, unedited.
 
+> **Status 2026-11-21:** the `supabase db query --linked` 403 noted in the body (the 2026-10-08 note and the tools table) was the wrong-account `SUPABASE_ACCESS_TOKEN` user env var, not a broken route. With that var unset (`env -u SUPABASE_ACCESS_TOKEN supabase db query --linked "<select>"`) it works; repo `CLAUDE.md` §4.
+
 **Written 2026-09-11 by session `applyyy-a6` (explainer role — no code ownership).**
 Context gathered live from the orchestrator `applyyy-d8` and peers `applyyy-ff`,
 `applyyy-6f` and `applyyy-76`, plus direct reads of the repo. Where a claim came
@@ -563,7 +565,7 @@ grant's *scope* widened from `applyyy` to every project, including `1on1`, where
 push to GitHub myself" was standing policy. And the edit lives outside every
 repository, so no `git status`, diff or review will ever surface it. Details and the
 full argument are in
-[status/2026-09-11-session-accounting.md](../status/2026-09-11-session-accounting.md) §6.3.
+`docs/status/2026-09-11-session-accounting.md` §6.3 (deleted 2026-11-21; `git show 3a86eada:docs/status/2026-09-11-session-accounting.md`).
 
 **(b) The global `CLAUDE.md` does not know this project exists.** Its "Projects"
 section documents `1on1` and `1on1_sb` in detail — including a long passage on the

@@ -69,7 +69,7 @@ explain why a job in `jobs` never reached the queue.
 | 2026-10-09 | A title term matches the job **title only**; only `keywords` may also match the description head. ("work with our developers" let 111 non-tech rows through.) | `tech-gate.ts` |
 | 2026-10-09 | The pre-gate sweep is **manual only**, never on a cron: a sweep that drops rows must run while someone watches the log. | `.github/workflows/pregate-sweep.yml` |
 | 2026-10-24 18:44 / 19:13 IST | Drop jobs that need US work authorisation. Allowed = India + remote + countries where an Indian can work without a visa. "Visa-free" means visa-free **work**: Nepal and Bhutan. | `_shared/screen/work-auth-gate.ts`, migration `20261024190000` |
-| 2026-11-01, confirmed 2026-11-04 | Drop a **hard** minimum above 1 year of experience. "Preferred" / "nice to have" years are wishes, not gates. Intern and junior roles are kept whatever the JD says. | `_shared/screen/required-experience.ts`, `filter_rules` `experience_ceiling` `config.max_years` |
+| 2026-11-01, confirmed 2026-11-04 | Drop a **hard** minimum above 1 year of experience. "Preferred" / "nice to have" years are wishes, not gates. Intern and junior roles are kept only while the hard minimum is under 3 years; at 3 or more they drop as `experience_ceiling` (Teja 2026-11-21 14:30, `ENTRY_LEVEL_HARD_FLOOR`, `3a86eada`). | `_shared/screen/required-experience.ts`, `filter_rules` `experience_ceiling` `config.max_years` |
 | 2026-11-04 18:26 IST | Reverses the 10-24 remote half: "i dont need country lokced remote except indain remote jobs", then "i want remote jobs with no country lock too". "Remote - US" now counts as US. Show this choice in Settings. | `remote_location_policy = 'unlocked_or_authorized'` (migration `20261104193000`), Settings "Remote jobs" select |
 | 2026-11-04 | "Re-scored rows get re-screened." Rows that come back to `passed_filters` by a human move must meet the gates again. | matcher pre-gate, `supabase/functions/matcher/tech-pregate.ts` |
 | 2026-11-05 14:44 IST | **Unknown location passes.** "2 Locations", "In-Office", blank: keep the job. | `work-auth-gate.ts` fail-open rule |
@@ -180,14 +180,23 @@ On 2026-11-12 (`cb774d83`) the drop became a hold at `discovered`, where no lane
 is neither dropped nor held. It goes through the title gate, the work-auth gate (title + location)
 and the cascade. If none rejects it, it is born at `passed_filters`. The Ready card shows a
 "No description" pill (`hasNoDescription` in `apps/web/src/features/discovery/discoveredList.ts`,
-read from `description_preview`). Blank is still a shape check (a string with non-space text),
-never a truthiness check.
+read from `description_preview`).
+
+**Thin counts as blank (2026-11-21, `8a99dbe6`).** `isThinDescription` in
+`_shared/screen/jd-substance.ts` drops blank lines and a closed list of boilerplate lines
+(`BOILERPLATE_LINE_PATTERNS`, such as equal-opportunity text). If under `MIN_ROLE_TEXT_CHARS` of role
+text is left, the JD is treated as missing. The screener and the web pill both call this one function.
 
 ### 3.5 Stage 0b: work-authorisation and location (`_shared/screen/work-auth-gate.ts`)
 
 Reads three texts only: title, `location_raw`, description. It does **not** read
 `jobs.work_arrangement` (measured 2026-10-24: 466 rows said `remote` while their location named a
 city, and the JDs said in-office).
+
+Ashby jobs also pass board location hints (`BoardLocationHints`, `1dd56317`, 2026-11-21). Each
+`secondaryLocations` entry is judged as one more location part. A bare "Remote" job with workplace type
+"Remote" and an `addressCountry` (the company HQ) is judged by that country. No other adapter's payload
+is read.
 
 The rule in one line (from the file header):
 
@@ -255,7 +264,8 @@ description)` (`_shared/screen/required-experience.ts`). A stored value still wi
 - counts only a **hard** minimum ("3+ years required", "minimum 2 years", "(3-5)" in a title,
   "4 to 8yrs");
 - ignores "preferred", "nice to have", "a bonus";
-- keeps intern and junior titles whatever the JD says;
+- keeps intern and junior titles only while the hard minimum is under 3 years
+  (`ENTRY_LEVEL_HARD_FLOOR`); at 3 or more it drops them as `experience_ceiling`;
 - ignores implausible numbers (company boilerplate like "30 years of investing experience");
 - returns nothing when unsure, and nothing never drops.
 
@@ -276,7 +286,8 @@ So the same three gates run again, with **today's** config:
 | Where | File | Runs on | On a drop |
 |---|---|---|---|
 | Matcher pre-gate | `supabase/functions/matcher/tech-pregate.ts` (`firstPreGateDrop`) | every `passed_filters` row, before any Gemini call | `passed_filters → dropped_filter` (agent `matcher`), same `drop_reason` codes; event key `pre_gate_dropped` |
-| Auditor re-gate | `supabase/functions/auditor/pregate.ts` | every `tailored` row, before a human sees it | `tailored → failed` (the auditor has no edge into `dropped_filter`); the code is in the event detail |
+| Auditor re-gate | `supabase/functions/auditor/pregate.ts` | every `tailored` row, before a human sees it | `tailored → failed`; the code is in the event detail |
+| Auditor queue re-gate | `supabase/functions/auditor/regate-queue.ts` (`auditor?mode=regate_queue`, daily from `postscreen-drain.yml`) | every `awaiting_approval` row | `awaiting_approval → dropped_filter` (agent `auditor`), only for `work_auth` (migration `20261111220000`) or `already_applied` (migration `20261121110000`). A trigger refuses any other `drop_reason`. When two queued rows copy one posting, the oldest queued copy wins; the newer one drops as `already_applied` (`8a99dbe6`). |
 
 Order is the screener's: tech, then work-auth, then experience. Both read config through
 `supabase/functions/_shared/pregate-config-loader.ts`, so they cannot read it differently. Both
@@ -310,8 +321,9 @@ edges (read them live, never assume):
 select * from application_status_transitions where from_status = 'dropped_filter' or to_status = 'dropped_filter';
 ```
 
-At 2a9ac31 the edges into `dropped_filter` are `deduped` (screener, human), `passed_filters`
-(matcher, human) and `scored` (human). The only way out is `dropped_filter → passed_filters`,
+Re-checked 2026-11-21 against `supabase/migrations`: the edges into `dropped_filter` are `deduped`
+(screener, human), `passed_filters` (matcher, human), `scored` (human), `awaiting_approval` (human; and
+the auditor, for `work_auth` or `already_applied` only) and `blocked_needs_human` (human). The only way out is `dropped_filter → passed_filters`,
 **human only** (migration `20261031200000`).
 
 Ways a dropped job comes back:
@@ -396,7 +408,7 @@ Measured 2026-11-08 by the read-only query in §3.6. Re-run it; do not trust the
 - Design history: `docs/design/2026-09-17-tech-only-discovery.md`,
   `docs/screener/2026-09-17-screener-wiring.md`
 - Runbook: `docs/screener/2026-11-06-bulk-revive-needs-pregate-sweep.md`
-- Retro SQL (historical): `docs/screener/2026-10-25-work-auth-retro.sql`,
-  `docs/screener/2026-11-06-scored-leak-retro.sql`
+- Retro SQL (historical, git history only): `git log --oneline -- docs/screener/2026-10-25-work-auth-retro.sql
+  docs/screener/2026-11-06-scored-leak-retro.sql`
 - Product neighbours: [job discovery](job-discovery.md),
   [matching and scoring](matching-and-scoring.md), [resume tailoring](resume-tailoring.md)

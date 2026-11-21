@@ -1,6 +1,6 @@
 # Deploy and release
 
-_Written 2026-11-08 against 2a9ac31._
+_Written 2026-11-08 against 2a9ac31. Last verified: 2026-11-21 (3a86eada)._
 
 ## What it is
 
@@ -9,8 +9,8 @@ applyyy has three things that run in production. Each one reaches prod in a diff
 | Part | Where it runs | How it reaches prod | Who starts it |
 |---|---|---|---|
 | Web dashboard (`apps/web/`) and the Vercel function `api/render-job-page.ts` | Vercel, https://applyyy.vercel.app/ | Automatic: Vercel builds every push to `main` | Anyone who pushes to `main` |
-| Edge functions (`supabase/functions/<fn>/`) | Supabase, project `xynqxekcqizwhtskzqrq` | Manual: `supabase functions deploy` from a clean, pinned worktree | The orchestrator session only |
-| Database migrations (`supabase/migrations/`) | Supabase Postgres | Manual: `supabase db push`, after a `--dry-run` gate | The orchestrator session only |
+| Edge functions (`supabase/functions/<fn>/`) | Supabase, project `xynqxekcqizwhtskzqrq` | Manual: `supabase functions deploy` from a `git archive` export pinned to a SHA | The orchestrator session only |
+| Database migrations (`supabase/migrations/`) | Supabase Postgres | Manual: `supabase db push --linked`, after a `--linked --dry-run` gate | The orchestrator session only |
 | Worker (`worker/`) and scheduled jobs | GitHub Actions (`.github/workflows/*.yml`) | No deploy step: each workflow run checks out the code at its ref | The schedule, or `gh workflow run` |
 
 There is **no CI job that deploys** edge functions or migrations. `grep -rn "functions deploy\|db push" .github/workflows` finds nothing. CI (`ci.yml`) only checks the code.
@@ -22,8 +22,8 @@ flowchart LR
   C[commit on local main] -->|git push origin SHA:main| O[origin/main]
   O -->|automatic| V[Vercel build: web + api/]
   O -->|automatic| CI[ci.yml checks]
-  CI -->|green, read by full SHA| W[orchestrator: clean worktree at SHA]
-  W -->|db push --dry-run, then db push| DB[(Supabase Postgres)]
+  CI -->|green, read by full SHA| W[orchestrator: git archive export of SHA]
+  W -->|db push --linked --dry-run, then db push --linked| DB[(Supabase Postgres)]
   W -->|functions deploy --use-api --import-map| EF[Edge functions]
   O -->|next run checks out ref| GA[GitHub Actions worker]
 ```
@@ -34,7 +34,7 @@ The repo is a **shared working tree**: several Claude sessions edit one checkout
 
 | Date | What happened | Rule it produced |
 |---|---|---|
-| 2026-10-05 | Nine edge functions went live with a peer's unverified, uncommitted `_shared/gemini/client.ts`. The deploy CLI bundled the working tree, not a commit. | Deploy only from a clean worktree pinned to an exact SHA. |
+| 2026-10-05 | Nine edge functions went live with a peer's unverified, uncommitted `_shared/gemini/client.ts`. The deploy CLI bundled the working tree, not a commit. | Deploy only from a clean copy pinned to an exact SHA (a worktree then; a `git archive` export since 2026-11-10). |
 | 2026-10-05 | `supabase functions deploy` applies `supabase/config.toml`. A function without an entry there deploys with `verify_jwt = true` and could silently flip a live setting. | Every function is pinned explicitly in `supabase/config.toml` (see the comment above its `[functions.*]` blocks). |
 | 2026-10-06 | An orchestrator assigned a deploy to a peer on the strength of a memory note. The auto-mode classifier blocked it as a production deploy. | A deploy needs real authority in the deploying session. A relay is not authority. |
 | 2026-10-08 15:37 | Teja ruled: "do this by yourself, do not give me this type of tasks" after receiving a deploy runbook. | The orchestrator runs deploys and `db push` itself. It never hands Teja a runbook, and never delegates a deploy to a peer. |
@@ -73,21 +73,31 @@ Note: the `ignoreCommand` path list includes `supabase/functions/_shared`, becau
 
 Rolling back the web means pushing a revert commit (forward-only git). Do not rewrite `main`.
 
-### 3. Edge functions: clean pinned worktree
+### 3. Edge functions: a `git archive` export pinned to a SHA
 
-`supabase functions deploy` uploads what is **on disk**. In the shared tree, that includes peers' uncommitted edits. So the deploy always runs from a separate, detached worktree at an exact SHA.
+`supabase functions deploy` uploads what is **on disk**. In the shared tree, that includes peers' uncommitted edits. So the deploy always runs from a separate export of the committed tree at an exact SHA.
 
-Steps (PowerShell, from repo `CLAUDE.md` §3):
+Since 2026-11-10 that copy is a `git archive` export, not a worktree. An export registers nothing in `.git/worktrees`, so nothing piles up. By then 52 deploy and gate worktrees had piled up, and the classifier blocks deleting them.
+
+Steps (from repo `CLAUDE.md` §3, which is the authority if this copy drifts):
+
+```bash
+# 1. Bash: export exactly the committed tree of <sha> (no .git, no peers' edits). Pin a SHA, never origin/main.
+#    cygpath is required: Git Bash $TEMP is "C:\...", and tar reads "C:" as a remote host -> empty export.
+D="$(cygpath -u "$TEMP")/applyyy-export-<sha>"; mkdir -p "$D" && git archive <sha> | tar -x -C "$D"
+# 2. Copy the link files into it: supabase/.temp/{project-ref,pooler-url,linked-project.json,postgres-version}
+# 3. Run every later step FROM "$D". In a `deploy ... | tail` loop, `set -o pipefail` first,
+#    or a failed deploy reads as success and the chain runs on.
+```
 
 ```powershell
-# 1. A clean checkout of exactly the reviewed commit. Pin a SHA, never origin/main.
-git worktree add --detach "$env:TEMP\applyyy-deploy" <sha>
-# 2. Copy the link files into it: supabase/.temp/{project-ref,pooler-url,linked-project.json,postgres-version}
-# 3. The user-level token belongs to the WRONG account. Clear it for this shell.
+# 4. The user-level token belongs to the WRONG account. Clear it for this shell.
 $env:SUPABASE_ACCESS_TOKEN = $null
-# 4. Deploy one function. --use-api bundles on the server. --import-map is mandatory since bb55391.
+# 5. Deploy one function. --use-api bundles on the server. --import-map is mandatory since bb55391.
 supabase functions deploy <fn> --project-ref xynqxekcqizwhtskzqrq --use-api --import-map supabase/functions/deno.json
 ```
+
+**Supabase CLI stays on v2 (2.119.0)** until a planned upgrade (decided 2026-11-09). v3 points `db push` and `migration list` at the LOCAL stack unless a target is passed, needs `--yes` for hosted writes, and refuses a `config.toml` with an `[inbucket]` section. Always pass `--linked`. The v3 edit list is in [`docs/status/2026-11-09-supabase-cli-v3.md`](../status/2026-11-09-supabase-cli-v3.md).
 
 Before step 4:
 
@@ -100,19 +110,19 @@ After the deploy:
 - List live versions with `supabase functions list`. Order them by `updated_at`, never by version number. A version number counts one function's deploys and says nothing about age.
 - Gateway JWT settings come from `supabase/config.toml`. Every function has an explicit `verify_jwt` entry there. `email-tracker-intake` and the machine-called agents (`normalizer`, `screener`, `auditor`, `scout-ats`) use `false`. Read the file for the reason on each one.
 
-Housekeeping traps:
+Legacy housekeeping traps (from the worktree method used before 2026-11-10; they still apply to old trees and to gate worktrees):
 
-- A leftover locked folder at `%TEMP%\applyyy-deploy` can block `worktree add`. Pick a fresh path.
-- PowerShell 5.1: do not use `*> $null` on `git worktree add` inside a conditional. It sets `$?` false and skips the block silently.
-- Old worktrees pile up (`git worktree list`). Remove junctions first, then `git worktree remove --force` (see memory `applyyy-isolated-worktree-junctions`).
+- Legacy: a leftover locked folder at `%TEMP%\applyyy-deploy` can block `git worktree add`. Pick a fresh path.
+- Legacy: PowerShell 5.1: do not use `*> $null` on `git worktree add` inside a conditional. It sets `$?` false and skips the block silently.
+- Legacy: old worktrees pile up (`git worktree list`). Remove junctions first, then `git worktree remove --force` (see memory `applyyy-isolated-worktree-junctions`). The classifier blocks agents from deleting them; Teja runs or allows it.
 
 ### 4. Database: `db push` with a dry-run gate
 
 Migrations are SQL files in `supabase/migrations/`, named `<timestamp>_<name>.sql`. They apply in name order.
 
-1. In the same clean, pinned worktree, run `supabase db push --dry-run` (token cleared, as above).
+1. In the same pinned export, run `supabase db push --linked --dry-run` (token cleared, as above).
 2. Read the list. Push only if it lists **exactly** the migrations you expect. An extra file means someone else's migration would ride along.
-3. Run `supabase db push` (`--yes` answers the prompt).
+3. Run `supabase db push --linked` (`--yes` answers the prompt).
 4. Verify by **shape** with a read-only SQL query: the new column, function or policy exists and behaves. Never verify by "the command printed success".
 
 To compare what is applied with what is in the repo: the Supabase MCP `list_migrations` against `ls supabase/migrations`.
@@ -159,10 +169,10 @@ See [CI and workflows](../ops/ci-and-workflows.md) for each workflow.
 |---|---|
 | Only the orchestrator deploys and runs `db push`. A peer never deploys, and never on a relayed "Teja approved". | Teja ruled 2026-10-08; repo `CLAUDE.md` §2 and §3 |
 | If the classifier blocks a deploy, stop and tell Teja. Never route around it. | repo `CLAUDE.md` §3 |
-| Deploy from a clean worktree pinned to an exact SHA. | 2026-10-05 incident |
+| Deploy from a `git archive` export pinned to an exact SHA. | 2026-10-05 incident; export since 2026-11-10 (repo `CLAUDE.md` §3) |
 | Clear `SUPABASE_ACCESS_TOKEN` for every CLI call. It belongs to another account and returns 403. | repo `CLAUDE.md` §3, §4 |
 | `--use-api --import-map supabase/functions/deno.json` on every function deploy. | `bb55391`, 2026-11-05 |
-| `db push --dry-run` first; push only the exact expected list. | repo `CLAUDE.md` §3 |
+| `db push --linked --dry-run` first; push only the exact expected list. Supabase CLI pinned to v2 (2.119.0); always `--linked`. | repo `CLAUDE.md` §3 |
 | CI green by full SHA and `--workflow=ci.yml` before deploying. | repo `CLAUDE.md` §4 |
 | Live-data writes are run only by the session that heard Teja approve them. | repo `CLAUDE.md` §2 |
 | Forward-only git. No `--force`, no `--amend`, no rewrite of pushed commits. Roll back with a new commit. | global `CLAUDE.md`; repo `CLAUDE.md` §2 |

@@ -27,7 +27,8 @@ The rulings come from four places. Read them in this order when they disagree:
 1. The code at HEAD. Code wins over any document.
 2. Teja's memory files (`~/.claude/projects/c--Users-tejam-OneDrive-myproj-applyyy/memory/`, index `MEMORY.md`).
 3. The repo `CLAUDE.md`.
-4. Handoffs in `docs/handoff/` (newest pair: `2026-11-08-1745-*`). Older ones are in git history:
+4. Handoffs in `docs/handoff/`: the newest `docs/handoff/*orchestrator-handoff.md` (`ls docs/handoff | tail`)
+   and the live pending list `docs/handoff/2026-11-12-1305-pending-tasks.md`. Older ones are in git history:
    `git log --format='%h %cs %s' -- docs/handoff/`.
 
 ## How it works: the rulings
@@ -54,8 +55,9 @@ The rulings come from four places. Read them in this order when they disagree:
 | 2026-10-24 13:08 | One email on every resume and application: the app login email (the one the email tracker watches). The second, older address is retired. | A GitLab Greenhouse security code went to the old inbox. The tracker does not watch it, so the failure was invisible. | Data only: master profile v3 and later carry the one email. No code check refuses a different email (see gaps). |
 | 2026-11-01 | Master v8 content rulings: keep the One-on-One "blockchain certificate verification" claim (not built yet); deploy line reads "Vercel and AWS using Docker"; keep the portfolio `.me` domain (not registered yet). | Teja heard the risk and chose these on purpose. An auditor agent would otherwise "fix" them. | Data only: live `master_profiles` (v9 and later keep them). Any new master builds on the highest version. |
 | 2026-11-07 22:43 | Every resume is ONE page: the tailored one AND the one after AI-chat edits. "This is rule." | Edits like "add more skills" push a resume to page 2 silently. | Tailor: `supabase/functions/_shared/tailor/page-trim.ts` (`fitToOnePage`, fails closed with `page_overflow`). Typography ladder: `packages/resume-template/src/page-fit.ts` (`TYPOGRAPHY_LADDER`). Editor: `apps/web/src/features/approval/pageFitEdit.ts`. Worker: `worker/src/render-resume-pdf.ts` throws `ResumeNotOnePageError` when pages is not 1. Commits `41d7430`, `7a78d05`, `dc8ac5c`. |
-| 2026-11-07 23:00-23:18 | How to fit one page: shrink font and spacing first, then trim. Never remove skills. Keep the floors (both educations, summary, Aczen internship at least 4 bullets, each project at least 3 bullets). The fit runs live in the editor, deterministic, no AI. If the floors cannot fit, fail closed. | Teja wants the fit visible while he edits, and predictable. | `PAGE_FIT_FLOORS` and `TRIM_ORDER` in `_shared/tailor/page-trim.ts`. Code order: `certification`, then `project_bullet_over_cap`, then `weakest_bullet`. See contradiction 1 below. |
-| 2026-11-08 15:36 | At most 2 projects in a tailored resume ("never and ever"). Enforce in code at the tailor, the editor save and the submit gate, not only in the prompt. | Teja's resume policy. | Not in code yet at 2a9ac31: no project-count cap exists. `PAGE_FIT_FLOORS.minBullets.projects = 3` is bullets per project, a different rule. |
+| 2026-11-07 23:00-23:18 | How to fit one page: shrink font and spacing first, then trim. Never remove skills. Keep the floors (both educations, summary, Aczen internship at least 4 bullets, each project at least 3 bullets). The fit runs live in the editor, deterministic, no AI. If the floors cannot fit, fail closed. | Teja wants the fit visible while he edits, and predictable. | `PAGE_FIT_FLOORS` and `TRIM_ORDER` in `_shared/tailor/page-trim.ts`. Code order (re-checked 2026-11-21): `project_bullet_over_cap`, then `weakest_bullet`, then `project_bullet_to_floor`. Bullets only: certifications and achievements are never trimmed (2026-11-09 20:41 row below). |
+| 2026-11-09 20:41 | At least 5 certifications and every achievement stay on every tailored resume. Neither is trimmed to fit the page. | Teja's resume policy. | `PAGE_FIT_FLOORS.minCertifications = 5` and `minAchievements = Number.POSITIVE_INFINITY` in `_shared/tailor/page-trim.ts`; no certification step in `TRIM_ORDER`. |
+| 2026-11-08 15:36 | At most 2 projects in a tailored resume ("never and ever"). Enforce in code at the tailor, the editor save and the submit gate, not only in the prompt. | Teja's resume policy. | Enforced. `PAGE_FIT_FLOORS.maxProjects = 2` in `_shared/tailor/page-trim.ts`; `checkContentRules` in `_shared/tailor/content-rules.ts` gates the resolved resume. `PAGE_FIT_FLOORS.minBullets.projects = 3` is bullets per project, a different rule. |
 
 ### What jobs get in
 
@@ -65,6 +67,7 @@ The rulings come from four places. Read them in this order when they disagree:
 | 2026-11-04 18:26 | Remote: keep remote that is India-tied or has no country lock ("Remote", "Anywhere"). Drop remote locked to another country ("Remote - US"). Show the choice in Settings. | Teja had assumed "remote" always meant "from India". 43 queue rows were remote locked to one foreign country. | Column `search_preferences.remote_location_policy` (default `unlocked_or_authorized`) in `supabase/migrations/20261104193000_remote_location_policy_and_experience_ceiling.sql`; the "Remote jobs" select in `apps/web/src/features/settings/SearchPreferencesPage.tsx`; commit `b93a936`. |
 | 2026-11-04 | An unclear location ("2 Locations", "In-Office", blank) PASSES the gate and stays in the queue. | Unknown is not "foreign". Teja would rather see the job and decide. The fix for leaks is to fill gaps in the country map, not to drop unknowns. | `work-auth-gate.ts`: an unmapped fragment keeps the job. |
 | 2026-11-04 19:00 | Drop jobs that ask for more than 1 year of experience. | Teja is early-career. The Axiad "6-8 years" job reached his manual queue before he caught it. | `supabase/functions/_shared/screen/required-experience.ts` reads the JD; `filter_rules.config.max_years` set to 1 by migration `20261104193000` and commit `9976d2c`. |
+| 2026-11-21 14:30 | An entry-level title (intern, junior, graduate) keeps a job only while the JD's hard minimum is under 3 years. At 3 or more hard years it drops as `experience_ceiling`. | A Point72 "Junior Business Analyst" job asked for 4+ years: "yeah it need to drop". | `ENTRY_LEVEL_HARD_FLOOR = 3` in `supabase/functions/_shared/screen/required-experience.ts`; commit `3a86eada`. |
 | 2026-10-05, changed 2026-11-07 22:45 | Matcher score floor: a scouted job scoring below the floor is dropped (`match_below_threshold`). Floor was 45; now **30**. Never remove it. | Teja reads "scored 42, below the floor" and agrees for senior or hardware roles. He wants leaks fixed upstream in the screener, not by removing the floor. On 2026-11-06 he first said "remove it", then reversed within 2 minutes: "keep the score". | `MATCH_ADVANCE_FLOOR = 30` in `supabase/functions/_shared/match/score-threshold.ts` (commits `25b4b5c`, `95df3f3`). A pasted link (`discovered_via` contains `manual`) is never dropped. |
 | 2026-11-01 16:00 | Honor robots.txt when scouting. SmartRecruiters is OFF: never seed or re-enable an SR board. | SR's API robots.txt is `Disallow: /` for everyone but LinkedInBot. The two scouts disagreed, which is how 124 PhonePe SR jobs came in. | No SR adapter: `supabase/functions/_shared/ats/registry.ts` (test "smartrecruiters is not registered" in `adapters.test.ts`); commit `ad19be5`. |
 | 2026-11-01 16:14 | A robots.txt that answers 401 means "no rules", but only for board reads. The applier stays strict. | RFC 9309 says so. Ashby answers 401 on robots.txt but 200 on its board API. The strict rule silently cut Ashby off. | `RobotsPolicy = 'strict' \| 'scouting'` in `packages/master-robots/src/gate.ts`; only `'scouting'` allows 401. |
@@ -74,7 +77,7 @@ The rulings come from four places. Read them in this order when they disagree:
 | 2026-11-01 | When the master resume changes, queued rows go back to `passed_filters` through a human edge and are re-scored. Never via `dropped_filter`. | `application_events` is append-only. Routing through `dropped_filter` would write a permanent false "declined" event. | Migration `20261101173000`; `.github/workflows/postscreen-drain.yml`; commit `87fff82`. |
 | 2026-11-09 ~17:20 (**superseded 2026-11-18**) | The post-screen drain runs automatically: after either scout completes (`workflow_run`), daily, and on dispatch. Reversed the 2026-11-05 manual-only ruling. | 55 rows stalled 11-02 to 11-09 (`docs/status/2026-11-09-pipeline-stall.md`). | Replaced by the 2026-11-18 row below. |
 | 2026-11-12 (**superseded 2026-11-18**) | A scouted job with no description is held at `discovered` instead of dropped as `missing_description`. | Workday rows arrived with an empty body (from the `screen-batch.ts` comments; the ruling's own words are not on file). | Commit `cb774d83`. Replaced by the 2026-11-18 21:46 row below. |
-| 2026-11-18 21:45 / 21:46 | Scouted jobs that pass screening wait in Ready to tailor (`passed_filters`). Only pasted links go straight to the approval queue. Jobs with no description also go to Ready to tailor. Replaces the 2026-11-09 automatic drain and the 2026-11-12 hold. | 21:45: "they don't need to directly reach approval, they need to go to ready to tailor; only the jobs which I add through the Add job link button need to go directly to the approval queue." 21:46: "no jd jobs also need to be in ready to tailor." | `.github/workflows/postscreen-drain.yml` (no `workflow_run`; the cron sets `REGATE_ONLY` and runs only `auditor?mode=regate_queue`); stage 0a removed from `_shared/screen/screen-batch.ts`; "No description" pill (`hasNoDescription`, `apps/web/src/features/discovery/discoveredList.ts`). Pinned by `apps/web/test/postscreenDrainTriggers.test.ts` and `apps/web/test/discoveredNoDescription.test.ts`. Uncommitted at time of writing. |
+| 2026-11-18 21:45 / 21:46 | Scouted jobs that pass screening wait in Ready to tailor (`passed_filters`). Only pasted links go straight to the approval queue. Jobs with no description also go to Ready to tailor. Replaces the 2026-11-09 automatic drain and the 2026-11-12 hold. | 21:45: "they don't need to directly reach approval, they need to go to ready to tailor; only the jobs which I add through the Add job link button need to go directly to the approval queue." 21:46: "no jd jobs also need to be in ready to tailor." | `.github/workflows/postscreen-drain.yml` (no `workflow_run`; the cron sets `REGATE_ONLY` and runs only `auditor?mode=regate_queue`); stage 0a removed from `_shared/screen/screen-batch.ts`; "No description" pill (`hasNoDescription`, `apps/web/src/features/discovery/discoveredList.ts`). Pinned by `apps/web/test/postscreenDrainTriggers.test.ts` and `apps/web/test/discoveredNoDescription.test.ts`. Commit `fa315449`. |
 
 ### Applying
 
@@ -86,7 +89,7 @@ The rulings come from four places. Read them in this order when they disagree:
 | 2026-11-07 22:55 | If the bot cannot apply (Workday, robots refusal, unanswered required questions, non-ATS), the row goes to the Manual apply lane with its kit. Teja's answers there save to the answer bank, so the bank grows. The bot never ticks declarations (for example "I did not use AI") for him. | Chasing one bot-perfect row per night stalls the pipeline. | `apps/web/src/features/manual-apply/ManualApplyPage.tsx` (commit `e4ae103`); Workday refusal in `worker/src/workday.ts` (`WORKDAY_REFUSAL`). Some manual-apply files are being changed right now (uncommitted). |
 | 2026-10-09 | Answers Teja saves himself are stamped `attested_by_human`. Only those may fill eligibility and EEO questions. | A machine must not answer legal questions in his name. | `supabase/migrations/20261009160000_answer_bank_attested_by_human.sql` (the server overwrites any client value). |
 | 2026-11-07 23:02 | The orchestrator may run real bot submits itself, through `apply.yml` with `dry_run=false` and `apply_only_id`, for a row whose rehearsal exits 0. | `assist.ts` needs Teja's keyboard. Teja wants submits to happen without him. | Process rule. Workflow: `.github/workflows/apply.yml`. |
-| 2026-11-07 / 2026-11-08 | Receipt-confirm (pipeline stage 6) is ON HOLD. | Teja's ruling in the 2026-11-08 handoff. | Not built. `docs/handoff/2026-11-08-1745-pending-tasks.md` item 14. |
+| 2026-11-07 / 2026-11-08 | Receipt-confirm (pipeline stage 6) is ON HOLD. | Teja's ruling. | Not built. Tracked in `docs/handoff/2026-11-12-1305-pending-tasks.md`. |
 
 ### Security and UI
 
@@ -102,10 +105,12 @@ These are process rulings. They shape who may change what.
 
 | Date | Ruling | Why | Where enforced |
 |---|---|---|---|
-| 2026-10-08 15:37 | The orchestrator runs production deploys and `db push` itself, from a clean worktree pinned to a SHA. Never a peer. Never hand Teja a runbook. | "Do this by yourself, do not give me this type of tasks." | Repo `CLAUDE.md` §3. |
+| 2026-10-08 15:37 | The orchestrator runs production deploys and `db push` itself, from a `git archive` export pinned to a SHA (since 2026-11-10; before that a worktree). Never a peer. Never hand Teja a runbook. | "Do this by yourself, do not give me this type of tasks." | Repo `CLAUDE.md` §3. |
 | 2026-10-08 | Teja talks only to the orchestrator. Peers report to it. | Questions asked in a peer window stall silently. | Repo `CLAUDE.md` §2, memory `teja-talks-only-to-orchestrator.md`. |
 | 2026-09-11 | Sessions may commit and push, with explicit paths and a trailing pathspec. No attribution lines. | Several sessions share one index. The pathspec stops a peer's staged file riding into your commit. | Global `~/.claude/CLAUDE.md`. |
-| 2026-11-08 15:25 | At most one commit per 15 minutes, made by the orchestrator, bundling every peer's checked files. Peers never add, commit or push. | Teja wants a low commit count. | Memory `fewer-commits-one-per-task.md`. See contradiction 2 below. |
+| 2026-11-09 22:49 | One orchestrator bundle commit per 15 to 30 minutes (soft), bundling every peer's checked files. Peers never add, commit or push. | Teja wants a low commit count. | Memory `fewer-commits-one-per-task.md`. See contradiction 2 below. |
+| 2026-11-21 14:36 | In the resume chat, "rm X" removes X by itself, with no Apply click, when X names a whole entry. | "If i say rm something ... it need to directly remove." | `remove_entry` auto-applies only when the instruction names the entry (`namedIn`, `apps/web/src/features/approval/aiEdit.ts`). A partial name still waits for the click. |
+| 2026-11-21 14:41 | The bulk drop on the Approval queue is rejected and removed. | Teja's ruling. | Commit `3a86eada` deleted `bulkDrop.ts`, `bulkDropBar.tsx` and their test. |
 
 ## Rules and guardrails
 
@@ -122,13 +127,12 @@ These are process rulings. They shape who may change what.
 
 ### Contradictions found
 
-1. **Trim order.** The memory file `applyyy-resume-one-page-rule.md` says: font first, then weakest
-   bullets, then certifications last. The code (`TRIM_ORDER` in `page-trim.ts`), commit `7a78d05`
-   ("certifications trim first") and the 2026-11-08 handoff say: font, then certifications, then
-   bullets. The code order is what runs. The memory text looks stale.
+1. **Trim order. RESOLVED 2026-11-09 20:41.** Commit `7a78d05` once trimmed certifications first. Teja then
+   ruled at least 5 certifications and every achievement stay. `TRIM_ORDER` in `page-trim.ts` now trims
+   bullets only. Re-check: `git grep -n "TRIM_ORDER" -- supabase/functions/_shared/tailor/page-trim.ts`.
 2. **Commit cadence.** Repo `CLAUDE.md` §2 says "one commit per finished task". The newer ruling
-   (2026-11-08 15:25) says one orchestrator commit per 15 minutes, bundling all peers. The memory file
-   says the newer one wins, but `CLAUDE.md` was not updated.
+   (2026-11-09 22:49) says one orchestrator bundle commit per 15 to 30 minutes (soft), bundling all peers.
+   The memory file says the newer one wins, but `CLAUDE.md` was not updated.
 3. **Stale line reference.** The memory for the score floor cites `score-threshold.ts:32`. The constant
    is now on line 43.
 4. **"No cron" vs "scheduled backstop".** Teja ruled no cron (2026-10-09), and later asked for a
@@ -139,7 +143,6 @@ These are process rulings. They shape who may change what.
 
 ### Gaps
 
-- **Max 2 projects** (ruled 2026-11-08 15:36) has no code yet at 2a9ac31.
 - **One email** has no code guard. A new master upload with another email would be stored without a warning.
 - **Live Gemini model vs code default.** `GEMINI_DEFAULT_MODEL` is `gemini-3.8-flash`; the live secret
   was `gemini-3.5-flash-lite` (measured 2026-10-31). Request fields that work on one model can 400 on the other.
@@ -149,8 +152,7 @@ These are process rulings. They shape who may change what.
 
 ### Open questions for Teja
 
-- Should `CLAUDE.md` §2 be updated to the 15-minute bundled-commit rule, or does that rule apply only to tonight's run?
-- Is the trim order "certifications before bullets" (as the code does) your intended order?
+- Should `CLAUDE.md` §2 be updated to the 15-30 minute bundled-commit rule?
 - Should the master upload refuse, or only warn, when it carries a different email?
 
 ## Related docs

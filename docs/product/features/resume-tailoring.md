@@ -212,6 +212,12 @@ So a new optional field must be copied "as held" (absent stays absent). Normalis
 to `[]` broke this once (memory `applyyy-validator-rebuild-must-equal-snapshot`; guard:
 `apps/web/test/tailorRefsWithoutSchemaVersion.test.ts`).
 
+**Provenance gates (2026-11-21, `e1f4b520`).** An AI-written bullet (one with `sources`) must
+trace every number and tech name to its master sources. The Aczen internship title must be on
+the allow-list Teja approved (`EXPERIENCE_TITLE_ALLOW_LIST` in `validator.ts`). The headline
+may hold only job-title words (`checkHeadline` in `content-rules.ts`). The auditor moves a row
+to `failed` when a role, company or date differs from the master.
+
 ### 3.5 The one-page rule
 
 Two halves, both pure, both shared by the tailor (Deno), the web editor (browser) and tests (Node).
@@ -240,9 +246,13 @@ bullet, because a cut sentence can change the claim's meaning.
 
 `TRIM_ORDER` (first step with a candidate wins; fit is re-measured after each removal):
 
-1. `certification`: remove a certification entry, never below `minCertifications` (2).
-2. `project_bullet_over_cap`: a project with more than 4 bullets loses one first.
-3. `weakest_bullet`: the bullet with the fewest JD keywords (ties: the later one).
+1. `project_bullet_over_cap`: a project with more than 4 bullets loses one first.
+2. `weakest_bullet`: the bullet with the fewest JD keywords (ties: the later one).
+3. `project_bullet_to_floor`: a project goes from 4 bullets to 3, only when every other bullet is at
+   its floor.
+
+Only bullets are trimmed. Certifications and achievements are never removed (Teja, 2026-11-09 20:41).
+Re-check: `git grep -n "TRIM_ORDER" -- supabase/functions/_shared/tailor/page-trim.ts`.
 
 Floors (`PAGE_FIT_FLOORS`, change them only there):
 
@@ -252,7 +262,9 @@ Floors (`PAGE_FIT_FLOORS`, change them only there):
 | `exp_aczen` (the Aczen internship) | 4 |
 | Project bullets per entry | 3 (soft cap 4) |
 | Achievement bullets per entry | 1 |
-| Certification entries | 2 |
+| Achievement entries | all (`minAchievements` is `Number.POSITIVE_INFINITY`) |
+| Certification entries | 5 |
+| Projects | at most 2 (`maxProjects`) |
 | Skills, summary, education | never removed |
 
 If the floors still overflow, the tailor refuses with `page_overflow` and `blockedBy`,
@@ -314,7 +326,9 @@ Folder: `apps/web/src/features/approval/`. Details in [web-app.md](../../feature
   An edit must trace to the master (`tracesToMaster` in `tailoredEdits.ts`).
 - **Attest a skill** (`attestSkill.ts`): Teja clicks a missing JD keyword. The skill is
   inserted into a **new master version** first, then added to this resume, and the row is
-  re-pinned. Adding a skill the master already has is refused (`87a7ade`).
+  re-pinned. A skill the row's pinned master already holds is added at the pin, with no master
+  write and no re-pin (`2523886a`). A skill the latest master holds under another spelling is
+  refused with the master's own name and group (`87a7ade`).
 - **Attest a bullet** (`attestBullet.ts`): same order for a new bullet under a chosen entry.
 - A re-pin moves three pins together: `applications.master_version`,
   `tailored_profile.master_version`, `tailor_refs.master_version`.
@@ -339,6 +353,11 @@ It takes a `ResolvedResume`, which has no master and no raw dates, so it cannot 
 a ref or format a date even by accident. The worker renders the PDF at submit time from
 the frozen `tailored_profile` (`worker/src/render-resume-pdf.ts`), not from a stored
 file; `resume_storage_path` is a record, not the source.
+
+Since 2026-11-21 (`f83847b7`): only the certification name is bold and linked; split titles and
+run-ins have a hanging indent; the run-in and split gaps scale with the page-fit rung. The worker
+prints with `preferCSSPageSize`, through one shared `RESUME_PDF_OPTIONS` used by both the renderer
+and the page-count CLI (`0f0391ac`).
 
 ---
 
@@ -365,13 +384,12 @@ file; `resume_storage_path` is a record, not the source.
 
 - **`tailored_hash` is not built.** `PROJECT_PLAN.md` designs `hash(master_version +
   selected_jd_keywords)` as a PDF cache key. The column exists; nothing computes it.
-- **`applications.ats_keyword_coverage` has no writer** (pending tasks, 2026-11-08).
 - **`SCHEMA_CONTRACT.md` is stale** on the AuditFinding union (pending tasks, item 12).
 - **Stale comment in code:** `validator.ts` line 78 says a refused row "goes to
   audit_failed". No such status exists; the tailor moves it to `failed`
   (`persist.ts`). `PROJECT_PLAN.md` already records that `audit_failed` was never real.
-- **Rows trimmed in the old order:** rows tailored between the 23:00 and 23:55 IST rulings
-  on 2026-11-07 had bullets trimmed before certifications (`page-trim.ts` comment).
+- **Rows trimmed in an old order:** rows tailored before 2026-11-09 20:41 IST may have lost
+  certifications to the trim (`page-trim.ts` ruling history). Today only bullets are trimmed.
 - **Two rows failed `page_overflow`** (Tether 04d5c6e4, L&T 7890ff1b) before the dense
   rungs. The handoff says they fit on rungs 5 and 4 and should be re-run once the tailor
   is confirmed deployed from `dc8ac5c`. Check with `supabase functions list` (order by `updated_at`).
@@ -384,10 +402,8 @@ file; `resume_storage_path` is a record, not the source.
   (`persist.ts` comment, `apps/web/src/data/humanLanes.ts`).
 - **The page fit is a model.** It is held to Chromium by the calibration test. A new font
   or CSS change needs that test re-run, or the worker gate will catch page two at submit time.
-- **Open question for Teja:** the memory note for the one-page rule still lists the
-  23:00 order (bullets before certifications) and "achievements >= 2". The code follows the
-  23:55 order and keeps every achievement entry with >= 1 bullet. Which is the intended floor
-  for achievements?
+- **Resolved 2026-11-09 20:41 IST:** the trim-order and achievements-floor question. At least 5
+  certifications and every achievement stay; only bullets are trimmed.
 
 ---
 
@@ -400,4 +416,4 @@ file; `resume_storage_path` is a record, not the source.
 - [CI and workflows](../../ops/ci-and-workflows.md)
 - `PROJECT_PLAN.md` sections 7 and 10 (template guarantee, trust boundaries)
 - `packages/resume-template/README.md`
-- Handoff: `docs/handoff/2026-11-08-1745-orchestrator-handoff.md`, `docs/handoff/2026-11-08-1745-pending-tasks.md`
+- Handoff: the newest `docs/handoff/*orchestrator-handoff.md` (`ls docs/handoff | tail`) and `docs/handoff/2026-11-12-1305-pending-tasks.md`

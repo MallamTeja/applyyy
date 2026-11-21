@@ -3,7 +3,7 @@
 > **Status 2026-11-08:** Superseded. All 20 advisories measured here were fixed after it: `cc1cd22` (2026-10-05), `cf8699a` (2026-10-08) and `b4ebc70` (2026-10-09). The newer measurement is [2026-11-05-vulnerability-remeasure.md](2026-11-05-vulnerability-remeasure.md). The body below is the original record, unedited.
 
 **Measured:** 2026-10-05 ~20:50 IST at HEAD `1938f82`, by `applyyy-d3`.
-**Compared against:** [`2026-09-17-dependency-remediation-plan.md`](2026-09-17-dependency-remediation-plan.md)
+**Compared against:** `2026-09-17-dependency-remediation-plan.md` (deleted 2026-11-21; `git show 3a86eada:docs/security/2026-09-17-dependency-remediation-plan.md`)
 (its own "latest measured count": **20** at `b62be33`).
 
 ## Verdict

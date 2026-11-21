@@ -1,6 +1,6 @@
 # The agents in `applyy`: what each one does
 
-_Last verified against code: 2026-11-08 (2a9ac31)._
+_Last verified against code: 2026-11-21 (3a86eada)._
 
 This page has one section per agent in the application status graph. Each section
 says what status the agent reads, what status it writes, where its code is, and which
@@ -113,9 +113,20 @@ under RLS (for example `supabase/functions/matcher/index.ts`, header comment).
 
 - **Code:** `supabase/functions/scout-ats/` (manual, from the dashboard) and
   `worker/src/cli/scout.ts` (the cron path, `.github/workflows/scout.yml`).
-- **Providers:** Greenhouse, Lever, Ashby and Workday, registered in
-  `supabase/functions/_shared/ats/registry.ts`. SmartRecruiters is registered but off:
-  its robots.txt says `Disallow: /` (ruling of 2026-11-01).
+- **Providers:** Greenhouse, Lever, Ashby, iCIMS (sitemap listing + JSON-LD detail pages,
+  `f7d9cb43`) and Workday, registered in `supabase/functions/_shared/ats/registry.ts`.
+  SmartRecruiters is **not** registered: its robots.txt says `Disallow: /` (ruling of
+  2026-11-01), and its adapter was deleted (`2fe02642`).
+- **Robots and pacing:** a robots.txt 429/5xx is "retry later": the board is not contacted and
+  no failure is counted (`RobotsUnavailableError`, `_shared/http/robots-unavailable.ts`;
+  worker `eb56d28e`, edge `3951ba06`). The robots verdict is cached per host for the run. A board
+  at 5+ consecutive failures rests 24 h (`FAILING_BOARD_REST_MS`, `worker/src/scout/persist-jobs.ts`).
+  Requests are paced 1 s per Cloudflare zone (`_shared/http/request-pacer.ts`, shared by edge and
+  worker) under one identifying User-Agent, `applyy-scout/1.0` (`8a99dbe6`).
+- **Aggregator twins:** a job seen on an aggregator feed and on the employer's ATS is stored once
+  (`11580660`). A location-free `crossSourceKey(company, title)` blocks an aggregator insert whose
+  ATS twin has a live application, and each aggregator run retires the aggregator copy through
+  the `scout_aggregator` edges into `dropped_duplicate` (migration `20261110160000`).
 - **Status:** creates rows instead of moving them, so it has no edge in the
   transition table. It screens each new job at insert
   (`supabase/functions/_shared/screen/screen-batch.ts`), so the row is born at
@@ -236,6 +247,19 @@ The resume must fit **one page** (Teja's rule of 2026-11-07). The renderer has t
 typography steps for this (commit `dc8ac5c`), and the approval editor fits every save
 to one page (commit `7a78d05`).
 
+**Content floors** (`_shared/tailor/tailorer.ts`, `content-rules.ts`): at least 5 certifications
+and every achievement stay on every resume; the one-page fit trims bullets only and refuses a
+page that still overflows (`ba90a402`). Skills show `SKILLS_MIN_GROUPS` (5) to `SKILLS_MAX_GROUPS`
+(7) groups of up to `SKILLS_PER_GROUP_CAP` (10) master skills, each group at most two printed lines
+(`01efc5d6`, `4b7e75ab`, then `997a871c`). The AI group is always seated when the master has one,
+with at least 5 of the most JD-relevant AI skills.
+
+**Provenance gates** (`e1f4b520`): a bullet with `sources` is AI-written, and every number and
+tech name in it must trace to the pooled master sources. `role_title` (Aczen only) must be on the
+allow-list Teja approved. `checkHeadline` allows job-title words only. The Auditor then compares
+role, company and dates with the master and moves a mismatch `tailored -> failed`
+(stage `auditor_master_facts`).
+
 ### 4.7 Auditor: the second opinion
 
 - **Code:** `supabase/functions/auditor/index.ts`, logic in
@@ -256,8 +280,15 @@ those two statuses and retries only the second move.
 **The pre-gate re-check** (`auditor/pregate.ts`, since 2026-11-05): the Auditor is the
 last agent before a human, so it re-runs the Matcher's pre-gate with today's config.
 A row that fails goes to `failed`, not `dropped_filter`, because the graph gives the
-Auditor no edge into `dropped_filter`. A human can still send it back
+Auditor no edge from `tailored` into `dropped_filter`. A human can still send it back
 (`failed` to `passed_filters`).
+
+**The approval-queue re-gate** (`?mode=regate_queue`, `auditor/regate-queue.ts`; the daily cron
+in `postscreen-drain.yml`): re-runs today's work-auth gate over `awaiting_approval`, and since
+`07067197` also drops a row that is a copy of an already-committed application. Its one edge is
+`awaiting_approval -> dropped_filter`, allowed only with `drop_reason` `work_auth` or
+`already_applied` (trigger `guard_auditor_queue_drop_reason`, migrations `20261111220000` and
+`20261121110000`). Experience over the ceiling is reported, not moved.
 
 ### 4.8 `human`: you, the most powerful identity
 

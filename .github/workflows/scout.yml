@@ -10,7 +10,7 @@
 #
 # Lightweight: requires NO Playwright or Chromium download. Not fast any more: a full pass
 # over 262 enabled boards needs ~16 min (917 s for 246 boards, measured 2026-11-02), so the
-# scout now stops STARTING boards after a 12-minute budget (SCOUT_BUDGET_MS in
+# scout now stops STARTING boards after a 16-minute budget (12 until 2026-11-21; SCOUT_BUDGET_MS in
 # worker/src/scout/run-outcome.ts), closes its run `succeeded` with a `deadline:` note, and
 # the unstarted boards go first next run (oldest last_polled_at first). See timeout-minutes.
 name: applyy scout (ats discovery)
@@ -32,7 +32,7 @@ on:
     # different companies"). Gaps alternate 2 h / 3 h, so no posting waits more than ~3 h plus
     # GitHub's start delay. The quota reason for cutting to two runs (2026-11-01) is gone: the
     # repo is PUBLIC, and standard runners are free for public repos. "Different companies each
-    # time" is the oldest-last_polled_at-first order plus the 12-min budget (scout.ts): each
+    # time" is the oldest-last_polled_at-first order plus the 16-min budget (scout.ts): each
     # run starts with the boards the previous run never reached. No per-run board cap on
     # purpose: a 1/10 slice would scan each board once a day, fewer than the ~2 a day before.
     # Each run's passed_filters rows WAIT in the Ready to tailor lane for Teja (ruling 2026-11-18
@@ -60,10 +60,12 @@ jobs:
     runs-on: ubuntu-latest
     # 25, raised from 15 on 2026-11-02 (W40): at 15 both scheduled runs (41334080711,
     # 41399027003) were killed mid-scan, leaving agent_runs `running` for ~6 h. The scout's
-    # own 12-minute budget now ends a normal run at ~12.5 min (setup measured 14 s), so this
-    # is only a backstop: 13 min of headroom covers the board in flight, even a page that
-    # hangs for undici's 300 s default (board-pages sets no fetch timeout). It costs minutes
-    # only when something hangs. Change it together with SCOUT_BUDGET_MS.
+    # own budget ends a normal run at budget + ~0.25 min (setup measured 14 s), so this is only
+    # a backstop. The budget is 16 min since 2026-11-21 (S10: run 44886173953 hit the old
+    # 12-min budget at 209 of 283 boards), which leaves ~9 min of headroom. That still covers
+    # the board in flight, even a page that hangs for undici's 300 s default (board-pages sets
+    # no fetch timeout). It costs minutes only when something hangs. Change it together with
+    # SCOUT_BUDGET_MS; worker/test/scout-run-outcome.test.ts fails if this falls under budget + 5.
     timeout-minutes: 25
 
     # NO job-level env (moved 2026-10-05): job env reaches every action and every

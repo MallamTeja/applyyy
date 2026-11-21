@@ -8,7 +8,7 @@ parsed by Postgres once, so every claim about the schema was a claim about SQL
 *text*.
 
 Full record with reproduction steps:
-[`audit/2026-09-10-schema-invariants-verified.md`](audit/2026-09-10-schema-invariants-verified.md).
+[`audit/2026-09-10-schema-invariants-verified.md`](../audit/2026-09-10-schema-invariants-verified.md).
 
 | Invariant | Result | Isolated how |
 |---|---|---|
@@ -253,7 +253,7 @@ migrations confirmed present on **both** sides: `20260909234500`, `234600`,
 wrong credential** — the same value succeeded minutes later. Recorded because
 `password authentication failed for user "postgres"`, read alone, sends someone
 hunting through credential stores for a string that was already correct. See
-[`verification-traps.md`](verification-traps.md) instance 8.
+[`verification-traps.md`](../verification-traps.md) instance 8.
 
 `SUPABASE_DB_PASSWORD` is now a persistent user environment variable, so the CLI
 picks it up **without the value ever entering a transcript.**
@@ -407,7 +407,7 @@ and unmeasured.
   "every skill is readable", the obvious test and the one the whole feature
   exists for. One is an anecdote; three is a law. All three, plus the vacuity
   problem none of them catch, are in
-  [`verification-traps.md`](verification-traps.md).
+  [`verification-traps.md`](../verification-traps.md).
 - **Correction: `packages/resume-template`'s test was NEVER red.** 98 ran it at
   session start: 20/20 with the glob-form script already in place. This document
   previously recorded an invocation bug and missing fixtures for it — the
@@ -747,7 +747,7 @@ Load-time is clean; these are behavioural.
 - **Why the local `supabase_storage` container reports `unhealthy`.** It made
   `supabase db reset` **exit 1 while the SQL itself fully succeeded**. Unrelated
   to migrations, but unexplained, and it will mislead the next person who reads
-  the exit code. See [`verification-traps.md`](verification-traps.md).
+  the exit code. See [`verification-traps.md`](../verification-traps.md).
 - Whether `application_status_transitions`'s missing force-RLS was a decision.
 - Whether the hosted project's `postgres` role matches the local one's
   privileges. It should — same image — but "should" is not "verified", and the

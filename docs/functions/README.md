@@ -1,6 +1,6 @@
 # Edge functions reference
 
-_Last verified against code: 2026-11-08 (2a9ac31)._
+_Last verified against code: 2026-11-21 (3a86eada)._
 
 One section per directory in `supabase/functions/`. Each section says what the
 function does, who calls it, which application statuses it reads and writes,
@@ -122,6 +122,7 @@ Each one takes `?limit=` and most take `?application_id=` (`_shared/http/applica
 - **Trigger:** web pipeline runner; `postscreen-drain.yml`; `run-one.yml`; `job-link-intake` in the background. `verify_jwt = false`.
 - **Reads:** `tailored`, `audit_clean`, `audit_flagged` (`auditor/index.ts:226`). The last two let it finish a row that stopped half way.
 - **Writes:** `audit_clean` or `audit_flagged`, then `awaiting_approval`; or `failed`.
+- **Modes:** `?mode=regate_queue` (`auditor/regate-queue.ts`, e8603866) audits nothing. It re-runs today's work-auth gate over rows already in `awaiting_approval`/`approved`, drops a newer copy of a posting already queued or committed as `already_applied` (the oldest copy owns it), and reports rows over the experience ceiling without moving them. `postscreen-drain.yml` calls it once per drain; its daily cron (`30 4 * * *`, best-effort) runs the re-gate only.
 - **Secrets:** app-user secrets.
 - **`_shared`:** `audit/audit.ts`, `audit/pinned-master.ts`, `contracts/shared-types.ts`, `cors.ts`, `db/client.ts`, `db/gates.ts`, `http/application-id.ts`, `match/score-threshold.ts`, `pregate-config-loader.ts`. Also its own `auditor/pregate.ts`.
 
@@ -132,9 +133,9 @@ Each one takes `?limit=` and most take `?application_id=` (`_shared/http/applica
 ### scout-ats
 
 - **Purpose:** poll boards in `company_watchlist` through the ATS adapters, store postings in `jobs` (deduped by fingerprint), and create `applications` rows. The board fetch is robots-gated (`_shared/http/index.ts`).
-- **Adapters:** Greenhouse, Lever, Ashby, Workday (`_shared/ats/registry.ts`). SmartRecruiters is deliberately absent (robots ruling 2026-11-01). Workable is written but not registered.
+- **Adapters:** Greenhouse, Lever, Ashby, Workday, iCIMS (`_shared/ats/registry.ts`; iCIMS since f7d9cb43, `_shared/scout/adapters/icims.ts`: sitemap listing + JSON-LD detail pages, robots is per tenant host). SmartRecruiters is deliberately absent (robots ruling 2026-11-01). Workable is written but not registered.
 - **Trigger:** web, "scan" on the discovery page (`apps/web/src/data/discoveryService.ts:237`). `verify_jwt = false`; the in-function caller check is the control. The scheduled scout is the Node worker (`worker/src/cli/scout.ts`, run by `scout.yml`), which shares the same board logic but does not call this function. `.github/workflows/scout-ats-daily.yml` (07:11 IST + dispatch) calls it as `?mode=liveness`.
-- **Modes:** no `mode` param = the full scan. `?mode=liveness` (`scout-ats/liveness-mode.ts`, `runLivenessSweep` in `index.ts`) does no scan: no `jobs`/`applications` upserts, no screener, no watchlist telemetry. It reads only the listings of watchlist boards that hold `awaiting_approval`/`approved` rows, marks a row closed only on two proofs (absent from a trusted listing AND the posting endpoint answers 404 or `canApply: false`), then runs feed liveness (no-ATS rows, 404/410). It writes only `jobs.disappeared_at`, `posting_closed` notes in `application_events`, and its `agent_runs` row. Any other `mode` value is a 400 `unknown_mode`.
+- **Modes:** no `mode` param = the full scan. `?mode=liveness` (`scout-ats/liveness-mode.ts`, `runLivenessSweep` in `index.ts`) does no scan: no `jobs`/`applications` upserts, no screener, no watchlist telemetry. It reads only the listings of watchlist boards that hold `awaiting_approval`/`approved` rows, marks a row closed only on two proofs (absent from a trusted listing AND the posting endpoint answers 404 or `canApply: false`), then runs feed liveness (no-ATS rows, 404/410). A robots.txt 429/5xx (`RobotsUnavailableError`) skips that board, as the Scan does, and never counts as a closure (953eb770). It writes only `jobs.disappeared_at`, `posting_closed` notes in `application_events`, and its `agent_runs` row. Any other `mode` value is a 400 `unknown_mode`.
 - **Writes (insert):** rows are screened on insert and are born `passed_filters` or `dropped_filter`. They are born `discovered` only when the screener could not run (`scout-ats/new-applications.ts:11-15`).
 - **Secrets:** app-user secrets, `APPLYY_AGENT_KEY`.
 - **`_shared`:** `agent/deadline.ts`, `ats/identity.ts`, `ats/registry.ts`, `contracts/shared-types.ts`, `cors.ts`, `db/client.ts`, `http/index.ts`, `scout/feed-liveness.ts`, `scout/liveness.ts`, `scout/queue-liveness.ts`, `scout/workday-detail.ts`, `screen/context.ts`, `screen/run-summary.ts`, `screen/screen-batch.ts`, `screen/supabase-queries.ts`, `screen/tech-gate.ts`, `screen/upsert-plan.ts`.
@@ -185,6 +186,7 @@ also use the Gemini secrets. The web page
 
 - **Purpose:** the AI box on the review page. It proposes resume edits as ops; the web applies them. Every proposal is validated (`_shared/tailor/validator.ts`, `_shared/audit/detector.ts`). All logic is in `resume-assist/assist.ts`; `index.ts` is wiring only.
 - **Trigger:** web, `apps/web/src/features/approval/aiEdit.ts`. `verify_jwt = true`.
+- **Streaming (77ff4d03):** a request with `Accept: application/x-ndjson` gets an NDJSON stream of progress and the reply as it is written (Gemini `streamGenerateContent?alt=sse` via `onText`); without that header it answers one JSON body, as before. Timeouts: 15 s per attempt, 8 s to first chunk on the streaming path, 2 retries.
 - **Statuses:** none written.
 - **Deploy order:** the web (`aiEdit.ts`) refuses a whole answer over one unknown op kind. Ship the web consumer before this function emits a new op kind (repo `CLAUDE.md` section 3).
 - **Secrets:** app-user secrets, Gemini secrets.
@@ -238,15 +240,22 @@ also use the Gemini secrets. The web page
 ## 8. Deploy
 
 Only the orchestrator deploys (repo `CLAUDE.md` section 3). A peer never deploys.
-Deploy from a clean worktree pinned to a SHA, because the CLI ships the working
-tree, including other sessions' uncommitted edits.
+Deploy from a `git archive` export pinned to a SHA, because the CLI ships the working
+tree, including other sessions' uncommitted edits. An export registers nothing in
+`.git/worktrees`, so nothing piles up (the worktree method was dropped 2026-11-10).
 
 ```powershell
-git worktree add --detach "$env:TEMP\applyyy-deploy" <sha>
-# copy supabase/.temp/{project-ref,pooler-url,linked-project.json,postgres-version} into it
+# Bash: export exactly the committed tree of <sha>. cygpath is required: tar reads "C:" as a remote host.
+# set -o pipefail before any `deploy ... | tail` loop, or a failed deploy reads as success.
+D="$(cygpath -u "$TEMP")/applyyy-export-<sha>"; mkdir -p "$D" && git archive <sha> | tar -x -C "$D"
+# copy supabase/.temp/{project-ref,pooler-url,linked-project.json,postgres-version} into it, then deploy FROM it
 $env:SUPABASE_ACCESS_TOKEN = $null   # the user env var belongs to the WRONG account
 supabase functions deploy <fn> --project-ref xynqxekcqizwhtskzqrq --use-api --import-map supabase/functions/deno.json
 ```
+
+- Supabase CLI stays on v2 (2.119.0) until a planned upgrade. Always pass `--linked` to
+  `db push` (`supabase db push --linked --dry-run` first). Repo `CLAUDE.md` section 3 is the
+  authority for this recipe.
 
 - `--import-map` is required. `supabase/functions/deno.json` maps the bare
   `@supabase/supabase-js`, and `--use-api` does not read `deno.json` on its own.

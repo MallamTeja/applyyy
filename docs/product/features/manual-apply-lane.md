@@ -155,8 +155,9 @@ robots refusal or an unreadable form gets a **resume-only kit** instead of a ski
 400 or more on the form page, or a closed-posting sentence (`postingClosed()`). A page with controls but no email
 box (a job aggregator such as jobicy.com, or a careers index) gets a resume-only kit whose first warning says
 "no bot-usable application form". The kit, the applier and the rehearsal share one predicate for this,
-`formShapeBlockersFor` in `worker/src/apply-one.ts`. It returns `no_form_fields` or `no_email_field`, and the
-applier parks either one as `unsupported_form`, never a submit. Before this, the kit labelled every no-email page
+`formShapeBlockersFor` in `worker/src/apply-one.ts`. It returns `no_form_fields`, `no_email_field` or (since
+2026-11-10, `86ad2cae`) `no_resume_field`: an email box but no resume upload, so a job-alerts or newsletter form.
+The applier parks any of them as `unsupported_form`, never a submit. Before this, the kit labelled every no-email page
 `posting_closed`. All 4 live `posting_closed` notes on 2026-11-09 came from that guess, including an open jobicy
 posting and two rows Teja then applied to by hand.
 
@@ -278,12 +279,9 @@ elsewhere, who moved them, why, and a Re-open (commit `2383815`).
 
 - **Kit-only deploy not verified here.** `2936e8c` is on `main`. Whether the `dispatch-apply` function with kit-only
   mode is deployed was not checked for this doc. Until it is, a save answers `failed` and the cron fills the kit.
-- **Uncommitted work in progress:** `worker/src/apply-one.ts` and `worker/src/assist/rehearse.ts` have uncommitted
-  edits (rehearse-assist zero-field guard, pending task 4 in `docs/handoff/2026-11-08-1745-pending-tasks.md`).
-  Not described here.
-- **Unattested answers still fill non-gated questions.** 15 answers inserted by CLI on 2026-11-07 have
-  `attested_by_human = false`. `planFill` gates only eligibility and EEO labels on attestation, so they still fill
-  other questions. Teja can stamp them by re-saving on a card or the Answer bank page.
+- **Unattested answers fill nothing.** Since 2026-11-10 (`1a2393ad`), `planFill` treats a row a machine wrote as no
+  row at all, on every path (`worker/src/plan-fill.ts`). Any CLI-inserted answers with `attested_by_human = false`
+  leave their questions unanswered until Teja re-saves them on a card or the Answer bank page.
 - **Known attestation gap:** any holder of Teja's JWT who omits the agent-key header is treated as human (repo
   `CLAUDE.md` section 7).
 - **No automatic "route to manual" for good rows.** A row only reaches the lane when the bot parks it, a kit is
@@ -302,4 +300,4 @@ elsewhere, who moved them, why, and a Re-open (commit `2383815`).
 - [CI and workflows](../../ops/ci-and-workflows.md)
 - [User journey](../user-journey.md)
 - [Resume tailoring](resume-tailoring.md)
-- Handoff: `docs/handoff/2026-11-08-1745-orchestrator-handoff.md`
+- Handoff: the newest `docs/handoff/*orchestrator-handoff.md` (`ls docs/handoff | tail`) and `docs/handoff/2026-11-12-1305-pending-tasks.md`

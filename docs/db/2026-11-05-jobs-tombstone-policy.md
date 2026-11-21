@@ -2,6 +2,8 @@
 
 > **Status 2026-11-08:** Current. The design is live and is still the rule: migrations `20261105200000_jobs_tombstone.sql` and `20261105201000_jobs_tombstone_agent_name.sql` are applied, the weekly run is `.github/workflows/jobs-tombstone.yml` (`scripts/jobs-tombstone.mjs`), and the back-fill left 0 fat tombstones with the database at 186 MB (read-only check 2026-11-08). The two follow-ups below are done: edge 4 in `77f419a` (`supabase/functions/job-link-intake/index.ts:143`) and the `jobs_tombstone` cadence in `298f34a` (`apps/web/src/data/agentFreshness.ts:166`). The body below is the original record, unedited.
 
+> **Status 2026-11-21:** `docs/handoff/2026-11-05-1440-pending-tasks.md`, cited below, is no longer tracked (deleted in `579dfab3`; `git show 579dfab3^:docs/handoff/2026-11-05-1440-pending-tasks.md`). The `db push` steps below predate the CLI rule: today it is `supabase db push --linked --dry-run`, then `supabase db push --linked`, from a SHA-pinned export (repo `CLAUDE.md` §3).
+
 P0 from `docs/handoff/2026-11-05-1440-pending-tasks.md`. The database was 514 MB against the 500 MB Free
 Plan quota; past it, Supabase makes the project read-only. Rulings this implements: Teja 15:27 (tombstone,
 never a row delete) and 15:31 (scheduled about weekly, small batches, counts logged, never touches

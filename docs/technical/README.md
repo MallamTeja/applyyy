@@ -13,7 +13,7 @@ Code wins over docs. If a doc and the code disagree, trust the code and fix the 
 | [ai-and-llm.md](ai-and-llm.md) | Every Gemini caller, how the model is picked, the key pool, retries, pacing, answer checks and cost. |
 | [security-model.md](security-model.md) | Auth, RLS, the fail-closed agent key, status guards, SSRF and robots guards, CORS and CSP, secrets by name, gitleaks. |
 | [local-dev-and-testing.md](local-dev-and-testing.md) | Setup on Windows, the checker for each package, e2e suites, CI-to-local command map, and checks that pass while doing nothing. |
-| [deploy-and-release.md](deploy-and-release.md) | Vercel auto-deploy, edge function deploys from a pinned clean worktree, `db push --dry-run`, deploy order. |
+| [deploy-and-release.md](deploy-and-release.md) | Vercel auto-deploy, edge function deploys from a `git archive` export pinned to a SHA, `db push --linked --dry-run`, deploy order. |
 
 ## Other technical references
 

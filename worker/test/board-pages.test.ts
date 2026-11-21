@@ -533,7 +533,7 @@ describe('readBoardPages: text boards (iCIMS)', () => {
 });
 
 // D5 drift #3 (2026-11-21): a board page had NO timeout, so one hung Workday/iCIMS socket stalled the
-// whole CLI run until its 12-minute budget and every later board was skipped. The page now carries the
+// whole CLI run until its budget (12 min then, 16 since 2026-11-21) and every later board was skipped. The page now carries the
 // edge transport's per-attempt timeout, and a timeout is a COUNTED page failure, never a robots skip.
 describe('readBoardPages: page timeout (D5 drift #3)', () => {
   it('the board page timeout equals the edge transport timeout (one number for both scouts)', () => {

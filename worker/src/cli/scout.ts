@@ -277,7 +277,7 @@ async function main(): Promise<void> {
       get: (url) => robotsGatedGet(url),
       // Title only (description null): the description is what this read is for.
       worthReading: (title) => worthDetailRead(screenTechRole(title, null, screenContext.value.preferences)),
-      // The run's 12-min countdown; reads stop with 20 s left (WORKDAY_DETAIL_MIN_REMAINING_MS).
+      // The run's 16-min countdown (SCOUT_BUDGET_MS); reads stop with 20 s left (WORKDAY_DETAIL_MIN_REMAINING_MS).
       deadline,
       // A real pause between reads.
       pause: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),

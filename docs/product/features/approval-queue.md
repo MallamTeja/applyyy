@@ -41,7 +41,7 @@ The page is the last place a human can catch it.
 | 2026-11-07 10:08-10:25 IST | "the UX of the approval queue is very very bad" | Redesign `7211fd7`: the AI chat is the **only** edit path; hand-edit controls removed. |
 | 2026-11-07 22:43 IST | One-page resume: "This is rule." | Every save is fitted to one page. |
 | 2026-11-07 23:18 IST | "handled live while adding new skills and all, but not by AI" | The fit is deterministic code, run on every edit (`pageFitEdit.ts`, `7a78d05`). |
-| 2026-11-07 23:55 IST | Trim order | Certifications trim first, then project bullets over the cap, then the weakest bullets. Skills are never removed. |
+| 2026-11-07 23:55 IST, changed 2026-11-09 20:41 IST | Trim order | Bullets only: project bullets over the cap, then the weakest bullets, then project bullets down to the floor. Skills, certifications (at least 5) and achievements are never removed. |
 
 ### Why a human approves every row
 
@@ -102,8 +102,8 @@ flowchart TD
 | "Changes by AI (N)" | `DiffView.tsx` | Collapsed list of lines the AI changed or removed, each with **Reset** back to the tailor's text. This is the chat's undo. |
 | ATS score chip | `diffModel.ts` `coveragePercent` | A closed union: `measured` (a percent) or `unmeasured`. No JD keywords never reads as "0%". |
 | Resume preview | `apps/web/src/features/resume-preview/ResumePreview.tsx` | The real template in a sandboxed iframe (no scripts). "Download PDF" opens the browser print dialog. |
-| Skill attest | `attestSkill.ts` | Vouching for a skill the master lacks writes a new master version first, then adds it to the resume and re-pins the row. |
-| Bullet attest | `attestBullet.ts` | Same rule for a brand-new bullet. |
+| Skill attest | `attestSkill.ts` | Vouching for a skill the master lacks writes a new master version first, then adds it to the resume and re-pins the row. Exception (2026-11-12, `2523886a`): a skill the row's pinned master already holds is added at that pin, with no master write and no re-pin. |
+| Bullet attest | `attestBullet.ts` | Same rule for a brand-new bullet. On a row pinned to an older master, a new bullet is refused with a message naming the pinned version (2026-11-12, `714a3d72`). |
 
 ### The AI resume chat (resume assist)
 
@@ -119,6 +119,15 @@ flowchart TD
 - `resume-assist` never writes. Each op maps onto the page's own `EditAction`, the same action a click
   would make. The AI gets no new write path.
 - The browser writes chat history, not the edge function. RLS lets the user append only their own rows.
+- Replies stream: the panel shows live status and the reply text as it arrives (`77ff4d03`, 2026-11-18).
+  The stream gives up if the first chunk is late, and a Gemini key cools down after 3 straight 429s
+  (`07067197`, 2026-11-21).
+- Prompts queue first in, first out. Each is sent after the previous reply and its auto-applied edits land
+  (`5414b39c`, 2026-11-12).
+- A skill add that would wrap its group onto a second line is refused, naming the group. Saying "all"
+  allows it, with a notice (`c01372e7`, 2026-11-12).
+- A bullet swap (remove one line, add a new one under the same entry) saves as one change, judged on its
+  end state (`1dd56317`, 2026-11-21).
 
 **Auto-apply rules** (`shouldAutoApply` in `aiEdit.ts`):
 
@@ -129,8 +138,9 @@ flowchart TD
 | Bullet remove, move, add-back | Yes | No new text; resume-only; Reset undoes it. |
 | `add_skill` | Only if the master already has it | A new skill would land in the master under the AI's chosen group. |
 | `remove_skill` | Only if Teja named that skill | "trim my skills" names none. |
-| `remove_entry` | No, always a click | Biggest single change; a posting could ask for it. |
+| `remove_entry` | Only if Teja named the whole entry ("rm X", ruling 2026-11-21 14:36) | Biggest single change; a posting could ask for it. A partial or unnamed one waits for the click. |
 | `new_bullet` | No, always a click | It writes a new claim into the master. |
+| `set_role` (job title) | No, always a click | An employer verifies job titles (`c28c5ab8`, 2026-11-11). |
 
 Other ops wait as cards. "Apply all (N)" applies the open ones.
 
@@ -140,8 +150,8 @@ Every edit (AI op, attest, Reset) ends in `saveTailoredEdit.ts`:
 
 1. **Fit to one page first** (`pageFitEdit.ts`). It runs the tailor's own `fitToOnePage`
    (`supabase/functions/_shared/tailor/page-trim.ts`) on the edited resume. Typography shrinks first (the
-   renderer picks it). Then content is cut in `TRIM_ORDER`: `certification`, `project_bullet_over_cap`,
-   `weakest_bullet`, never below the floors. If the floors overflow, or the resume cannot be measured,
+   renderer picks it). Then content is cut in `TRIM_ORDER`: `project_bullet_over_cap`, `weakest_bullet`,
+   `project_bullet_to_floor`, never below the floors. Certifications and achievements are never cut. If the floors overflow, or the resume cannot be measured,
    the edit is **refused** (fail closed). Every cut is shown as a toast ("Trimmed to fit one page: ...")
    and recorded as `page_fit_trimmed`.
 2. **Atomic batch save.** An AI batch is saved in one write (`onEditBatch`, required since T16, 2026-11-10),
@@ -159,8 +169,9 @@ Both go through `settle()` in `ApprovalQueuePage.tsx`, which calls the RPC
 `advance_application_status` with agent `human`. Never a bare UPDATE (a bare update skips the claim
 release and strands the row).
 
-- **One row at a time**, even for "Approve all". If row 9 of 30 fails, rows 1-8 stay approved and the
-  failure names row 9.
+- **Per-row calls, up to 4 at once** (`SETTLE_CONCURRENCY` in `ApprovalQueuePage.tsx`, `c8d0cd9b`).
+  "Approve all" is still one RPC per row, never one bulk call. Each row writes only its own outcome, so a
+  failed row never marks another, and the failure names the row.
 - **Stale guard.** Each call passes the row's stamp (`updated_at`). If the row changed since Teja saw it
   (another tab, a re-tailor), the RPC refuses with `PT409`
   (migration `20261008130000_advance_status_expected_updated_at_and_master_version.sql`). The card says so.
@@ -200,12 +211,9 @@ GitHub did not start the run: ...". The approval itself still stands.
 
 ## Known gaps and open questions
 
-- **Max 2 projects** (Teja 2026-11-08 15:36 IST: "only 2 projects"). Not enforced in committed code at
-  2a9ac31. The trimmer caps bullets per project, not the project count.
 - **Bulk-move warning is not in code.** Nothing stops an orchestrator re-tailor while the page is open.
 - **Re-tailored rows need re-approval.** A one-page re-tailor sends approved rows back
-  (`awaiting_approval/approved -> passed_filters`); Teja must approve them again (handoff 2026-11-08-0045,
-  item 6).
+  (`awaiting_approval/approved -> passed_filters`); Teja must approve them again.
 - **"Human" means "no agent key".** Anyone holding Teja's JWT who omits the header is treated as human
   (repo `CLAUDE.md` §7).
 - **Attest is two writes.** Master insert, then the row update. If the second fails, the master keeps the

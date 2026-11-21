@@ -22,7 +22,8 @@ git ls-files .github/workflows
   [scout.yml](#scoutyml), [scout-remote.yml](#scout-remoteyml), [satellites.yml](#satellitesyml),
   [keepalive.yml](#keepaliveyml), [jobs-tombstone.yml](#jobs-tombstoneyml), [run-one.yml](#run-oneyml),
   [prescreen-drain.yml](#prescreen-drainyml), [pregate-sweep.yml](#pregate-sweepyml),
-  [postscreen-drain.yml](#postscreen-drainyml), [scout-ats-daily.yml](#scout-ats-dailyyml)
+  [postscreen-drain.yml](#postscreen-drainyml), [scout-ats-daily.yml](#scout-ats-dailyyml),
+  [workday-egress-probe.yml](#workday-egress-probeyml)
 - [Tests that guard the workflow files](#tests-that-guard-the-workflow-files)
 
 ## Quick table
@@ -34,7 +35,7 @@ Times are UTC in the cron line. IST is UTC + 5:30.
 | `ci.yml` | push to `main`, PR to `main` | none | No | Needs no secrets |
 | `apply.yml` | schedule, manual | `30 2 * * *` | Yes (submits) | Dry unless `APPLYY_CRON_LIVE` is `true` (cron) or `dry_run=false` (manual) |
 | `apply-kit.yml` | after `apply.yml`, schedule, manual | `0 12 * * *` | Yes (kit notes only, no status) | Never submits |
-| `scout.yml` | schedule, manual | `17 0,12 * * *` and `17 4 * * *` | Yes (jobs, applications) | Respects the system kill switch unless `force` |
+| `scout.yml` | schedule, manual | `17 0,2,5,7,10,12,14,17,19,22 * * *` | Yes (jobs, applications) | Respects the system kill switch unless `force` |
 | `scout-remote.yml` | schedule, manual | `30 1 * * *` | Yes (jobs, applications) | `dry_run` input (manual only) |
 | `satellites.yml` | schedule, manual | `23 13 * * *` | Yes (drafts only, no status) | Cron skipped unless `APPLYY_SATELLITES_LIVE` is `true` |
 | `keepalive.yml` | schedule, manual | `15 6 */3 * *` | Yes (ping row, branch push) | Never touches `main` |
@@ -44,6 +45,7 @@ Times are UTC in the cron line. IST is UTC + 5:30.
 | `pregate-sweep.yml` | manual only | none | Yes (drops rows) | `dry_count_only` checkbox |
 | `postscreen-drain.yml` | schedule (approval-queue re-gate only), manual (full drain) (Teja ruling 2026-11-18) | `30 4 * * *` | Yes (cron: re-gate drops; manual: drops and tailors rows) | `dry_count_only` checkbox; cron never calls Gemini |
 | `scout-ats-daily.yml` | schedule, manual | `41 1 * * *` | Yes (`jobs.disappeared_at`, `posting_closed` events only) | Liveness only: no scan, no upserts, no Gemini |
+| `workday-egress-probe.yml` | manual only | none | No (`contents: read`; no secret, no DB) | Manual only, so it never adds load on its own |
 
 All jobs run on `runs-on: ubuntu-latest`. No workflow uses a self-hosted runner at this commit
 (the design is still pending: `docs/ops/2026-11-05-self-hosted-runner.md`).
@@ -272,8 +274,9 @@ deduplicated into `jobs` and screened on insert, so each `applications` row star
 `passed_filters` or `dropped_filter` (`discovered` only if the screener cannot load).
 
 **Triggers:**
-- `schedule`: `17 0,12 * * *` (05:47 and 17:47 IST) and `17 4 * * *` (09:47 IST, added
-  2026-11-05).
+- `schedule`: `17 0,2,5,7,10,12,14,17,19,22 * * *`, ten runs a day (05:47, 07:47, 10:47, 12:47,
+  15:47, 17:47, 19:47, 22:47, 00:47 and 03:47 IST; ten since 06ab7913, 2026-11-12). The cron line in
+  `.github/workflows/scout.yml` is the truth; re-read it before quoting times.
 - `workflow_dispatch` with `force` (default `'false'`). `force=true` runs even when
   `system_settings.system_enabled` is false. Cron runs never force.
 
@@ -285,7 +288,7 @@ deduplicated into `jobs` and screened on insert, so each `applications` row star
 
 **If you change the cron:** also check the Health threshold in
 `apps/web/src/data/agentFreshness.ts` (guarded by `apps/web/test/scoutScheduleFreshness.test.ts`)
-and the "three times a day" text in `apps/web/src/features/pipeline/DiscoveryModal.tsx`.
+and the "ten times a day" text in `apps/web/src/features/pipeline/DiscoveryModal.tsx`.
 
 ## scout-remote.yml
 
@@ -482,6 +485,20 @@ a `HALTED` line; any other non-liveness answer ends red.
 The bulk-links workflow `ingest-links.yml` (and its `worker/ingest/*.links.json` lists) was
 deleted on 2026-11-18 (Teja: "Delete it"). Single links still go through the dashboard's
 "Add a job by link" panel.
+
+## workday-egress-probe.yml
+
+**Runs:** `node scripts/workday-egress-probe.mjs` on `ubuntu-latest` (added 3cbf6728, 2026-11-21).
+
+**What it does:** asks, from a GitHub runner IP, whether Cloudflare blocks Workday for runner IPs.
+Since eb56d28e the scout skips a robots.txt 429 uncounted and never sends the jobs POST, so only
+this probe can answer it. Compare its log with the same script run locally from Teja's home IP,
+within minutes of each other.
+
+**Triggers:** `workflow_dispatch` only, no schedule:
+`gh workflow run workday-egress-probe.yml --ref main`.
+
+**Permissions:** `contents: read`. It touches no repo state, secret or DB row.
 
 ## Tests that guard the workflow files
 

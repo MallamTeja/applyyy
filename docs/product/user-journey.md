@@ -36,8 +36,10 @@ times with `gh run list --workflow=<file>`.
 
 | When (IST) | Who | What happens |
 |---|---|---|
-| 05:47, 09:47, 17:47 | `scout.yml` (cron) | `scout-ats` polls the company watchlist. New jobs are screened on insert: they land at `passed_filters` or `dropped_filter`. |
+| Ten times a day, every 2 to 3 h (05:47 first) | `scout.yml` (cron) | `scout-ats` polls the company watchlist. New jobs are screened on insert: they land at `passed_filters` or `dropped_filter`. |
 | 07:00 | `scout-remote.yml` (cron) | Remote job feeds are polled the same way. |
+| 07:11 | `scout-ats-daily.yml` (cron) | Liveness only: checks queued and approved rows for closed postings. |
+| 10:00 | `postscreen-drain.yml` (cron) | Re-gates the approval queue only (`auditor?mode=regate_queue`). No tailoring, no Gemini. |
 | Morning | Teja | Opens the dashboard. Picks jobs on **Discovered jobs**, or pastes a link. Starts the tailoring. |
 | Any time | Teja | Reviews and approves on the **Approval queue**. |
 | On every approve | `dispatch-apply` edge function | Starts `apply-kit.yml`. Starts the applier only if the auto-apply switch is on. |
@@ -103,8 +105,9 @@ Code: `apps/web/src/features/discovery/DiscoveredJobsPage.tsx`.
   (`apps/web/src/features/discovery/AddJobLinkPanel.tsx`). The `job-link-intake` function inserts the row
   at `passed_filters` (it skips the filters) and runs matcher, tailor and auditor on the server, so closing
   the tab is safe (Teja ruled 2026-11-01). A pasted link skips the robots.txt check, because a human chose it.
-- **Bulk run.** `postscreen-drain.yml` drains every queued row on its own after each scout finishes and once a day
-  (Teja ruling 2026-11-09). The orchestrator can also dispatch it by hand, e.g. `from_stage=tailor` for a re-run.
+- **Bulk run.** Since Teja's 2026-11-18 ruling, scouted jobs wait in Ready to tailor; nothing drains them on its
+  own. `postscreen-drain.yml` has no `workflow_run` trigger, and its daily cron only re-gates the approval queue.
+  The orchestrator can dispatch it by hand, e.g. `from_stage=tailor` for a re-run.
 
 What runs in between: matcher (scores; rows below the floor of 30 are dropped, Teja ruled 2026-11-07),
 tailor (writes a one-page tailored resume), auditor (flags claims the master does not back, then moves the
@@ -117,8 +120,8 @@ Code: `apps/web/src/features/approval/`. This is the page the whole product is b
 - **Two buckets.** Bucket B (any claim the auditor could not trace to the master) comes first, open, one
   full diff per row (`DiffView.tsx`). Bucket A (every line traced) is a count with one "Approve all" button.
   The order is deliberate: risky rows must not be skimmed past.
-- **Edit the resume.** Hand edits, or the AI chat panel (`AiEditPanel.tsx`, calls the `resume-assist`
-  function). Every save is fitted to one page (`pageFitEdit.ts`). Teja ruled 2026-11-07: every resume is
+- **Edit the resume.** The AI chat panel is the only edit path (`AiEditPanel.tsx`, calls the `resume-assist`
+  function; `7211fd7c`). Every save is fitted to one page (`pageFitEdit.ts`). Teja ruled 2026-11-07: every resume is
   ONE page, before and after edits. A trim shows a toast and is recorded in the event.
 - **Attest.** If a skill or bullet is true but missing from the master, he can attest it
   (`attestSkill.ts`, `attestBullet.ts`). This writes it into the master, so it is backed next time.
@@ -201,12 +204,11 @@ worker's screenshot), manual-control coverage, and the Gemini key pool.
 
 ## Known gaps and open questions
 
-- **Bot submit is not yet proven end to end** (handoff 2026-11-08 00:45: 5 of 7 stages live). The first
-  target, a TrueFoundry row, waits for Teja's approval.
+- **Bot submit proof.** As of 2026-11-08, 5 of 7 stages were live and no bot submit had landed. Re-measure
+  with `select status, count(*) from applications group by 1`.
 - **Receipt confirmation (stage 6) is on hold** by Teja's ruling.
 - **Nothing scores `passed_filters` on a schedule.** New jobs wait until Teja clicks Send through pipeline,
   pastes a link, or a drain is dispatched. This is by ruling, but it means the queue does not fill itself.
-- **`rehearse-assist` has no zero-field guard** (pending P1); a form with 0 fields can read as ready.
 - **Stale comments found while writing this page:**
   - `supabase/functions/email-tracker-intake/index.ts` says Apps Script retries "on next 15-minute trigger
     cycle"; the script installs `everyHours(1)`.
@@ -222,4 +224,4 @@ worker's screenshot), manual-control coverage, and the Gemini key pool.
 - [docs/features/web-app.md](../features/web-app.md)
 - [docs/ops/ci-and-workflows.md](../ops/ci-and-workflows.md)
 - [docs/setup/gmail-tracker-apps-script.md](../setup/gmail-tracker-apps-script.md)
-- [docs/handoff/2026-11-08-1745-orchestrator-handoff.md](../handoff/2026-11-08-1745-orchestrator-handoff.md)
+- The newest `docs/handoff/*orchestrator-handoff.md` (`ls docs/handoff | tail`) and [docs/handoff/2026-11-12-1305-pending-tasks.md](../handoff/2026-11-12-1305-pending-tasks.md)

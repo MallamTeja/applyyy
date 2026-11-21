@@ -120,7 +120,7 @@ describe('InlineConfirm mounts without forcing a style recalc (fake session, eve
     // The page.
     await page.goto(`${base}/manual-apply`, { waitUntil: 'domcontentloaded' });
     // Non-vacuous: all three cards' guarded resolve buttons are drawn, so three confirms are mounted.
-    await page.getByRole('button', { name: 'I applied (mark applied): E2E Confirm Role 3 at Initech', exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Failed / skip: E2E Confirm Role 3 at Initech', exact: true }).waitFor();
     // Settled, so any mount effect has run.
     await page.waitForLoadState('networkidle');
     // THE POINT: mounting forced no style recalc.
@@ -130,10 +130,10 @@ describe('InlineConfirm mounts without forcing a style recalc (fake session, eve
   it('2. arming one confirm still finishes its visibility transition (getAnimations runs on open)', async () => {
     // The count before the click.
     const before = await calls();
-    // Arm the first card's confirm.
-    await page.getByRole('button', { name: 'I applied (mark applied): E2E Confirm Role 1 at Initech', exact: true }).click();
+    // Arm the first card's confirm (Failed / skip: since 2026-11-21 "I applied" is one click with no confirm).
+    await page.getByRole('button', { name: 'Failed / skip: E2E Confirm Role 1 at Initech', exact: true }).click();
     // The question is open.
-    await page.getByRole('button', { name: 'Cancel: I applied (mark applied): E2E Confirm Role 1 at Initech', exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Cancel: Failed / skip: E2E Confirm Role 1 at Initech', exact: true }).waitFor();
     // The effect ran for the commit that opened it: the behaviour the skip must not lose.
     assert.ok((await calls()) > before, 'arming a confirm no longer finishes its visibility transition');
   });

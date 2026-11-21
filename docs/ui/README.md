@@ -45,16 +45,18 @@ against code at `2a9ac31`:
 
 | ID | Finding (2026-09-17) | Status 2026-11-08 | Evidence |
 |---|---|---|---|
-| [L5](./audit-layout-and-typography.md) | On a DB read failure, the Approval queue showed a green "you're finished" empty state. | **Fixed** | `apps/web/src/features/approval/ApprovalQueuePage.tsx:764` says "Could not reach the application queue…". |
-| [K1](./audit-color-and-theming.md) | `--text-muted` failed WCAG AA in dark (3.63:1 on `--sheet`). | **Fixed** | `apps/web/src/styles/tokens.css:98` is now `light-dark(#5b6675, #818b9b)`: 5.10:1 on `--sheet` in dark, 5.24:1 or better in light. The false "AA certified" label is gone (`tokens.css:77`). |
+| [L5](./audit-layout-and-typography.md) | On a DB read failure, the Approval queue showed a green "you're finished" empty state. | **Fixed** | `apps/web/src/features/approval/ApprovalQueuePage.tsx:779` says "Could not reach the application queue…". |
+| [K1](./audit-color-and-theming.md) | `--text-muted` failed WCAG AA in dark (3.63:1 on `--sheet`). | **Fixed** | `apps/web/src/styles/tokens.css:143` is now `light-dark(#5b6675, #818b9b)`: 5.10:1 on `--sheet` in dark, 5.24:1 or better in light. The false "AA certified" label is gone (`tokens.css:77`). |
 | [L1](./audit-layout-and-typography.md) / [K4](./audit-color-and-theming.md) | CSS variables used but never defined. | **Fixed** for the variables named. | `var(--surface)` now appears only in a comment (`apps/web/src/features/health/health.css:359`). |
 | [C1](./audit-copy-and-ux.md) | Status enums (`awaiting_approval`, `audit_clean`) shown as labels. | Not re-checked | Check the screens before picking. |
-| [A3](./audit-accessibility.md) | Job description opens only by mouse click on a bare `<div>`. | **Still open** | `apps/web/src/features/discovery/DiscoveredJobsPage.tsx:1010`: `<div className="job-card__description" onClick=…>`, no role, no `tabIndex`. |
+| [A3](./audit-accessibility.md) | Job description opens only by mouse click on a bare `<div>`. | **Still open** | `apps/web/src/features/discovery/DiscoveredJobsPage.tsx:1140` (re-checked 2026-11-21): `<div className="job-card__description" onClick=…>`, no role, no `tabIndex`. |
 
 Other findings checked on 2026-11-08 are listed in each audit's banner. The ones still open
 at the time of checking include A1 and A2 (weak focus rings), A4 (`DiscoveryModal` is not a
 dialog), A7 on the Answer Bank (Yes/No by colour only) and C6 (every toast, errors too,
-dismisses after 3.2 s, `apps/web/src/app/Toast.tsx:35`).
+dismisses after 3.2 s, `apps/web/src/app/Toast.tsx:35`). Re-checked 2026-11-21: all of those are still open, and so
+are A3, A5 (the dialog role sits on the scrim), A14 (no skip link), C4 (Watchlist "Remove" has no
+confirm), L3 (`.button--disabled` is used but never defined) and K14 (`--traced-ink` duplicates `--traced`).
 
 ---
 

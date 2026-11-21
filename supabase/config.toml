@@ -283,3 +283,10 @@ verify_jwt = true
 # True: matches live and the JWT the browser always sends. Never false: the Apps Script is
 # called BY this function, it does not call it, so no secret-only caller needs the gateway off.
 verify_jwt = true
+
+# jd-refetch (S8, 2026-11-21): the jd-refetch.yml workflow calls it with the app user's signed-in JWT;
+# it renders arbitrary posting pages and starts the Gemini pipeline, so a tokenless caller must be
+# refused at the gateway before either happens (same posture as job-link-intake).
+[functions.jd-refetch]
+# True: the gateway rejects tokenless calls; the in-function caller check is the second layer.
+verify_jwt = true
