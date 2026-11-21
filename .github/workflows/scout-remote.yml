@@ -3,8 +3,11 @@
 # Runs worker/src/cli/scout-remote.ts, which queues remote tech jobs through the SAME
 # path as the ATS scout (scout.yml): http(s)-only apply URLs, fingerprint dedupe via
 # persistJobBatch, and insert-time screening, so rows land at passed_filters or
-# dropped_filter and never pile up at discovered. Free: three public JSON feeds, one
-# request each per day, no Playwright and no Gemini.
+# dropped_filter ('discovered' only when the screener context cannot load). A feed job that
+# duplicates a live ATS posting is born dropped_filter (duplicate_of_ats:<id>), and an
+# already-queued duplicate is swept to dropped_duplicate (worker/src/scout/remote-run.ts;
+# corrected 2026-11-21, D15). Free: three public JSON feeds, one request each per day, no
+# Playwright and no Gemini.
 #
 # Exists because the CLI had no workflow (2026-10-24): remote jobs arrived only when
 # someone pressed the browser button.

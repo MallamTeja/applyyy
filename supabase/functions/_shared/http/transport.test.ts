@@ -712,3 +712,105 @@ describe("redirect: 'manual' returns a 3xx instead of throwing", () => {
     });
   });
 });
+
+// DRIFT #2 (2026-11-21): the edge transport paces Workday and iCIMS the way the worker does (request-pacer.ts).
+describe("request pacing", () => {
+  // A pacer that records every URL it was asked about, in order, and never waits.
+  const recordingPacer = (): { seen: string[]; before(url: string): Promise<void> } => {
+    // The record.
+    const seen: string[] = [];
+    // The double.
+    return { seen, async before(url: string) { seen.push(url); } };
+  };
+
+  test("the pacer is asked before the robots.txt GET and before EVERY attempt (a retry is a request too)", async () => {
+    // Backoff sleeps fire instantly.
+    instantTimers();
+    // Two 500s, then a 200: three attempts.
+    stubFetch([() => new Response("", { status: 500 }), () => new Response("", { status: 500 }), () => new Response("{}", { status: 200 })]);
+    // The recorder.
+    const pacer = recordingPacer();
+    // One Workday call with two retries allowed.
+    await httpFetch("https://t1.wd1.myworkdayjobs.com/wday/cxs/t1/s/jobs", { robots: { cache: new Map() }, retry: { maxRetries: 2, jitterMs: 0 }, pacer });
+    // robots.txt first, then each of the three attempts.
+    assert.deepEqual(pacer.seen, ["https://t1.wd1.myworkdayjobs.com/robots.txt", ...Array(3).fill("https://t1.wd1.myworkdayjobs.com/wday/cxs/t1/s/jobs")]);
+  });
+
+  test("a robots cache hit makes no robots request, so the pacer is not asked for one", async () => {
+    // One 200 per call.
+    stubFetch([() => new Response("{}", { status: 200 })]);
+    // The recorder.
+    const pacer = recordingPacer();
+    // One cache for both calls.
+    const cache: RobotsCache = new Map();
+    // Two pages of one board.
+    await httpFetch("https://t2.wd1.myworkdayjobs.com/a", { robots: { cache }, pacer });
+    // The second page: robots is cached.
+    await httpFetch("https://t2.wd1.myworkdayjobs.com/b", { robots: { cache }, pacer });
+    // robots once, then the two pages.
+    assert.deepEqual(pacer.seen, ["https://t2.wd1.myworkdayjobs.com/robots.txt", "https://t2.wd1.myworkdayjobs.com/a", "https://t2.wd1.myworkdayjobs.com/b"]);
+  });
+
+  test("ON BY DEFAULT: with no pacer passed, the second Workday request in a row waits out the 1 s gap", async () => {
+    // Waits are recorded and fire instantly.
+    const timers = instantTimers();
+    // Every request answers 200.
+    stubFetch([() => new Response("{}", { status: 200 })]);
+    // A Workday page with no pacer option: the transport's own pacer applies. robots.txt took the lane's first slot.
+    await httpFetch("https://t3.wd5.myworkdayjobs.com/jobs", { robots: { cache: new Map() } });
+    // The page waited ~1 s behind its own robots.txt GET (a few ms of real time may have passed between the two).
+    assert.ok(timers.delays.some((ms) => ms > 900 && ms <= 1_000), JSON.stringify(timers.delays));
+  });
+
+  test("an unpaced host (Greenhouse) never waits, default pacer or not", async () => {
+    // Waits recorded.
+    const timers = instantTimers();
+    // 200s.
+    stubFetch([() => new Response("{}", { status: 200 })]);
+    // Two back-to-back Greenhouse reads.
+    await httpFetch("https://boards-api.greenhouse.io/v1/boards/x/jobs", { robots: { cache: new Map() } });
+    // The second.
+    await httpFetch("https://boards-api.greenhouse.io/v1/boards/y/jobs", { robots: { cache: new Map() } });
+    // No timer at all.
+    assert.deepEqual(timers.delays, []);
+  });
+});
+
+// R6 (2026-11-21): the robots.txt GET carries the same full contact User-Agent as the page request (the worker does
+// since peer 5 r4). Before, master-robots sent the bare product token "applyy-scout" on robots.txt only.
+describe("robots.txt User-Agent", () => {
+  // Capture the User-Agent of the robots GET and of the page GET, by URL.
+  const captureUserAgents = (robotsBody: string): Record<string, string | null> => {
+    // URL -> the User-Agent it was sent with.
+    const seen: Record<string, string | null> = {};
+    // A stub answering both requests.
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      // Recorded whatever the header's case: Headers lookups are case-insensitive (robots uses "user-agent", the page "User-Agent").
+      seen[String(url)] = new Headers(init?.headers).get("user-agent");
+      // robots.txt gets the policy; the page gets JSON.
+      return String(url).endsWith("/robots.txt")
+        ? new Response(robotsBody, { status: 200, headers: { "content-type": "text/plain" } })
+        : new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    // Read after the awaited call.
+    return seen;
+  };
+
+  test("one UA for both requests: robots.txt is fetched with the full DEFAULT_USER_AGENT, never the bare token", async () => {
+    // Allow-all policy.
+    const seen = captureUserAgents("User-agent: *\nAllow: /");
+    // One read.
+    await httpFetch("https://ua.example.test/jobs", { robots: { cache: new Map() } });
+    // The same full contact string on both, and it names the repo (contact) rather than a browser.
+    assert.deepEqual([seen["https://ua.example.test/robots.txt"], seen["https://ua.example.test/jobs"]], [DEFAULT_USER_AGENT, DEFAULT_USER_AGENT]);
+    // Never browser-like (the 2026-11-01 robots ruling): our own product token leads it.
+    assert.match(DEFAULT_USER_AGENT, /^applyy-scout\/\d/);
+  });
+
+  test("a robots group written for the token 'applyy-scout' still governs us (matching uses the token, not the header)", async () => {
+    // A site that disallows us by name and allows everyone else.
+    captureUserAgents("User-agent: applyy-scout\nDisallow: /private\n\nUser-agent: *\nAllow: /");
+    // Our group applies: the private path is refused before any page request.
+    await assert.rejects(httpFetch("https://ua2.example.test/private/x", { robots: { cache: new Map() } }), RobotsDisallowedError);
+  });
+});

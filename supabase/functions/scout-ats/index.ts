@@ -31,6 +31,8 @@ import {
   collectBoardPages,
   failureMark,
   getAdapter,
+  // The shared page cap, for the paced-board estimate (an adapter's own maxPages overrides it, as in collectBoardPages).
+  MAX_BOARD_PAGES,
   supportedProviders,
   toJobInsert,
   type JobInsertContext,
@@ -39,6 +41,9 @@ import {
 // jobs (the 2026-10-23 'tcs'→Thornbury incident), so a provider-reported identity is
 // compared against the watchlist row before anything from the response is persisted.
 import { evaluateBoardIdentity } from "../_shared/ats/identity.ts";
+// Drift #2 (2026-11-21): Workday/iCIMS requests are paced 1 s apart, so a paced board that cannot finish before the
+// deadline is skipped (resumes next Scan) instead of pushing the run past the wall clock.
+import { pacedBoardSkip } from "./paced-budget.ts";
 // The blanking guard. Splits one batch into the fewest upserts that cannot let an
 // omitted field overwrite a stored one — see _shared/screen/upsert-plan.ts for why
 // stripping nulls per row does NOT work.
@@ -800,6 +805,30 @@ Deno.serve(withCors(async (req: Request): Promise<Response> => {
         inserted: 0,
         error: `No adapter available for provider ${board.ats_provider}`,
       });
+      continue;
+    }
+
+    // THE PACED-BOARD BUDGET (drift #2): a Workday/iCIMS board whose paced requests cannot finish before the deadline
+    // is not started. Skipped, named with the seconds it needs, and NOT marked polled, so it is first next Scan.
+    const paceSkip = pacedBoardSkip(board.ats_provider, board.last_poll_job_count, adapter.maxPages ?? MAX_BOARD_PAGES, deadline.remainingMs());
+    // Does not fit this Scan.
+    if (paceSkip !== null) {
+      // "skipped", so gate.ts counts it neither as attempted nor as failed; nothing is written for it.
+      summaries.push({
+        // Which board waits for the next Scan.
+        board: board.board_token,
+        // Its provider (workday or icims: only paced boards reach this branch).
+        provider: board.ats_provider,
+        // Not attempted: neither a success nor a failure.
+        status: "skipped",
+        // Nothing was requested.
+        fetched: 0,
+        // Nothing was written.
+        inserted: 0,
+        // The arithmetic, so the run log shows why.
+        error: `paced_budget: needs ~${Math.ceil(paceSkip.needMs / 1000)} s, ${Math.floor(paceSkip.remainingMs / 1000)} s left; resumes next Scan`,
+      });
+      // Next board (an unpaced one may still fit).
       continue;
     }
 

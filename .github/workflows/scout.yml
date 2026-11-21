@@ -1,10 +1,12 @@
 # applyy — scheduled ATS scout (job discovery).
 #
-# Regularly polls registered company career boards (Greenhouse, Lever, Ashby,
-# Workday; SmartRecruiters is off since the 2026-11-01 robots ruling) from public.company_watchlist, deduplicates postings by canonical
-# fingerprint into public.jobs, and screens each new posting at insert, so its
-# public.applications row is born at 'passed_filters' or 'dropped_filter' ('discovered'
-# only when the screener cannot load). Corrected 2026-11-01: this said 'discovered'.
+# Regularly polls registered company career boards (Greenhouse, Lever, Ashby, Workday, and
+# iCIMS since 2026-11-21; SmartRecruiters is off since the 2026-11-01 robots ruling) from
+# public.company_watchlist, deduplicates postings by canonical fingerprint into public.jobs, and
+# screens each new posting at insert, so its public.applications row is born at 'passed_filters'
+# (Ready to tailor, where scouted rows stop: Teja 2026-11-18) or 'dropped_filter'. 'discovered'
+# only when the screener context cannot load: the blank-description hold that also parked rows
+# there was removed 2026-11-21 (W1). Corrected 2026-11-21 (D15); 2026-11-01 it said 'discovered'.
 #
 # Lightweight: requires NO Playwright or Chromium download. Not fast any more: a full pass
 # over 262 enabled boards needs ~16 min (917 s for 246 boards, measured 2026-11-02), so the

@@ -4,8 +4,10 @@
 import { describe, test } from "node:test";
 // Strict deep equality, so a changed report shape fails here.
 import assert from "node:assert/strict";
+// Read the auditor source for the wiring test.
+import { readFileSync } from "node:fs";
 // The unit under test.
-import { regateQueue, regateVerdict, type QueueRow, type RegateDb } from "./regate-queue.ts";
+import { queuedTwinOwners, regateQueue, regateVerdict, type QueueRow, type RegateDb } from "./regate-queue.ts";
 // The preference shape, checked against the real type.
 import type { PreGatePreferences } from "../matcher/tech-pregate.ts";
 // The history key builder, so the committed set below is keyed exactly as the auditor keys it.
@@ -28,13 +30,16 @@ const LIVE: PreGatePreferences = {
 };
 
 // A queue row with a job at the given place and title.
-function row(id: string, status: string, location: string, title = "Fullstack Engineer"): QueueRow {
+function row(id: string, status: string, location: string, title = "Fullstack Engineer", createdAt = "2026-11-01T10:00:00.000000+00:00"): QueueRow {
   // Found by a scout, never pasted (pasted rows skip every automatic gate).
-  return { id, status, updated_at: "2026-11-11T10:00:00.000000+00:00", jobs: { title, description_raw: "Build React apps.", location_raw: location, min_experience_years: null, discovered_via: ["greenhouse"] } };
+  return { id, status, updated_at: "2026-11-11T10:00:00.000000+00:00", created_at: createdAt, jobs: { title, description_raw: "Build React apps.", location_raw: location, min_experience_years: null, discovered_via: ["greenhouse"] } };
 }
 
 // No committed history: the work-auth cases below must not depend on it.
 const NO_HISTORY: ReadonlySet<string> = new Set<string>();
+
+// No queued twins: the oldest queued copy of every posting is the row itself.
+const NO_TWINS: ReadonlyMap<string, string> = new Map<string, string>();
 
 // The COMMITTED history (approved and later): the Canonical posting Teja already applied to (greenhouse 5150422).
 const COMMITTED = new Set([atsJobKeyOf("greenhouse", "5150422")!]);
@@ -77,38 +82,38 @@ function fakeDb(staleIds: string[] = []): RegateDb & { moves: string[]; codes: s
 describe("regateVerdict", () => {
   test("foreign awaiting row drops; foreign approved row is only flagged; Indian row and a seniority objection are kept", () => {
     // Budapest (Silicon Labs, one of the 11) waiting for Teja.
-    assert.equal(regateVerdict(row("a", "awaiting_approval", "Budapest"), LIVE, NO_HISTORY).kind, "drop");
+    assert.equal(regateVerdict(row("a", "awaiting_approval", "Budapest"), LIVE, NO_HISTORY, NO_TWINS).kind, "drop");
     // The same place, already approved: his yes stands.
-    assert.equal(regateVerdict(row("b", "approved", "Budapest"), LIVE, NO_HISTORY).kind, "flag_approved");
+    assert.equal(regateVerdict(row("b", "approved", "Budapest"), LIVE, NO_HISTORY, NO_TWINS).kind, "flag_approved");
     // India passes.
-    assert.equal(regateVerdict(row("c", "awaiting_approval", "Bengaluru, India"), LIVE, NO_HISTORY).kind, "keep");
+    assert.equal(regateVerdict(row("c", "awaiting_approval", "Bengaluru, India"), LIVE, NO_HISTORY, NO_TWINS).kind, "keep");
     // A non-work-auth objection is Teja's call, never this sweep's.
-    assert.equal(regateVerdict(row("d", "awaiting_approval", "Bengaluru, India", "Senior Engineer"), LIVE, NO_HISTORY).kind, "keep");
+    assert.equal(regateVerdict(row("d", "awaiting_approval", "Bengaluru, India", "Senior Engineer"), LIVE, NO_HISTORY, NO_TWINS).kind, "keep");
   });
 
   test("W2: an awaiting copy of a committed ATS posting drops as already_applied", () => {
     // The retitled copy of the applied Canonical posting, still waiting for Teja.
-    const verdict = regateVerdict(copyRow("w", "awaiting_approval"), LIVE, COMMITTED);
+    const verdict = regateVerdict(copyRow("w", "awaiting_approval"), LIVE, COMMITTED, NO_TWINS);
     // Dropped, under the code the DB trigger is opened for.
     assert.deepEqual(verdict.kind === "drop" ? verdict.code : verdict.kind, "already_applied");
   });
 
   test("W2: an approved copy, a pasted copy and an unrelated posting are never dropped for already_applied", () => {
     // An approved row carries Teja's yes and no agent edge leaves it.
-    assert.equal(regateVerdict(copyRow("w", "approved"), LIVE, COMMITTED).kind, "keep");
+    assert.equal(regateVerdict(copyRow("w", "approved"), LIVE, COMMITTED, NO_TWINS).kind, "keep");
     // Pasted by Teja: re-applying is his choice.
     const pasted = copyRow("p", "awaiting_approval");
     // Same identity, discovered by hand.
-    assert.equal(regateVerdict({ ...pasted, jobs: { ...pasted.jobs!, discovered_via: ["manual"] } }, LIVE, COMMITTED).kind, "keep");
+    assert.equal(regateVerdict({ ...pasted, jobs: { ...pasted.jobs!, discovered_via: ["manual"] } }, LIVE, COMMITTED, NO_TWINS).kind, "keep");
     // Another id at the same board is another posting.
-    assert.equal(regateVerdict({ ...pasted, jobs: { ...pasted.jobs!, ats_job_id: "9999999" } }, LIVE, COMMITTED).kind, "keep");
+    assert.equal(regateVerdict({ ...pasted, jobs: { ...pasted.jobs!, ats_job_id: "9999999" } }, LIVE, COMMITTED, NO_TWINS).kind, "keep");
   });
 
   test("D9b: an experience_ceiling row is only reported, never dropped (Teja 2026-11-11: auditor drops for work_auth ONLY)", () => {
     // Waiting for Teja: reported for him, not moved.
-    assert.equal(regateVerdict(seniorJdRow("e"), LIVE, NO_HISTORY).kind, "flag_experience");
+    assert.equal(regateVerdict(seniorJdRow("e"), LIVE, NO_HISTORY, NO_TWINS).kind, "flag_experience");
     // Already approved: also only reported.
-    assert.equal(regateVerdict(seniorJdRow("f", "approved"), LIVE, NO_HISTORY).kind, "flag_experience");
+    assert.equal(regateVerdict(seniorJdRow("f", "approved"), LIVE, NO_HISTORY, NO_TWINS).kind, "flag_experience");
   });
 });
 
@@ -122,7 +127,7 @@ describe("regateQueue", () => {
       row("b", "approved", "Budapest"),
       row("c", "awaiting_approval", "Remote - India"),
       row("s", "awaiting_approval", "Palo Alto, CA"),
-      { id: "m", status: "awaiting_approval", updated_at: "2026-11-11T10:00:00Z", jobs: null },
+      { id: "m", status: "awaiting_approval", updated_at: "2026-11-11T10:00:00Z", created_at: "2026-11-01T10:00:00Z", jobs: null },
     ], LIVE, NO_HISTORY, db);
     // Only "a" moved.
     assert.deepEqual(db.moves, ["a"]);
@@ -143,5 +148,103 @@ describe("regateQueue", () => {
     // The report names each drop's code and lists the experience row for Teja.
     assert.deepEqual({ dropped: report.dropped.map((d) => [d.id, d.code]), experience: report.experience_flagged.map((f) => f.id) },
       { dropped: [["a", "work_auth"], ["w", "already_applied"]], experience: ["e"] });
+  });
+});
+
+// R4 (2026-11-21): the two gaps round 2 left open.
+describe("r4: tech no longer hides work_auth, and a newer queued twin drops", () => {
+  test("a row failing tech AND work_auth drops for work_auth (firstPreGateDrop stopped at tech, so the sweep kept it)", () => {
+    // "Senior" trips the tech gate first; Budapest also fails work-auth.
+    const both = row("t", "awaiting_approval", "Budapest", "Senior Engineer");
+    // Dropped under the one code the sweep may act on.
+    const verdict = regateVerdict(both, LIVE, NO_HISTORY, NO_TWINS);
+    // The code the DB trigger accepts.
+    assert.deepEqual(verdict.kind === "drop" ? verdict.code : verdict.kind, "work_auth");
+    // Approved instead: still only flagged (his yes stands).
+    assert.equal(regateVerdict({ ...both, status: "approved" }, LIVE, NO_HISTORY, NO_TWINS).kind, "flag_approved");
+  });
+
+  test("a row failing tech AND the experience ceiling is reported for experience, never kept silently", () => {
+    // A senior title (tech) with a 5+ years JD (experience), at an Indian location.
+    const base = seniorJdRow("x");
+    // Retitled so the tech gate objects first.
+    assert.equal(regateVerdict({ ...base, jobs: { ...base.jobs!, title: "Senior Engineer" } }, LIVE, NO_HISTORY, NO_TWINS).kind, "flag_experience");
+  });
+
+  test("queuedTwinOwners: the oldest queued copy of each posting owns it (created_at, then id); pasted and keyless rows are skipped as candidates only", () => {
+    // Two copies of greenhouse 777: the older is "old".
+    const older = { ...row("old", "awaiting_approval", "Bengaluru, India", "Engineer", "2026-11-01T10:00:00Z"), };
+    // The newer copy.
+    const newer = row("new", "awaiting_approval", "Bengaluru, India", "Engineer II", "2026-11-05T10:00:00Z");
+    // Same identity on both.
+    const key = { ats_provider: "greenhouse", ats_job_id: "777" };
+    // The owners map.
+    const owners = queuedTwinOwners([{ ...newer, jobs: { ...newer.jobs!, ...key } }, { ...older, jobs: { ...older.jobs!, ...key } }]);
+    // The older row owns the key, whatever the read order.
+    assert.equal(owners.get(atsJobKeyOf("greenhouse", "777")!), "old");
+    // A tie on created_at falls to the smaller id, so the verdict never depends on read order.
+    const tie = queuedTwinOwners([{ ...row("b", "awaiting_approval", "India"), jobs: { ...row("b", "awaiting_approval", "India").jobs!, ...key } }, { ...row("a", "awaiting_approval", "India"), jobs: { ...row("a", "awaiting_approval", "India").jobs!, ...key } }]);
+    // "a" < "b".
+    assert.equal(tie.get(atsJobKeyOf("greenhouse", "777")!), "a");
+  });
+
+  test("a newer queued twin drops as already_applied naming the older copy; the older copy, a pasted twin and an approved twin stay", () => {
+    // The shared identity.
+    const key = { ats_provider: "greenhouse", ats_job_id: "777" };
+    // Older and newer awaiting copies.
+    const older = row("old", "awaiting_approval", "Bengaluru, India", "Engineer", "2026-11-01T10:00:00Z");
+    // Newer.
+    const newer = row("new", "awaiting_approval", "Bengaluru, India", "Engineer II", "2026-11-05T10:00:00Z");
+    // Keyed rows.
+    const rows = [{ ...older, jobs: { ...older.jobs!, ...key } }, { ...newer, jobs: { ...newer.jobs!, ...key } }];
+    // Who owns the posting.
+    const owners = queuedTwinOwners(rows);
+    // The newer copy drops under the trigger's already_applied code, and the reason names the copy that stays.
+    const verdict = regateVerdict(rows[1]!, LIVE, NO_HISTORY, owners);
+    // Code and reason.
+    assert.ok(verdict.kind === "drop" && verdict.code === "already_applied" && verdict.reason.includes("old"), JSON.stringify(verdict));
+    // The older copy stays.
+    assert.equal(regateVerdict(rows[0]!, LIVE, NO_HISTORY, owners).kind, "keep");
+    // A pasted newer copy is Teja's own pick: kept.
+    assert.equal(regateVerdict({ ...rows[1]!, jobs: { ...rows[1]!.jobs!, discovered_via: ["manual"] } }, LIVE, NO_HISTORY, owners).kind, "keep");
+    // An approved newer copy carries his yes: kept (no agent edge leaves approved).
+    assert.equal(regateVerdict({ ...rows[1]!, status: "approved" }, LIVE, NO_HISTORY, owners).kind, "keep");
+  });
+
+  test("regateQueue end to end: only the newer twin moves, stamped already_applied", async () => {
+    // A fresh double.
+    const db = fakeDb();
+    // The shared identity.
+    const key = { ats_provider: "lever", ats_job_id: "abc-123" };
+    // Newer first in the read, to prove order does not decide.
+    const newer = row("new", "awaiting_approval", "Bengaluru, India", "Engineer", "2026-11-05T10:00:00Z");
+    // Older second.
+    const older = row("old", "awaiting_approval", "Bengaluru, India", "Engineer", "2026-11-01T10:00:00Z");
+    // Swept.
+    const report = await regateQueue([{ ...newer, jobs: { ...newer.jobs!, ...key } }, { ...older, jobs: { ...older.jobs!, ...key } }], LIVE, NO_HISTORY, db);
+    // Only the newer copy moved, with the trigger's code.
+    assert.deepEqual({ moves: db.moves, codes: db.codes, dropped: report.dropped.map((d) => d.id) }, { moves: ["new"], codes: ["already_applied"], dropped: ["new"] });
+  });
+});
+
+describe("r4 wiring", () => {
+  test("the regate read selects created_at (the read is cast to QueueRow, so only this test catches a missing column)", () => {
+    // The auditor's source.
+    const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    // The regate branch's queue read, from its select to its status filter.
+    const read = source.slice(source.indexOf(".select(`id, status, updated_at"), source.indexOf('.in("status", ["awaiting_approval", "approved"])'));
+    // created_at is selected, or every row's age would read as undefined.
+    assert.ok(/\bcreated_at\b/.test(read), read.slice(0, 120));
+  });
+
+  test("a row whose created_at is not a time never owns a posting, so the dated copy stays and only one copy can drop", () => {
+    // The shared identity.
+    const key = { ats_provider: "greenhouse", ats_job_id: "888" };
+    // A dated copy.
+    const dated = row("dated", "awaiting_approval", "Bengaluru, India", "Engineer", "2026-11-05T10:00:00Z");
+    // An undated copy, read first.
+    const undated = row("undated", "awaiting_approval", "Bengaluru, India", "Engineer", "not-a-time");
+    // The dated copy owns the posting.
+    assert.equal(queuedTwinOwners([{ ...undated, jobs: { ...undated.jobs!, ...key } }, { ...dated, jobs: { ...dated.jobs!, ...key } }]).get(atsJobKeyOf("greenhouse", "888")!), "dated");
   });
 });

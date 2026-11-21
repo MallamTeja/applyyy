@@ -9,7 +9,11 @@ import { describe, expect, it } from 'vitest';
 // The typed refusal the gate throws; the same class scout-ats's transport throws.
 import { RobotsDisallowedError } from '../../supabase/functions/_shared/http/errors.ts';
 // The unit under test.
-import { createRequestPacer, readBoardPages, robotsGatedGet, RobotsUnavailableError } from '../src/scout/board-pages.ts';
+import { BOARD_PAGE_TIMEOUT_MS, readBoardPages, robotsGatedGet, RobotsUnavailableError } from '../src/scout/board-pages.ts';
+// The pacer both scouts share (D5, 2026-11-21); the worker's own copy was deleted in its favour.
+import { createRequestPacer } from '../../supabase/functions/_shared/http/request-pacer.ts';
+// The edge transport's per-attempt timeout, which the worker page timeout must equal (D5 drift #3).
+import { DEFAULT_TIMEOUT_MS } from '../../supabase/functions/_shared/http/transport.ts';
 // Types only: the fake adapter below is shaped against the real contract.
 import type { AtsAdapter, ParsedPosting } from '../../supabase/functions/_shared/ats/types.ts';
 
@@ -135,6 +139,8 @@ describe('readBoardPages request method', () => {
         },
         // Passed through untouched.
         body: '{"offset":0}',
+        // The page timeout (D5 drift #3, 2026-11-21): a hung socket fails the board, not the run.
+        signal: expect.any(AbortSignal),
       },
     ]);
   });
@@ -146,8 +152,8 @@ describe('readBoardPages request method', () => {
     await readBoardPages(FAKE_ADAPTER, 'acme', impl, new Map());
     // Byte-identical to the pre-Workday init: headers only, no method, no body.
     expect(inits).toEqual([
-      // Exactly the init the single-fetch code has always sent.
-      { headers: { Accept: 'application/json', 'User-Agent': 'applyy-scout/1.0 (+https://github.com/MallamTeja/applyyy)' } },
+      // The init the single-fetch code has always sent, plus the page timeout (D5 drift #3, 2026-11-21).
+      { headers: { Accept: 'application/json', 'User-Agent': 'applyy-scout/1.0 (+https://github.com/MallamTeja/applyyy)' }, signal: expect.any(AbortSignal) },
     ]);
   });
 });
@@ -523,5 +529,93 @@ describe('readBoardPages: text boards (iCIMS)', () => {
     await pacer.before('https://acme.wd1.myworkdayjobs.com/robots.txt');
     // Exactly one wait.
     expect(sleeps).toEqual([1_000]);
+  });
+});
+
+// D5 drift #3 (2026-11-21): a board page had NO timeout, so one hung Workday/iCIMS socket stalled the
+// whole CLI run until its 12-minute budget and every later board was skipped. The page now carries the
+// edge transport's per-attempt timeout, and a timeout is a COUNTED page failure, never a robots skip.
+describe('readBoardPages: page timeout (D5 drift #3)', () => {
+  it('the board page timeout equals the edge transport timeout (one number for both scouts)', () => {
+    // The worker's value is the edge's constant itself, so the two cannot drift apart.
+    expect(BOARD_PAGE_TIMEOUT_MS).toBe(DEFAULT_TIMEOUT_MS);
+  });
+
+  it('every board page is sent with an abort signal', async () => {
+    // The signal each page request carried.
+    const signals: unknown[] = [];
+    // Robots: no file; pages: one empty page, recording the init's signal.
+    const impl = ((url: string | URL | Request, init?: RequestInit) => {
+      // The gate's robots.txt read is not a page.
+      if (String(url).endsWith('/robots.txt')) return Promise.resolve(robotsResponse(NO_ROBOTS));
+      // What the page request carried.
+      signals.push(init?.signal);
+      // One page that parses to nothing.
+      return Promise.resolve(new Response(JSON.stringify({ ids: [], next: null }), { status: 200 }));
+    }) as typeof fetch;
+    // One board read.
+    await readBoardPages(FAKE_ADAPTER, 'acme', impl, new Map());
+    // One page, with a real AbortSignal on it.
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
+  });
+
+  it('a page timeout is a counted failure (a throw that is NOT a robots refusal)', async () => {
+    // Robots allow; the page aborts the way AbortSignal.timeout does (a TimeoutError DOMException).
+    const impl = ((url: string | URL | Request) => {
+      // No robots file: the board is allowed.
+      if (String(url).endsWith('/robots.txt')) return Promise.resolve(robotsResponse(NO_ROBOTS));
+      // The page times out.
+      return Promise.reject(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+    }) as typeof fetch;
+    // Caught, so its type can be asserted.
+    const err = await readBoardPages(FAKE_ADAPTER, 'acme', impl, new Map()).then(() => null, (e: unknown) => e);
+    // Thrown, so scout.ts's generic catch writes failureMark...
+    expect(err).not.toBeNull();
+    // ...and NOT the robots skip type that catch would defer uncounted.
+    expect(err).not.toBeInstanceOf(RobotsDisallowedError);
+  });
+});
+
+// The 2-UA finding (2026-11-21 egress probe): robots.txt went out as the bare product token
+// "applyy-scout" while every page sent "applyy-scout/1.0 (+repo)". One honest, contactable identity
+// for every request now; robots GROUP matching still uses the token derived from that header.
+describe('robots.txt identity (one UA for every request)', () => {
+  // The scout's full, contactable User-Agent, exactly as every page sends it.
+  const FULL_UA = 'applyy-scout/1.0 (+https://github.com/MallamTeja/applyyy)';
+
+  it('robots.txt is requested with the same full contact User-Agent the pages use', async () => {
+    // The headers the robots.txt GET carried.
+    let robotsHeaders: Record<string, string> | undefined;
+    // Robots: recorded, then "no file"; pages: one empty page.
+    const impl = ((url: string | URL | Request, init?: RequestInit) => {
+      // The robots read: keep its headers.
+      if (String(url).endsWith('/robots.txt')) {
+        // master-robots passes a plain record.
+        robotsHeaders = init?.headers as Record<string, string>;
+        // No file.
+        return Promise.resolve(robotsResponse(NO_ROBOTS));
+      }
+      // One page that parses to nothing.
+      return Promise.resolve(new Response(JSON.stringify({ ids: [], next: null }), { status: 200 }));
+    }) as typeof fetch;
+    // One board read.
+    await readBoardPages(FAKE_ADAPTER, 'acme', impl, new Map());
+    // Exactly one user-agent entry (any casing), and it is the full contact UA.
+    const uaEntries = Object.entries(robotsHeaders ?? {}).filter(([k]) => k.toLowerCase() === 'user-agent');
+    expect(uaEntries).toEqual([['user-agent', FULL_UA]]);
+  });
+
+  it('a robots group named for the token "applyy-scout" still matches (and refuses) under the full UA', async () => {
+    // A policy that disallows only this scout, by its product token.
+    const { impl, requested } = fakeFetch(200, { status: 200, body: 'User-agent: applyy-scout\nDisallow: /\n\nUser-agent: *\nDisallow:' });
+    // Refused by the named group, as a real Disallow (not the unavailable skip).
+    const err = await readBoardPages(FAKE_ADAPTER, 'acme', impl, new Map()).then(() => null, (e: unknown) => e);
+    // A refusal...
+    expect(err).toBeInstanceOf(RobotsDisallowedError);
+    // ...that is an answer, so it is counted.
+    expect(err).not.toBeInstanceOf(RobotsUnavailableError);
+    // And no page was requested: only robots.txt.
+    expect(requested).toEqual(['https://fake.test/robots.txt']);
   });
 });

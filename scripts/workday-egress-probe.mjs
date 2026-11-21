@@ -15,9 +15,10 @@ const TENANTS = [
   { tenant: 'adobe', wd: 5, site: 'external_experienced' },
 ];
 
-// The robots.txt GET headers, copied from packages/master-robots/src/fetch.ts:86-95 — the scout
-// sends the bare PRODUCT TOKEN here, not the full UA, so a block on robots alone could be UA-shaped.
-const ROBOTS_HEADERS = { 'user-agent': 'applyy-scout', accept: 'text/plain, */*;q=0.1' };
+// The robots.txt GET headers as the worker sends them since 2026-11-21 (board-pages.ts gateRobots):
+// master-robots' Accept, and the SAME full contact UA every page sends. Before that the scout sent
+// the bare token "applyy-scout" here (the 2-UA finding); one honest identity for every request now.
+const ROBOTS_HEADERS = { 'user-agent': 'applyy-scout/1.0 (+https://github.com/MallamTeja/applyyy)', accept: 'text/plain, */*;q=0.1' };
 
 // The jobs POST headers, copied from worker/src/scout/board-pages.ts:26-30 + :204 (REQUEST_HEADERS
 // plus the JSON content type the POST adds). Copied, not imported, so the runner needs no install.
@@ -44,7 +45,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // One request, reduced to the fields the decision table needs. A network error becomes a
 // row too (status "ERR"), so a dropped connection reads as its own outcome, never as a pass.
-async function probe(label, url, init) {
+// `kind` is "robots" or "jobs": what a REAL answer looks like differs (text policy vs JSON list).
+async function probe(label, kind, url, init) {
   // Wall time, to tell a slow challenge page from a fast refusal.
   const started = Date.now();
   // The request itself; any throw is captured below, not allowed to end the run.
@@ -56,9 +58,15 @@ async function probe(label, url, init) {
     // The first 120 characters, newlines flattened so one request stays on one log line.
     const body = text.slice(0, 120).replace(/\s+/g, ' ');
     // The four headers that say who answered and why: Cloudflare stamps server + cf-ray.
+    // The declared type, part of the evidence for "real answer or soft-200 page".
+    const contentType = res.headers.get('content-type');
     return {
       label,
       status: res.status,
+      // What the answer IS, never the status alone (§6): the 07:48 UTC runner "200"s were S3 HTML pages.
+      class: classify(kind, res.status, contentType, text),
+      // Logged so the class can be argued with.
+      contentType,
       // Workday's maintenance answer (live 2026-11-21 07:20 UTC: every tenant 503 ERR_TENANT_OUTAGE).
       // Flagged so an outage run reads as INCONCLUSIVE, never as "blocked".
       outage: text.includes('ERR_TENANT_OUTAGE'),
@@ -72,7 +80,43 @@ async function probe(label, url, init) {
     };
   } catch (err) {
     // The failure's name and message only: a network error carries no secret.
-    return { label, status: 'ERR', error: `${err.name}: ${err.message}`, ms: Date.now() - started };
+    return { label, status: 'ERR', class: 'other', error: `${err.name}: ${err.message}`, ms: Date.now() - started };
+  }
+}
+
+// One answer's class, from status + content-type + the body's actual shape. A 200 is never success
+// by itself (CLAUDE.md §6): the 07:48 UTC runner run got 200s from `server: AmazonS3` with HTML bodies
+// where the jobs API returns JSON. Classes:
+//   json_ok   jobs: 200, JSON content-type, body parses to an object with a numeric `total` (Workday's list shape)
+//   robots_ok robots: 200, text/plain, body is not HTML (a real policy file)
+//   html_soft any 200 whose type or body is HTML: an edge/error/challenge page, NOT data
+//   429       rate limited (Cloudflare or other)
+//   outage    Workday's ERR_TENANT_OUTAGE (maintenance)
+//   other     anything else (non-200, 200 with an unexpected shape, network error)
+function classify(kind, status, contentType, text) {
+  // Maintenance first: it arrives as 503 JSON and must not read as a block.
+  if (text.includes('ERR_TENANT_OUTAGE')) return 'outage';
+  // The rate limit, whatever the body.
+  if (status === 429) return '429';
+  // Only a 200 can be a real answer.
+  if (status !== 200) return 'other';
+  // The declared type, lowercased once (null when absent).
+  const type = (contentType ?? '').toLowerCase();
+  // HTML by header or by body (a page served as text/plain still starts with a tag).
+  if (type.includes('text/html') || /^\s*</.test(text)) return 'html_soft';
+  // robots.txt: a plain-text policy is the real answer.
+  if (kind === 'robots') return type.includes('text/plain') ? 'robots_ok' : 'other';
+  // jobs: JSON by header AND by parse AND by shape, or it is not the list.
+  if (!type.includes('application/json')) return 'other';
+  // The parse; a throw means the body is not JSON despite the header.
+  try {
+    // Workday's list answer is an object with a numeric total.
+    const parsed = JSON.parse(text);
+    // Shape check, not just "it parsed": `null` or `[]` parse too.
+    return parsed !== null && typeof parsed === 'object' && typeof parsed.total === 'number' ? 'json_ok' : 'other';
+  } catch {
+    // Declared JSON, not JSON.
+    return 'other';
   }
 }
 
@@ -87,7 +131,7 @@ async function main() {
     // The tenant's own host, built from fixed constants only.
     const origin = `https://${t.tenant}.wd${t.wd}.myworkdayjobs.com`;
     // robots.txt, exactly as the scout's gate asks for it.
-    const robots = await probe(`${t.tenant} robots`, `${origin}/robots.txt`, { headers: ROBOTS_HEADERS });
+    const robots = await probe(`${t.tenant} robots`, 'robots', `${origin}/robots.txt`, { headers: ROBOTS_HEADERS });
     // Kept without the full text, so the log and summary stay small.
     rows.push(log(robots));
     // The gap before the next request to any host.
@@ -107,12 +151,12 @@ async function main() {
       continue;
     }
     // The jobs list POST, exactly as the scout sends page one (limit 1 instead of 20).
-    rows.push(log(await probe(`${t.tenant} jobs`, `${origin}/wday/cxs/${t.tenant}/${t.site}/jobs`, { method: 'POST', headers: POST_HEADERS, body: BODY })));
+    rows.push(log(await probe(`${t.tenant} jobs`, 'jobs', `${origin}/wday/cxs/${t.tenant}/${t.site}/jobs`, { method: 'POST', headers: POST_HEADERS, body: BODY })));
     // The gap again, including after the last tenant (harmless, keeps the loop uniform).
     await sleep(GAP_MS);
   }
   // One compact summary line per request, for pasting into the bridge's table.
-  console.log('summary:', rows.map((r) => `${r.label}=${r.status}${r.outage ? '(outage)' : ''}`).join(' '));
+  console.log('summary:', rows.map((r) => `${r.label}=${r.status}/${r.class ?? '-'}`).join(' '));
   // Any outage row makes the whole run unusable for the IP question: say so in one line.
   if (rows.some((r) => r.outage)) console.log('verdict: INCONCLUSIVE (Workday tenant outage; rerun both halves later)');
 }

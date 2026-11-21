@@ -226,7 +226,8 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
       .from("applications")
       // updated_at is the stamp the drop write is guarded by; the embed carries the gate's inputs.
       // ats_job_id and BOARD_HINT_SELECT (pending R, 2026-11-21): without the hint paths the Ashby locks read as empty here.
-      .select(`id, status, updated_at, jobs(title, description_raw, location_raw, min_experience_years, discovered_via, ats_job_id, ${BOARD_HINT_SELECT})`)
+      // created_at (r4, 2026-11-21): the oldest queued copy of a posting owns it; a newer twin drops as already_applied.
+      .select(`id, status, updated_at, created_at, jobs(title, description_raw, location_raw, min_experience_years, discovered_via, ats_job_id, ${BOARD_HINT_SELECT})`)
       // Approved rows are read only to be reported; regate-queue.ts never moves them.
       .in("status", ["awaiting_approval", "approved"]);
     // An unread queue is a failed run, never "nothing to drop".

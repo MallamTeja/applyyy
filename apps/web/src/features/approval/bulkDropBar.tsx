@@ -31,11 +31,11 @@ export function BulkDropBar(props: {
     /* KEYED on the ids: a tick or untick while the confirm is open remounts this, and InlineConfirm cancels its
        pending confirm on unmount, so Confirm can never send a list other than the one its sentence counted. */
     <InlineConfirm key={ids.join(' ')} id={BULK_DROP_CONFIRM_ID}>
-      {/* A named group, so a screen reader says what the two buttons act on. Inline layout with spacing tokens:
-          the bar is the only element of its kind, and the page stylesheet is outside this parcel. */}
-      <div role="group" aria-label="Selected applications" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--gap-3)' }}>
+      {/* A named group, so a screen reader says what the two buttons act on. Its layout lives in
+          ApprovalQueuePage.css (.queue__bulk-bar), with the page's other row and toolbar rules. */}
+      <div role="group" aria-label="Selected applications" className="queue__bulk-bar">
         {/* The count, in words, so the operator sees what the drop will touch before arming it. */}
-        <p style={{ margin: 0 }}>{ids.length} selected</p>
+        <p className="queue__bulk-count">{ids.length} selected</p>
         {/* Untick all; a plain action, nothing to confirm. */}
         <button type="button" className="button button--secondary button--small" onClick={onClear}>
           {/* Says what it does to the ticks, not to the rows: nothing is written. */}

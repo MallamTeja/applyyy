@@ -22,9 +22,20 @@
 //
 // EXPERIENCE (D9b, orch ruling A 2026-11-21): REPORTED in `experience_flagged`, never moved. The 11-11 rule above
 // stands until Teja changes it himself; auto-dropping it later is a one-line verdict change plus the trigger.
+//
+// R4 (2026-11-21), two gaps closed:
+// - TECH NO LONGER HIDES WORK-AUTH. The sweep used firstPreGateDrop, which stops at the first code; a row failing
+//   tech (a code this sweep never acts on) had its work-auth failure hidden, and stayed in Teja's queue. The verdict
+//   now asks the work-auth and experience gates directly (auditorRegateGates).
+// - QUEUED TWINS. Two awaiting rows for the same ATS posting both stayed (W2 matches committed history only). History
+//   shows it costs: one posting was APPLIED TWICE (live, 2026-11-21). The OLDEST queued copy owns the posting
+//   (created_at, then id); a newer copy drops as already_applied, the same no-judgement class as W2 (two rows' keys
+//   compared, no prose read), so the 20261121110000 trigger already allows it.
 
-// The auditor's job-gate and already-applied verdicts, reused so the sweep and the `tailored` check can never disagree.
-import { auditorAlreadyAppliedDrop, auditorPreGateDrop, type AuditorJobEmbed } from "./pregate.ts";
+// The auditor's gates, already-applied verdict and posting key, reused so the sweep and the `tailored` check agree.
+import { auditorAlreadyAppliedDrop, auditorAtsKey, auditorRegateGates, type AuditorJobEmbed } from "./pregate.ts";
+// "Teja pasted this himself": his pick is never dropped as a twin.
+import { isHumanPicked } from "../_shared/match/score-threshold.ts";
 // The gate inputs the verdict needs, loaded by the same loader the matcher calls.
 import type { PreGatePreferences } from "../matcher/tech-pregate.ts";
 
@@ -36,6 +47,8 @@ export interface QueueRow {
   readonly status: string;
   // The concurrency stamp: a row Teja touched after this read must not be moved on a stale verdict.
   readonly updated_at: string;
+  // When the row was created: the oldest queued copy of a posting owns it (r4). Required, so no read can leave it out.
+  readonly created_at: string;
   // The job's gate inputs; null when the job row is missing.
   readonly jobs: AuditorJobEmbed | null;
 }
@@ -54,28 +67,67 @@ export type RegateVerdict =
   // Over the experience ceiling: named in the report for Teja, never moved (D9b ruling A).
   | { readonly kind: "flag_experience"; readonly reason: string };
 
-// The pure decision for one row. `committedKeys` are ATS keys of committed applications only (see the header).
-export function regateVerdict(row: QueueRow, preferences: PreGatePreferences, committedKeys: ReadonlySet<string>): RegateVerdict {
-  // The auditor's verdict; it throws on a missing job, which the caller reports as a per-row failure (never a pass).
-  const drop = auditorPreGateDrop(row.jobs, preferences);
+// The owner of each posting in the queue: ATS key -> id of the OLDEST awaiting row holding it (created_at, then id, so
+// the answer never depends on read order). Every awaiting keyed row competes, a pasted one too: an older pasted copy
+// owns the posting, and only a newer scouted copy can be dropped. Rows without a job or a key own nothing.
+export function queuedTwinOwners(rows: readonly QueueRow[]): ReadonlyMap<string, string> {
+  // Key -> the oldest row seen so far.
+  const oldest = new Map<string, QueueRow>();
+  // Each row.
+  for (const row of rows) {
+    // Only rows still waiting for Teja; an approved copy is committed history, which W2 already reads.
+    if (row.status !== "awaiting_approval" || row.jobs === null) continue;
+    // Its posting key, or none.
+    const key = auditorAtsKey(row.jobs);
+    // No identity, no twin.
+    if (key === null) continue;
+    // A stamp that is not a time cannot be ranked by age; such a row never owns a posting (it may still be dropped as a
+    // twin of a row that does, so at least one copy always stays). Postgres timestamptz always parses; this is the guard.
+    if (Number.isNaN(Date.parse(row.created_at))) continue;
+    // The current holder.
+    const held = oldest.get(key);
+    // Older wins; a tie on created_at falls to the smaller id. Timestamps compare as instants, never as strings.
+    const older = held === undefined || Date.parse(row.created_at) < Date.parse(held.created_at)
+      || (Date.parse(row.created_at) === Date.parse(held.created_at) && row.id < held.id);
+    // Replace the holder.
+    if (older) oldest.set(key, row);
+  }
+  // Key -> owner id.
+  return new Map([...oldest].map(([key, row]) => [key, row.id] as const));
+}
+
+// The pure decision for one row. `committedKeys` are ATS keys of committed applications only (see the header);
+// `queuedOwners` is queuedTwinOwners over the same read (required, so no caller can forget the twin check).
+export function regateVerdict(row: QueueRow, preferences: PreGatePreferences, committedKeys: ReadonlySet<string>, queuedOwners: ReadonlyMap<string, string>): RegateVerdict {
+  // Both gates the sweep acts on, each asked directly (r4: tech no longer hides them); throws on a missing job.
+  const gates = auditorRegateGates(row.jobs, preferences);
   // Work-auth first, as before.
-  if (drop !== null && drop.code === "work_auth") {
+  if (gates.workAuth !== null) {
     // Teja's yes stands; report it.
-    if (row.status === "approved") return { kind: "flag_approved", reason: drop.reason };
+    if (row.status === "approved") return { kind: "flag_approved", reason: gates.workAuth.reason };
     // Still waiting for him: drop it.
-    if (row.status === "awaiting_approval") return { kind: "drop", code: "work_auth", reason: drop.reason };
+    if (row.status === "awaiting_approval") return { kind: "drop", code: "work_auth", reason: gates.workAuth.reason };
     // Any other status was never asked for: refuse loudly rather than guess (CLAUDE.md §6).
     throw new Error(`regate: unexpected status ${row.status}`);
   }
-  // Already applied: awaiting rows only (an approved row would match its own committed key).
+  // Already applied or already queued: awaiting rows only (an approved row would match its own committed key).
   if (row.status === "awaiting_approval") {
     // The same pure check the main run uses on `tailored` rows.
     const applied = auditorAlreadyAppliedDrop(row.jobs, committedKeys);
     // A copy of a committed posting: drop it.
     if (applied !== null) return { kind: "drop", code: "already_applied", reason: applied.reason };
+    // The posting's key (row.jobs is non-null here: auditorRegateGates threw otherwise).
+    const key = auditorAtsKey(row.jobs!);
+    // The oldest queued copy of the same posting, when it is another row.
+    const owner = key === null ? undefined : queuedOwners.get(key);
+    // A newer scouted twin drops; Teja's own pasted copy is never dropped by the sweep.
+    if (owner !== undefined && owner !== row.id && !isHumanPicked(row.jobs!.discovered_via)) {
+      // Named with the copy that stays, so he can find it.
+      return { kind: "drop", code: "already_applied", reason: `an older copy of this ATS posting is already awaiting approval (${owner}, ${key})` };
+    }
   }
   // Over the ceiling: report only, whatever the status.
-  if (drop !== null && drop.code === "experience_ceiling") return { kind: "flag_experience", reason: drop.reason };
+  if (gates.experience !== null) return { kind: "flag_experience", reason: gates.experience.reason };
   // Nothing this sweep acts on.
   return { kind: "keep" };
 }
@@ -108,12 +160,14 @@ export interface RegateReport {
 export async function regateQueue(rows: readonly QueueRow[], preferences: PreGatePreferences, committedKeys: ReadonlySet<string>, db: RegateDb): Promise<RegateReport> {
   // An empty tally; every row lands in exactly one bucket (or `keep`, which needs none).
   const report: RegateReport = { checked: rows.length, dropped: [], approved_flagged: [], experience_flagged: [], skipped_stale: 0, failures: [] };
+  // Who owns each queued posting, computed once over the whole read (r4 queued twins).
+  const owners = queuedTwinOwners(rows);
   // One row at a time: ~120 rows of pure work plus a handful of writes, no batching needed.
   for (const row of rows) {
     // Any throw (a missing job) is this row's failure, never the run's and never a pass.
     try {
       // The decision.
-      const verdict = regateVerdict(row, preferences, committedKeys);
+      const verdict = regateVerdict(row, preferences, committedKeys, owners);
       // Kept: nothing to do.
       if (verdict.kind === "keep") continue;
       // Approved: report only.

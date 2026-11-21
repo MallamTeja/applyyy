@@ -28,6 +28,8 @@ import { screenTechRole, type TechGatePreferences } from "./tech-gate.ts";
 import { ashbyLocationFields, boardLocationHints, screenWorkAuth, type RemoteLocationPolicy } from "./work-auth-gate.ts";
 // The JD's required years, the producer the cascade's experience_ceiling rule never had (11-04).
 import { requiredExperienceYears } from "./required-experience.ts";
+// The one "is this JD thin?" rule (round 4, 2026-11-21), shared with the web's "No description" pill.
+import { isThinDescription } from "./jd-substance.ts";
 // Row shapes from the schema owner. Never redefined — a redefined type drifts.
 import type { FilterRuleRow, JobInsert, JobRow } from "../contracts/shared-types.ts";
 
@@ -232,8 +234,11 @@ export function planScreenedApplications(
     // every screen that can judge it WITHOUT a JD (the title rules below, the work-auth gate on title + location, the
     // cascade) and, if none rejects it, is born at passed_filters like any pass. Safe now and not on 11-05 because
     // nothing auto-tailors a scouted row any more (Teja 21:45 IST): a blank row waits in the lane for Teja's click, and
-    // the card says "No description" (discoveredList.ts hasNoDescription). Only a string with non-whitespace text counts.
-    const blank = typeof entry.row.description_raw !== "string" || entry.row.description_raw.trim().length === 0;
+    // the card says "No description" (discoveredList.ts hasNoDescription).
+    // THIN COUNTS AS BLANK (round 4, 2026-11-21): Fractal 002b1d10 passed on a 513-char tenant wrapper with no role
+    // text. jd-substance.ts isThinDescription strips a closed list of boilerplate lines and needs 100 chars of role
+    // text; the web pill calls the same function, so this verdict and the card's "No description" always agree.
+    const blank = isThinDescription(entry.row.description_raw);
     // "Matched nothing configured" on a title alone is missing data, not a verdict (CLAUDE.md section 6; live: 668
     // Workday rows dropped tech_gate_unclassified in 3 days with an empty body), so for a blank JD it is no drop. A
     // title the gate REJECTS (an exclusion, a title rule) still drops below by its own code: the title is there to judge.

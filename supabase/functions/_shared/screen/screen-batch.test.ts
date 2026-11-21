@@ -323,7 +323,8 @@ test("an unclassified posting under a configured gate is born dropped as tech_ga
   const planned = planScreenedApplications(
     // Matches none of TECH_PREFS' titles or keywords, and none of its exclusions. It HAS a description: since
     // 2026-11-12 an unclassified title with NO description is held instead (the hold tests below).
-    [{ jobId: "job-8", row: { ...BASE_ROW, title: "Site Reliability Specialist", description_raw: "Keep our on-call rota healthy." } }],
+    // Over 100 chars of role text (round 4, 2026-11-21): a 30-char body is now thin, i.e. treated as no description.
+    [{ jobId: "job-8", row: { ...BASE_ROW, title: "Site Reliability Specialist", description_raw: "Keep our on-call rota healthy, run the weekly incident review, and turn every postmortem into a tracked fix." } }],
     // No cascade rules, so stage 0 is the only thing that can drop it.
     [],
     BASE_CONTEXT,
@@ -590,6 +591,26 @@ test("no-description: a blank description with an UNCLASSIFIED title is born pas
   assert.deepEqual(planned.inserts, [{ job_id: "wd-u", status: "passed_filters", drop_reason: null }]);
   // Counted as a pass.
   assert.equal(planned.passedCount, 1);
+});
+
+// THIN = BLANK (round 4, 2026-11-21): Fractal 002b1d10 (verbatim below) passed with a 513-char Workday tenant wrapper
+// and no role text. jd-substance.ts isThinDescription is the one rule; a thin JD gets exactly the blank-JD treatment.
+const FRACTAL_WRAPPER_ONLY = "It's fun to work in a company where people truly BELIEVE in what they are doing!\n\nWe're committed to bringing passion and customer focus to the business.\n\nIf you like wild growth and working with happy, enthusiastic over-achievers, you'll enjoy your career with us!\n\nNot the right fit?  Let us know you're interested in a future opportunity by clicking Introduce Yourself in the top-right corner of the page or create an account to set up email alerts as new job postings become available that meet your interest!";
+// Zeta 4eb08982 (verbatim): a genuine one-line JD of 128 chars, the shortest real one live. Judged as a real JD.
+const ZETA_ONE_LINE = "Equity and SBC accounting and reporting for every quarter, preparing Cap Labor details and assisting in Direct Taxes calclations";
+
+test("thin: a boilerplate-only JD (Fractal) with an UNCLASSIFIED title is born passed_filters, like a blank one", () => {
+  // The live wrapper as the whole body, and a title matching nothing configured.
+  const planned = planScreenedApplications([{ jobId: "fr", row: { ...BASE_ROW, title: "Site Reliability Specialist", description_raw: FRACTAL_WRAPPER_ONLY } }], [], BASE_CONTEXT, TECH_PREFS);
+  // Ready to tailor with no reason: the wrapper is missing data, not evidence the role is off-target.
+  assert.deepEqual(planned.inserts, [{ job_id: "fr", status: "passed_filters", drop_reason: null }]);
+});
+
+test("thin: a real short JD (Zeta, 128 chars) is judged as a JD, so an unclassified title still drops", () => {
+  // The same unclassified title over genuine role text.
+  const planned = planScreenedApplications([{ jobId: "ze", row: { ...BASE_ROW, title: "Site Reliability Specialist", description_raw: ZETA_ONE_LINE } }], [], BASE_CONTEXT, TECH_PREFS);
+  // Not treated as blank: the gate had text to judge and its verdict stands.
+  assert.deepEqual([planned.inserts[0]!.status, planned.inserts[0]!.drop_reason], ["dropped_filter", "tech_gate_unclassified"]);
 });
 
 test("no-description: a blank description still meets the location screen (work-auth drops a foreign office)", () => {

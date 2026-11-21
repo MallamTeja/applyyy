@@ -96,4 +96,17 @@ describe('approval page bulk-drop wiring', () => {
     // Nothing ticked on screen: no bar at all, so there is nothing to click.
     assert.match(bar, /if \(targets\.length === 0\) return null;/);
   });
+
+  // Round 5 (2026-11-21): the bar's layout moved from inline styles into the page stylesheet.
+  it('lays the bar out from ApprovalQueuePage.css, wrapping so a phone never scrolls sideways', () => {
+    // The page stylesheet.
+    const css = readFileSync(new URL('../src/features/approval/ApprovalQueuePage.css', import.meta.url), 'utf8');
+    // The bar and its count use the classes.
+    assert.match(bar, /role="group" aria-label="Selected applications" className="queue__bulk-bar"/);
+    assert.match(bar, /<p className="queue__bulk-count">/);
+    // The bar's rule is a wrapping flex row with the token gap (the old inline values).
+    assert.match(css, /\.queue__bulk-bar \{[^}]*display: flex;[^}]*flex-wrap: wrap;[^}]*align-items: center;[^}]*gap: var\(--gap-3\);/);
+    // The count drops its paragraph margin.
+    assert.match(css, /\.queue__bulk-count \{[^}]*margin: 0;/);
+  });
 });

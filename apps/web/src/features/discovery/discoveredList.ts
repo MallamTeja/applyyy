@@ -15,6 +15,9 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { DISCOVERED_STEPS, PASSED_FILTERS_STEPS, isApplicationId } from '../pipeline/rowPipeline.ts';
 // Type only: the element type of a step list, so LaneSpec.steps matches what SendThroughPipeline takes.
 import type { PipelineStep } from '../pipeline/rowPipeline.ts';
+// The ONE "is this JD thin?" rule (round 4, 2026-11-21), shared with the screener by relative import, so the card's
+// "No description" and the screener's blank-JD verdict can never disagree.
+import { isThinDescription } from '../../../../../supabase/functions/_shared/screen/jd-substance.ts';
 
 // The two inventories the page can show; a closed union so a typo'd lane cannot compile.
 export type Lane = 'discovered' | 'ready';
@@ -41,10 +44,14 @@ export const LANES: Readonly<Record<Lane, LaneSpec>> = {
  * tailor"). The screener now passes such rows into Ready to tailor instead of holding them, so the card must say so
  * before Teja sends one through: the matcher and tailor have only the title to work from. Derived from the selected
  * description_preview (the first 600 characters of description_raw), so no new column and no migration. Shape check,
- * never truthiness (CLAUDE.md section 6): only a string with non-whitespace text is a description. */
+ * never truthiness (CLAUDE.md section 6).
+ * Since round 4 (2026-11-21) a THIN JD counts as none: under 100 chars of role text once a closed list of boilerplate
+ * lines is gone (Fractal 002b1d10 was a 513-char tenant wrapper and showed no flag). The preview is the whole JD below
+ * 600 chars, which is where every thin JD measured sits. Ceiling: a long JD whose first 600 chars are all boilerplate
+ * would flag here while the screener (full text) passes it; none such was measured live. */
 export function hasNoDescription(job: { readonly description_preview: string | null | undefined }): boolean {
-  // Null, absent, "" and whitespace-only all count as missing.
-  return typeof job.description_preview !== 'string' || job.description_preview.trim().length === 0;
+  // Null, absent, blank and thin all count as missing; the rule itself lives in jd-substance.ts.
+  return isThinDescription(job.description_preview);
 }
 
 // Rows per fetch. The same cap the page always had; Load more fetches the next page of this size.

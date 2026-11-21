@@ -39,6 +39,8 @@ import { BotProtectionError, HttpError, NetworkError, RetryAfterTooLongError, Ro
 import { parseRetryAfterMs } from "./retry-after.ts";
 // The "robots.txt did not answer" refusal and its status test, shared with the worker scout (D5).
 import { RobotsUnavailableError, isUnknownRobotsStatus } from "./robots-unavailable.ts";
+// The per-zone request gap (Workday, iCIMS), shared with the worker's rule (drift #2, 2026-11-21).
+import { createRequestPacer, PACED_REQUEST_GAP_MS, type RequestPacer } from "./request-pacer.ts";
 // The robots.txt gate, by RELATIVE path exactly as scout-web/index.ts already imports it
 // (a bare '@applyy/master-robots' specifier would need a package.json entry and a
 // lockfile write). Gating lives HERE because this is the one function every Deno fetch
@@ -166,6 +168,10 @@ export interface HttpRequestOptions {
   // (scout-ats poll-fetch.ts, scout-web fetch-board.ts) pass 'scouting', where a 401
   // robots.txt counts as no rules (Teja, 2026-11-01); every other caller stays strict.
   readonly robots?: false | { readonly cache?: RobotsCache; readonly policy?: RobotsPolicy };
+  // Request pacing (drift #2, 2026-11-21). ON BY DEFAULT through the isolate's pacer: every request this transport
+  // sends (the robots.txt GET and each attempt, retries included) waits its lane's gap first, so Workday and iCIMS get
+  // the worker's 1 s per zone and every other host is untouched (request-pacer.ts). Injected only by tests.
+  readonly pacer?: RequestPacer;
 }
 
 // Every option resolved to a concrete value.
@@ -301,6 +307,10 @@ function attemptSignal(timeoutMs: number, callerSignal: AbortSignal | undefined)
 // real answer, 5min for a failure.
 const defaultRobotsCache: RobotsCache = new Map();
 
+// One request pacer per isolate, like the robots cache: one scout-ats request is one isolate's run, and its boards
+// share the Workday zone's gap. Concurrency-safe (it reserves slots), because the client in index.ts may run several.
+const defaultRequestPacer: RequestPacer = createRequestPacer(PACED_REQUEST_GAP_MS);
+
 // The last robots.txt HTTP status per origin, per verdict cache (same design as the worker's
 // board-pages.ts). Keyed by the cache object so it lives exactly as long as the verdicts it
 // explains: a cache hit still finds the status of the fetch that filled the cache. WeakMap,
@@ -328,6 +338,8 @@ export async function httpFetch(
 ): Promise<Response | null> {
   // One normalisation pass; everything below reads concrete values.
   const cfg = resolveConfig(options);
+  // The lane pacer every request below waits on: the caller's (tests) or the isolate's.
+  const pacer = options.pacer ?? defaultRequestPacer;
 
   // THE ROBOTS GATE, BEFORE THE FIRST ATTEMPT. Checked once per call, not per retry:
   // the verdict cannot change between attempts of the same call, and re-checking would
@@ -365,9 +377,18 @@ export async function httpFetch(
       fetcher: async (robotsUrl: string, init: { signal: AbortSignal; headers: Record<string, string> }) => {
         // Forget the previous status first, so a fetch that THROWS leaves no stale 429 behind.
         statuses.delete(origin);
+        // The robots.txt GET is a request to the zone like any other: it waits its lane's gap (the 11-21 probe saw
+        // Cloudflare 429 robots.txt itself). Only a real fetch waits; a cache hit never reaches this fetcher.
+        await pacer.before(robotsUrl);
         // BARE GLOBAL fetch, late-bound, for the same reason as the attempt loop below: tests
         // replace globalThis.fetch.
-        const response = await fetch(robotsUrl, init);
+        // ONE USER-AGENT FOR BOTH REQUESTS (r6, 2026-11-21; the worker does the same since peer 5 r4). master-robots
+        // sends the bare product token ("applyy-scout"); a site operator reading logs then sees two identities and no
+        // contact on robots.txt. The full header (cfg.userAgent, DEFAULT_USER_AGENT unless a caller names itself more
+        // specifically) replaces it under the SAME lowercase key, so no second user-agent header is sent. Matching is
+        // unchanged: the gate still matches groups by the token derived from this very string (productToken above).
+        // Never browser-like (the 2026-11-01 robots ruling): cfg.userAgent is our own product token plus a contact URL.
+        const response = await fetch(robotsUrl, { ...init, headers: { ...init.headers, "user-agent": cfg.userAgent } });
         // Recorded before master-robots classifies it.
         statuses.set(origin, response.status);
         // Unchanged, for master-robots to read.
@@ -410,6 +431,10 @@ export async function httpFetch(
     // and using outside is what lets the catch handle transport failure separately
     // from HTTP failure.
     let response: Response;
+
+    // Every attempt is a request: wait the lane's gap first (outside the try, so a pacer fault is never read as a
+    // network failure of the target). A retry after backoff usually finds the gap already passed.
+    await pacer.before(url);
 
     try {
       // BARE GLOBAL `fetch`, for the same reason `sleep` resolves setTimeout late: the

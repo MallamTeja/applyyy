@@ -49,27 +49,20 @@ const RUN_ROBOTS_CACHE: RobotsCache = new Map();
 // without counting a failure. It EXTENDS RobotsDisallowedError on purpose: a caller that only
 // knows the parent type (workday-detail's fill, any future reader) still treats it as a refusal,
 // so the new type can make a caller more lenient only where it opts in (CLAUDE.md §6).
-export class RobotsUnavailableError extends RobotsDisallowedError {
-  // The robots.txt HTTP status that made the answer unknown (429 or 5xx), or null for a
-  // 'wait' verdict (a short readable Retry-After), whose status is 429 by construction.
-  readonly status: number | null;
+// D5 (2026-11-21): the class and its status test now live in _shared so scout-ats's transport
+// throws the SAME class; this file re-exports it, so scout.ts's `instanceof` and the tests'
+// imports from here are unchanged. (isUnknownRobotsStatus: 429 = rate limited, 5xx = server
+// failed; a 401/403/404 is an answer and is NOT unknown.)
+import { RobotsUnavailableError, isUnknownRobotsStatus } from '../../../supabase/functions/_shared/http/robots-unavailable.ts';
+// Re-exported for scout.ts and the tests, which import it from this module.
+export { RobotsUnavailableError };
 
-  constructor(url: string, verdict: 'refuse' | 'wait', reason: string, source: string | null, status: number | null) {
-    // The parent writes the "robots.txt gate refused <url>: <reason>" message the log greps for.
-    super(url, verdict, reason, source);
-    // Its own name, so a log line or a stack says which kind of refusal this was.
-    this.name = 'RobotsUnavailableError';
-    // Kept for the scout's skip line.
-    this.status = status;
-  }
-}
-
-// The robots.txt statuses that mean "the host did not answer the question" rather than "no".
-// 429 = rate limited; 5xx = the server failed. A 401/403/404 is an answer and is NOT here.
-function isUnknownRobotsStatus(status: number): boolean {
-  // Rate limited, or any server error.
-  return status === 429 || (status >= 500 && status <= 599);
-}
+// The per-request timeout for every board page and detail read: the edge transport's own constant
+// (15 s), imported so the two scouts cannot drift (D5 drift #3, 2026-11-21). Without it one hung
+// socket stalled the CLI run to its 12-minute budget. A timeout THROWS, so scout.ts counts it.
+import { DEFAULT_TIMEOUT_MS as BOARD_PAGE_TIMEOUT_MS } from '../../../supabase/functions/_shared/http/transport.ts';
+// Exported for the test that pins it to the edge's value.
+export { BOARD_PAGE_TIMEOUT_MS };
 
 // The last robots.txt HTTP status seen per origin, per verdict cache. master-robots folds a
 // 429 and a timeout into the same 'indeterminate' source and keeps only a human reason string,
@@ -94,76 +87,12 @@ function robotsStatusesFor(cache: RobotsCache): Map<string, number> {
   return created;
 }
 
-// WORKDAY PACING (2026-11-18, D1 design point 3). Every *.myworkdayjobs.com tenant answers
-// through one Cloudflare zone (Server: cloudflare, probed 11-18), and the 429s hit one tenant
-// after another, so the gap is kept across the whole zone, not per tenant host. The scout polls
-// boards one at a time, so "serial" already holds; this adds the gap between requests.
-// ponytail: 1 s is the low end of the approved 1–2 s. ~426 Workday pages + 64 robots GETs is
-// ~8 min of gap per run against a 12-min budget; raise it only if 429s continue at 1 s.
-// ICIMS (2026-11-21) gets its own lane at the same gap: one page per job, all on *.icims.com.
-// Renamed from WORKDAY_REQUEST_GAP_MS when it began to cover two lanes.
-export const PACED_REQUEST_GAP_MS = 1_000;
-
-// Which pacing lane a URL belongs to: the Workday zone, the iCIMS zone, or null for "never delayed".
-function paceLane(url: string): string | null {
-  // The hostname alone; an unparseable URL is not paced (the fetch itself will fail on it).
-  let host: string;
-  // URL throws on garbage.
-  try {
-    // Lower-cased by the URL parser.
-    host = new URL(url).hostname;
-  } catch {
-    // No lane for a URL that cannot be requested anyway.
-    return null;
-  }
-  // Every Workday tenant shares the one lane.
-  if (host === 'myworkdayjobs.com' || host.endsWith('.myworkdayjobs.com')) return 'myworkdayjobs.com';
-  // Every iCIMS tenant shares another: a board read is one request per job on that zone.
-  if (host === 'icims.com' || host.endsWith('.icims.com')) return 'icims.com';
-  // Greenhouse, Lever, Ashby: never delayed.
-  return null;
-}
-
-// The pacer seam: awaited before every request a scout makes to a board's origin.
-export interface RequestPacer {
-  // Resolves when the URL may be requested.
-  before(url: string): Promise<void>;
-}
-
-// A pacer that keeps `gapMs` between the starts of two requests in the same lane. `now` and
-// `sleep` are injected so tests run on a fake clock. Assumes one caller at a time (the scout is
-// serial); concurrent callers could both pass the check together.
-export function createRequestPacer(
-  // Minimum gap between two requests in one lane.
-  gapMs: number,
-  // The clock.
-  now: () => number = Date.now,
-  // The wait.
-  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-): RequestPacer {
-  // When each lane last sent a request.
-  const lastStartByLane = new Map<string, number>();
-  // The pacer itself.
-  return {
-    async before(url: string): Promise<void> {
-      // Unpaced hosts go straight through.
-      const lane = paceLane(url);
-      // Greenhouse, Lever, Ashby: no delay.
-      if (lane === null) return;
-      // The previous request in this lane, if any.
-      const last = lastStartByLane.get(lane);
-      // Wait out whatever is left of the gap.
-      if (last !== undefined) {
-        // Remaining milliseconds; zero or less means the gap has already passed.
-        const waitMs = last + gapMs - now();
-        // Only a positive wait sleeps.
-        if (waitMs > 0) await sleep(waitMs);
-      }
-      // This request's start, read after the wait.
-      lastStartByLane.set(lane, now());
-    },
-  };
-}
+// PACING (2026-11-18 D1 design point 3; iCIMS lane 2026-11-21). The worker's own lane code lived here:
+// it answered "how long must this request wait so a Cloudflare zone (all *.myworkdayjobs.com, all
+// *.icims.com) sees at most one request per second from us?". D5 (2026-11-21): that question is now
+// answered ONCE, in _shared/http/request-pacer.ts (same zones, same 1 s gap, slot reservation so even
+// concurrent callers cannot pass together), which scout-ats uses too. The two scouts can no longer drift.
+import { createRequestPacer, PACED_REQUEST_GAP_MS, type RequestPacer } from '../../../supabase/functions/_shared/http/request-pacer.ts';
 
 // The run's pacer, module-global like RUN_ROBOTS_CACHE: one scout process = one run.
 const RUN_PACER: RequestPacer = createRequestPacer(PACED_REQUEST_GAP_MS);
@@ -199,9 +128,10 @@ export function readBoardPages(
     const init: RequestInit =
       // No body: the exact pre-Workday GET init, byte for byte (for a JSON board).
       body === undefined
-        ? { headers }
-        // A body: POST it, declared as JSON beside the usual identity headers.
-        : { method: 'POST', headers: { ...REQUEST_HEADERS, 'Content-Type': 'application/json' }, body };
+        // Plus the page timeout, so a hung socket fails this board instead of the whole run.
+        ? { headers, signal: AbortSignal.timeout(BOARD_PAGE_TIMEOUT_MS) }
+        // A body: POST it, declared as JSON beside the usual identity headers, with the same timeout.
+        : { method: 'POST', headers: { ...REQUEST_HEADERS, 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(BOARD_PAGE_TIMEOUT_MS) };
     // The page; a URL fragment (Workday's cursor) is never sent by fetch.
     const res = await fetchImpl(pageUrl, init);
     // A non-ok page THROWS rather than returning its body: an error page fed to the
@@ -250,8 +180,11 @@ async function gateRobots(
     statuses.delete(origin);
     // Wait for the lane like every other request to this origin.
     await pacer.before(robotsUrl);
-    // The real request through the injected seam.
-    const response = await fetchImpl(robotsUrl, init);
+    // The real request through the injected seam, with the scout's ONE identity: the full contact UA
+    // every page sends, not master-robots' bare token (the 2-UA finding, 2026-11-21 egress probe).
+    // Group matching is unaffected: it reads SCOUT_ROBOTS_TOKEN, derived from this same header.
+    // Never a browser-like UA: that would be evasion (Teja's 11-01 "Honor robots" ruling).
+    const response = await fetchImpl(robotsUrl, { ...init, headers: { ...init.headers, 'user-agent': REQUEST_HEADERS['User-Agent'] } });
     // Recorded from the response itself, not from master-robots' reason text.
     statuses.set(origin, response.status);
     // Unchanged, for master-robots to classify.
@@ -303,5 +236,5 @@ export async function robotsGatedGet(
   // The plain GET every board page without a body gets.
   // 15 s, the transport's per-attempt timeout scout-ats gets from httpFetch: without it a hung
   // socket could run past the scout's deadline, which WORKDAY_DETAIL_MIN_REMAINING_MS assumes cannot happen.
-  return await fetchImpl(url, { headers: REQUEST_HEADERS, signal: AbortSignal.timeout(15_000) });
+  return await fetchImpl(url, { headers: REQUEST_HEADERS, signal: AbortSignal.timeout(BOARD_PAGE_TIMEOUT_MS) });
 }

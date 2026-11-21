@@ -604,3 +604,24 @@
     max-height: 45vh;
   }
 }
+
+/* --- Bulk-drop bar (parcel 8, 2026-11-21; moved out of inline styles in round 5) ---------- */
+
+/* "N selected", Clear selection and Drop N selected, on one line when they fit. No colour of its own: the buttons
+   bring theirs (button--reject's danger ink), so there is nothing here for light-dark() to switch. */
+.queue__bulk-bar {
+  /* Side by side... */
+  display: flex;
+  /* ...wrapping on a phone instead of pushing the page sideways. */
+  flex-wrap: wrap;
+  /* The count text centred on the buttons' line. */
+  align-items: center;
+  /* The same step the no-match row uses between a sentence and its button. */
+  gap: var(--gap-3);
+}
+
+/* The count: plain body text, with no paragraph margin, since the bar's gap does the spacing. */
+.queue__bulk-count {
+  /* Paragraph margins off. */
+  margin: 0;
+}

@@ -1,7 +1,8 @@
 # Drains the pre-screen backlog on demand: pages the whole `discovered` queue through the
 # normalizer (?limit=200), then the whole `deduped` queue through the screener (?limit=100).
 # Exists because nothing else ever calls these two functions at scale: the scouts screen at
-# insert time (scout-ats/index.ts:536-560), the web batch modal moves 10 rows per click
+# insert time (planScreenedApplications in supabase/functions/_shared/screen/screen-batch.ts,
+# called by both scouts; a line number here went stale, D15 2026-11-21), the web batch modal moves 10 rows per click
 # (apps/web/src/data/pipelineRunner.ts:57), and rows inserted BEFORE insert-time screening
 # sit at discovered/deduped forever. Same credential story as pregate-sweep.yml: the
 # app-user secrets live only in this repo's Actions secrets.

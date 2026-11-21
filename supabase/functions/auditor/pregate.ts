@@ -17,8 +17,10 @@
 
 // The matcher's pure verdict and its input shapes, reused rather than re-implemented.
 import { firstPreGateDrop, type PreGateDropCode, type PreGatePreferences } from "../matcher/tech-pregate.ts";
-// The Ashby location hints the work-auth gate reads, from the aliases BOARD_HINT_SELECT adds (pending R, 2026-11-20).
-import { boardHintsFromSelect, type BoardHintColumns } from "../_shared/screen/work-auth-gate.ts";
+// The Ashby location hints the work-auth gate reads (pending R, 2026-11-20), and the gate itself for the queue re-gate.
+import { boardHintsFromSelect, screenWorkAuth, type BoardHintColumns, type WorkAuthDropCode } from "../_shared/screen/work-auth-gate.ts";
+// The experience gate, asked directly by the queue re-gate (r4, 2026-11-21).
+import { screenRequiredExperience, type ExperienceDropCode } from "../_shared/screen/required-experience.ts";
 // The screener's same-ATS-posting key, so the auditor and the screener build it identically (W2, 2026-11-20).
 import { atsJobKeyOf } from "../_shared/filter/cascade.ts";
 // "Teja pasted this himself": such rows skip every automatic gate (the matcher's rule).
@@ -69,6 +71,57 @@ export function auditorPreGateDrop(job: AuditorJobEmbed | null, preferences: Pre
   }, preferences);
 }
 
+/* THE QUEUE RE-GATE'S OWN GATES (r4, 2026-11-21). firstPreGateDrop returns only the FIRST code (tech, then work-auth,
+   then experience). That is right for the `tailored` check, where every code means the same exit. The queue re-gate is
+   different: it may drop for work_auth ONLY (Teja, 2026-11-11) and report experience. So a row failing tech first had
+   its work-auth failure hidden, and the sweep kept it in Teja's queue. Here the two gates the sweep acts on are asked
+   directly, each with the same inputs firstPreGateDrop feeds them; tech is not asked, because the sweep never acts on
+   it. */
+export interface AuditorRegateGates {
+  // The work-auth objection, or null; independent of the tech gate.
+  readonly workAuth: { readonly code: WorkAuthDropCode; readonly reason: string } | null;
+  // The experience-ceiling objection, or null; independent of both other gates.
+  readonly experience: { readonly code: ExperienceDropCode; readonly reason: string } | null;
+}
+
+// Both verdicts for one queue row's job. Same refusals as auditorPreGateDrop: a missing job throws, a pasted job passes.
+export function auditorRegateGates(job: AuditorJobEmbed | null, preferences: PreGatePreferences): AuditorRegateGates {
+  // No job: the gates cannot judge, and a pass would be the fail-open (CLAUDE.md section 6).
+  if (job === null) throw new Error("auditor re-gate: no job embed for this row");
+  // Teja pasted it himself: no automatic gate applies.
+  if (isHumanPicked(job.discovered_via)) return { workAuth: null, experience: null };
+  // The work-auth gate, fed exactly what firstPreGateDrop feeds it (matcher/tech-pregate.ts:83-90).
+  const auth = screenWorkAuth(
+    // Title, place, body and the Ashby hints.
+    { title: job.title ?? "", locationRaw: job.location_raw, description: job.description_raw, board: boardHintsFromSelect(job) },
+    // The user's list; null keeps the gate open.
+    preferences.workAuthorizedCountries,
+    // The remote reading.
+    preferences.remoteLocationPolicy,
+  );
+  // The experience gate, fed exactly what firstPreGateDrop feeds it (matcher/tech-pregate.ts:94-99).
+  const experience = screenRequiredExperience(
+    // Title, body and the stored column (the parser fills in when it is null).
+    { title: job.title ?? "", description: job.description_raw, minExperienceYears: job.min_experience_years },
+    // The configured ceiling; null keeps.
+    preferences.experienceMaxYears,
+  );
+  // Each verdict on its own.
+  return {
+    // Dropped by work-auth, or not.
+    workAuth: auth.drop ? { code: auth.code, reason: auth.reason } : null,
+    // Over the ceiling, or not.
+    experience: experience.drop ? { code: experience.code, reason: experience.reason } : null,
+  };
+}
+
+// The job's same-posting key (provider + ATS id), or null when either part is missing. One builder for the
+// already-applied check and the queued-twin owner map, so the two can never key a posting differently.
+export function auditorAtsKey(job: AuditorJobEmbed): string | null {
+  // The screener's own key builder (null on a blank part or the 'other' provider).
+  return atsJobKeyOf(typeof job.ats_provider === "string" ? job.ats_provider : null, job.ats_job_id);
+}
+
 /* ALREADY APPLIED, RE-CHECKED (W2, 2026-11-20). The screener's same-ATS-posting check (fa315449) runs only when a row
    is inserted, so a retitled copy of an applied job inserted BEFORE the original was applied (Canonical 111d1ff4 vs
    8e9d58ce) reached the queue. The auditor is the last agent before a human, so it asks again against today's
@@ -84,7 +137,7 @@ export function auditorAlreadyAppliedDrop(job: AuditorJobEmbed | null, appliedKe
   // Teja pasted it himself: re-applying is then his choice, exactly as every other automatic gate skips it.
   if (isHumanPicked(job.discovered_via)) return null;
   // The key, or null when either part is missing (null never matches: a degenerate key would drop real jobs).
-  const key = atsJobKeyOf(typeof job.ats_provider === "string" ? job.ats_provider : null, job.ats_job_id);
+  const key = auditorAtsKey(job);
   // Matched: already applied or awaiting approval under another title or location.
   return key !== null && appliedKeys.has(key)
     ? { code: "already_applied", reason: `already applied or awaiting approval for this ATS posting under another title or location (${key})` }
