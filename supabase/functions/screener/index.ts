@@ -31,7 +31,7 @@ import { withRuleWarnings } from "../_shared/screen/run-summary.ts";
 // The shared `?application_id=` parser, so screener and normalizer refuse a bad id identically.
 import { parseApplicationIdParam } from "../_shared/http/application-id.ts";
 // The queue rules for held rows (2026-11-12): fetch only rows with text, and never write a held verdict.
-import { DEDUPED_QUEUE_SELECT, queueActionFor } from "./queue.ts";
+import { DEDUPED_QUEUE_SELECT, screenVerdictFor } from "./queue.ts";
 
 // Default batch processing size per run.
 const DEFAULT_BATCH_SIZE = 50;
@@ -218,13 +218,11 @@ Deno.serve(withErrorBoundary("screener", async (req: Request): Promise<Response>
 
     const insertResult = plan.inserts[0];
     if (!insertResult) continue;
-    // What to do with it: a pass or a drop is persisted; a 'discovered' plan (never produced today) is left unwritten.
-    const action = queueActionFor(insertResult);
-    // Nothing to write for a non-verdict; the row stays at deduped.
-    if (action.kind === "hold") continue;
+    // Its verdict: the planner's type is a pass or a drop only (round 7, no hold branch), so every row is written.
+    const verdict = screenVerdictFor(insertResult);
 
     // One write path for both verdicts: drop_reason first, status second, via the RPC.
-    const written = await persistScreenVerdict(db, app.id, action.verdict);
+    const written = await persistScreenVerdict(db, app.id, verdict);
 
     // A refused write leaves the row at `deduped` for the next run, and is counted.
     if (!written.ok) {

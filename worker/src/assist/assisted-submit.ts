@@ -19,6 +19,8 @@ import type { FormUrlResolver } from '../form-url.ts';
 // The verdict union, so the refusal wording below can switch on every arm.
 import type { RobotsVerdict } from '../../../packages/master-robots/src/index.ts';
 import { guardedAdvance, type StatusWriter } from '../guarded-advance.ts';
+// The typed DB refusal for a second copy of an already-applied posting (round 7, 2026-11-21).
+import { DuplicatePostingAppliedError } from '../duplicate-posting.ts';
 import { planFill } from '../plan-fill.ts';
 import { planResumeAttachment, resumeFileName } from '../plan-resume-attachment.ts';
 // G2: the kit's drift check, reused so both human paths word an identity swap the same way.
@@ -165,7 +167,10 @@ export type AssistOutcome =
   // No usable answer; the row stays at blocked_needs_human with nothing more written.
   | { readonly kind: 'left_blocked' }
   // The answer was usable but the write threw; the row stays at blocked_needs_human.
-  | { readonly kind: 'record_failed'; readonly error: string };
+  | { readonly kind: 'record_failed'; readonly error: string }
+  // Round 7 (2026-11-21): the DB refused the move into applying because this posting was already
+  // applied to. Nothing written, lease released, row left at `approved`.
+  | { readonly kind: 'duplicate_already_applied' };
 
 /** Stringify anything thrown, since `catch` values are `unknown`. */
 // Module-private: nothing outside needs error formatting policy.
@@ -281,12 +286,26 @@ export async function runAssisted(deps: AssistDeps): Promise<AssistOutcome> {
     // The ONLY entry to `applying`. From here until the park write, a crash would leave
     // the row at `applying`, which the sweeper routes to needs_verification; so the
     // window holds only the fill and nothing else.
-    await guardedAdvance(gateway, {
-      applicationId,
-      from: 'approved',
-      to: 'applying',
-      agent: WORKER_AGENT,
-    });
+    // Round 7 (2026-11-21): the DB refuses a second copy of an already-applied posting here (23505,
+    // typed by the gateway). Teja is at the terminal, so: one plain line and a clean outcome value, not a
+    // stack trace. Nothing moved, so `advanced` stays false and `finally` hands the lease back; the row
+    // stays approved. Every other error propagates as before.
+    try {
+      // The guarded edge, unchanged.
+      await guardedAdvance(gateway, {
+        applicationId,
+        from: 'approved',
+        to: 'applying',
+        agent: WORKER_AGENT,
+      });
+    } catch (error) {
+      // Only the typed refusal is handled here.
+      if (!(error instanceof DuplicatePostingAppliedError)) throw error;
+      // The one line, naming the role so Teja knows which posting it was.
+      log(`already applied to this posting (${row.company} ${row.title}), row left approved`);
+      // A value, so the CLI prints it plainly.
+      return { kind: 'duplicate_already_applied' };
+    }
     // Set only after the write succeeded, so a failed write still releases the lease.
     advanced = true;
 

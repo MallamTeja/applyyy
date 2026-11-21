@@ -515,6 +515,16 @@ async function runLivenessSweep(db: Db, userId: string, deadline: Deadline, runI
       // Done for this board.
       results.push({ board: name, status: "ok", queue_closed: closed });
     } catch (e: unknown) {
+      // ROBOTS DID NOT ANSWER (429/5xx, r10 2026-11-21): the Scan's rule (the catch near "ROBOTS DID NOT ANSWER" below),
+      // now in the sweep too. The board was never read, so it is no evidence and no failure: "skipped", which the close
+      // counts neither as attempted nor as failed. The 08:46 sweep logged 9 Workday boards as failed for a Cloudflare 503.
+      // A real Disallow, a 403 or a non-robots (HTML challenge) answer is the parent type and stays "failed", as in the Scan.
+      if (e instanceof RobotsUnavailableError) {
+        // Named with the status, so the run's report says why it was skipped.
+        results.push({ board: name, status: "skipped", queue_closed: 0, reason: `robots.txt unavailable (HTTP ${e.status ?? "429 Retry-After"}), retry next run: ${e.message}` });
+        // Next board.
+        continue;
+      }
       // A thrown transport error (robots refusal, HTTP status, timeout): this board only.
       results.push({ board: name, status: "failed", queue_closed: 0, reason: e instanceof Error ? e.message : String(e) });
     }

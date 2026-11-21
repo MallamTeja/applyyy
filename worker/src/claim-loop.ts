@@ -180,6 +180,9 @@ export interface RunSummary {
   // Rows on a board the applier must not open (Workday, 2026-11-01). Its own tally for the
   // same reason: never opened, so never sent, and not a form a human must finish.
   readonly atsUnsupported: number;
+  // Round 7 (2026-11-21): rows the DB refused at the move into applying because this user already
+  // applied to the same posting. Its own tally: a certain no-send, left at approved, never an error.
+  readonly duplicateAlreadyApplied: number;
   readonly errors: number;
   // Always populated, because "we did 12 today" must be distinguishable from
   // "the queue only had 12" and from "the kill switch was off" (§14).
@@ -317,6 +320,8 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
   let robotsRefused = 0;
   // Counted apart from blocked, so a Workday park never reads as an unanswered form.
   let atsUnsupported = 0;
+  // Counted apart from errors and unknowns: a duplicate of an applied posting is a certain no-send.
+  let duplicateAlreadyApplied = 0;
   let errors = 0;
   let stoppedReason = 'queue drained';
   // Its closed twin; every place that ends the run sets both (B1).
@@ -651,6 +656,13 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
           else if (outcome.kind === 'ats_unsupported') atsUnsupported += 1;
           // Named rather than a bare else, so a new outcome kind cannot be miscounted as unknown.
           else if (outcome.kind === 'submit_outcome_unknown') outcomeUnknown += 1;
+          // Round 7: refused before the click, so counted and NAMED in the run log, and (below) it trips no breaker.
+          else if (outcome.kind === 'duplicate_already_applied') {
+            // Its own tally for the run summary.
+            duplicateAlreadyApplied += 1;
+            // One line naming the row and the cause, so the log says why this row was skipped.
+            console.log(`[applyy] ${outcome.reason}`);
+          }
           // Exhaustiveness: a new ApplyOutcome arm fails to compile here until it is counted.
           else assertNever(outcome);
 
@@ -809,6 +821,8 @@ export async function runApplierBatch(input: ClaimLoopInput): Promise<RunSummary
       robotsRefused,
       // Beside robotsRefused: the other "never opened, never sent" tally.
       atsUnsupported,
+      // Round 7: duplicates of an already-applied posting, refused by the DB before the click.
+      duplicateAlreadyApplied,
       errors,
       stoppedReason,
       // B1: the closed kind beside the text.

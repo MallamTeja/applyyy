@@ -25,6 +25,8 @@ import {
   type ResumeRenderer,
   type SubmitResult,
 } from '../src/apply-one.ts';
+// The typed refusal the gateway throws for a second copy of an applied posting (round 7).
+import { DuplicatePostingAppliedError } from '../src/duplicate-posting.ts';
 
 // The robots gate is REQUIRED on the real function. These tests are about the form, not
 // robots, so they get an "allow" by default; a test can still pass its own checkRobots.
@@ -1538,5 +1540,68 @@ describe('applyToOne — a page with no form fields (W5)', () => {
     expect(submit).toHaveBeenCalledTimes(1);
     // The full legal path.
     expect(advances.map((advance) => advance.to)).toEqual(['applying', 'applied']);
+  });
+});
+
+// Round 7 (2026-11-21): the DB refuses a SECOND copy of an already-applied posting at the move into
+// 'applying' (23505; Canonical greenhouse 5150422 went out twice). The applier must take that as a
+// certain no-send: nothing clicked, lease handed back with the reason, row left at 'approved'.
+describe('applyToOne — a duplicate of an already-applied posting', () => {
+  it('a 23505 refusal at approved->applying is duplicate_already_applied: no submit, lease released, row left approved', async () => {
+    // The page; its submit must never run.
+    const { page, submit } = fakePage();
+    // Every status write the applier attempted, and every release with its reason.
+    const attempted: string[] = [];
+    const releases: Array<{ id: string; reason: string }> = [];
+    // A gateway that refuses the applying move the way the production gateway maps the DB's 23505.
+    const gateway: ApplierGateway = {
+      // The move into applying is refused; anything else would be recorded (and asserted absent).
+      advanceStatus: async (id, to) => {
+        // Recorded first, so the assertion sees the attempt.
+        attempted.push(to);
+        // The DB refusal, typed by the gateway.
+        if (to === 'applying') throw new DuplicatePostingAppliedError(id, 'application already applied for this posting');
+      },
+      // The lease release, with its reason.
+      releaseClaim: async (id, reason) => {
+        releases.push({ id, reason });
+      },
+      // Present so the literal satisfies the port.
+      uploadScreenshot: async () => 'screens/app-1.png',
+      uploadResume: async () => 'resumes/app-1.pdf',
+      setArtifactPaths: async () => {},
+    };
+    // A live run, so the applier walks to the applying move.
+    const outcome = await applyToOne({ row, page, gateway, answers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render });
+    // Its own outcome kind.
+    expect(outcome.kind).toBe('duplicate_already_applied');
+    // Certain no-send: the click never happened.
+    expect(submit).not.toHaveBeenCalled();
+    // Only the refused move was attempted: no failed, no park, no retry.
+    expect(attempted).toEqual(['applying']);
+    // The lease is handed back once, with the reason the run log and the event row carry.
+    expect(releases).toEqual([{ id: 'app-1', reason: expect.stringMatching(/duplicate posting already applied/) }]);
+  });
+
+  it('any OTHER error on the applying move still throws, as today', async () => {
+    // The page; never submitted here either.
+    const { page, submit } = fakePage();
+    // A gateway whose applying move fails for an unrelated reason.
+    const gateway: ApplierGateway = {
+      // A plain error, e.g. the agent-key refusal.
+      advanceStatus: async (_id, to) => {
+        // Only the applying move fails.
+        if (to === 'applying') throw new Error('advanceStatus failed: agent key required');
+      },
+      // Present so the literal satisfies the port.
+      releaseClaim: async () => {},
+      uploadScreenshot: async () => 'screens/app-1.png',
+      uploadResume: async () => 'resumes/app-1.pdf',
+      setArtifactPaths: async () => {},
+    };
+    // Propagates to the claim loop, whose catch counts it and trips the breaker (unchanged).
+    await expect(applyToOne({ row, page, gateway, answers, env: { DRY_RUN: 'false' }, renderResume: fakeRenderer().render })).rejects.toThrow(/agent key required/);
+    // And nothing was clicked.
+    expect(submit).not.toHaveBeenCalled();
   });
 });

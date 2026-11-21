@@ -13,6 +13,8 @@ import {
   type AssistGateway,
   type AssistRow,
 } from '../src/assist/assisted-submit.ts';
+// The typed refusal for a second copy of an applied posting (round 7, 2026-11-21).
+import { DuplicatePostingAppliedError } from '../src/duplicate-posting.ts';
 // Type only: describes the form the fake page returns.
 import type { FormField } from '../src/extract-fields.ts';
 // A valid snapshot that satisfies the real type (see the fixture's own header).
@@ -485,5 +487,32 @@ describe('runAssisted robots gate and identity (G1, G2)', () => {
     expect(outcome).toMatchObject({ kind: 'refused' });
     expect(t.gateway.claim).not.toHaveBeenCalled();
     expect(t.events).not.toContain('goto');
+  });
+});
+
+// Round 7 (2026-11-21): the DB refuses a second copy of an already-applied posting at the move into
+// 'applying' (23505, mapped by the gateway to DuplicatePostingAppliedError). In the assisted flow Teja is
+// at the terminal: one plain line, a clean outcome value (no stack trace), the lease back, the row approved.
+describe('runAssisted: a duplicate of an already-applied posting', () => {
+  it('prints one clear line, writes nothing, releases the lease and returns duplicate_already_applied', async () => {
+    // The standard fakes.
+    const { deps, events, advance, lines, submit } = setup();
+    // The applying move is refused the way the production gateway maps the DB's 23505.
+    advance.mockImplementation(async (id: string, to: string, agent: string) => {
+      // Recorded like every other attempt.
+      events.push(`advance:${to}:${agent}`);
+      // The typed refusal for this move.
+      if (to === 'applying') throw new DuplicatePostingAppliedError(id, 'application already applied for this posting');
+    });
+    // The run; it must return, not throw.
+    const outcome = await runAssisted(deps);
+    // The outcome the CLI prints as a value.
+    expect(outcome).toEqual({ kind: 'duplicate_already_applied' });
+    // Exactly one line for Teja, naming company and title, saying the row stays approved.
+    expect(lines.filter((l) => /already applied/.test(l))).toEqual(['already applied to this posting (Acme Engineer), row left approved']);
+    // Only the refused move was attempted, then the lease was released.
+    expect(events.filter((e) => e.startsWith('advance') || e === 'release')).toEqual(['advance:applying:applier', 'release']);
+    // Nothing sent.
+    expect(submit).not.toHaveBeenCalled();
   });
 });

@@ -24,6 +24,8 @@
 // MasterProfile is type-only: the planner needs the shape of identity facts, not a runtime dependency.
 import type { AgentName, AnswerBankRow, AtsProvider, BlockReason, MasterProfile, ResolvedResume } from '@applyy/shared-types';
 import { guardedAdvance, type StatusWriter } from './guarded-advance.ts';
+// The typed DB refusal for a second copy of an already-applied posting (round 7, 2026-11-21).
+import { DuplicatePostingAppliedError } from './duplicate-posting.ts';
 // isEeoQuestion: the planner's own EEO test, reused by the fill loop's optional-EEO degrade.
 import { isEeoQuestion, planFill, questionKey, type FillBlocker } from './plan-fill.ts';
 import { resolveSubmissionMode, type SubmissionEnv } from './submission-mode.ts';
@@ -620,7 +622,11 @@ export type ApplyOutcome =
   | { readonly kind: 'blocked'; readonly reason: BlockReason; readonly blockers: readonly ApplicationBlocker[] }
   // The submit threw. We do NOT know whether it landed, so no status is
   // written and the sweeper is left to route the row to a human.
-  | { readonly kind: 'submit_outcome_unknown'; readonly error: string };
+  | { readonly kind: 'submit_outcome_unknown'; readonly error: string }
+  // Round 7 (2026-11-21): the DB refused the move into `applying` because this user already applied
+  // to the same posting (provider + ats_job_id). Refused BEFORE the click, so a certain no-send:
+  // lease handed back, row left at `approved`, and it trips no breaker.
+  | { readonly kind: 'duplicate_already_applied'; readonly reason: string };
 
 export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> {
   // Defaulted to null here so planFill below always receives a definite value.
@@ -1031,12 +1037,30 @@ export async function applyToOne(input: ApplyToOneInput): Promise<ApplyOutcome> 
   // ---- write below. Nothing between the two may touch the network except --
   // ---- the click itself, and the bounded confirmation capture. ------------
 
-  await guardedAdvance(gateway, {
-    applicationId: row.id,
-    from: 'approved',
-    to: 'applying',
-    agent: ACTING_AGENT,
-  });
+  // The move into the window. Caught for ONE refusal only (round 7, 2026-11-21): the DB's
+  // one-application-per-posting trigger refusing a second copy of an already-applied posting
+  // (Canonical greenhouse 5150422 went out twice). The row did not move, nothing was clicked,
+  // so it is a certain no-send: hand the lease back and leave the row at 'approved'. No failed
+  // write, no retry. Every other error propagates exactly as before.
+  try {
+    // The guarded edge, unchanged.
+    await guardedAdvance(gateway, {
+      applicationId: row.id,
+      from: 'approved',
+      to: 'applying',
+      agent: ACTING_AGENT,
+    });
+  } catch (error) {
+    // Only the typed refusal; anything else is today's failure path in the claim loop.
+    if (!(error instanceof DuplicatePostingAppliedError)) throw error;
+    // The reason the release event and the run log both carry, naming the row.
+    // (The error's message already opens with "duplicate posting already applied: application <id> …".)
+    const reason = `${error.message}; row left approved`;
+    // Lease back, status untouched: the release RPC never writes status.
+    await gateway.releaseClaim(row.id, reason);
+    // Its own outcome, so the claim loop counts it apart and trips no breaker.
+    return { kind: 'duplicate_already_applied', reason };
+  }
 
   // What the page showed after the click. Declared outside the try so the
   // branches below read one definite value.

@@ -29,6 +29,8 @@ import type { AgentName, ApplicationStatus, AtsProvider, MasterProfile, Resolved
 // UnusableClaim is the W4 shape for a claimed row with nowhere to go (lease kept, never opened).
 import type { RunGateway, UnusableClaim } from './claim-loop.ts';
 import type { ClaimedApplication } from './apply-one.ts';
+// The typed refusal for a second copy of an already-applied posting, and the errcode it maps (round 7).
+import { DuplicatePostingAppliedError, DUPLICATE_POSTING_ERRCODE } from './duplicate-posting.ts';
 // B2 (P1-6): the auditor's config loader and job shape, reused rather than re-implemented.
 // The auditor's job-embed shape, which pregate.ts still owns.
 import type { AuditorJobEmbed } from '../../supabase/functions/auditor/pregate.ts';
@@ -415,15 +417,24 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
       // reconnects (a pool, a retry, a re-auth) drops it, and every subsequent
       // status write would fail 42501. Going through the RPC means the setting
       // is re-established on every call rather than assumed from setup.
-      unwrap(
-        await client.rpc('advance_application_status', {
-          p_application_id: applicationId,
-          p_to_status: to,
-          p_agent: agent,
-          p_detail: detail ?? {},
-        }),
-        'advanceStatus',
-      );
+      const result = await client.rpc('advance_application_status', {
+        p_application_id: applicationId,
+        p_to_status: to,
+        p_agent: agent,
+        p_detail: detail ?? {},
+      });
+      // ROUND 7 (2026-11-21): the one refusal the applier must NOT treat as a failure. The DB's
+      // one-application-per-posting trigger answers a second copy entering 'applying' with 23505.
+      // Matched on BOTH the code and the target, because the trigger guards only this move: a 23505
+      // anywhere else is some other unique violation and keeps today's plain throw below.
+      const errCode = (result.error as { code?: unknown } | null)?.code;
+      // The closed shape: exactly the errcode, exactly the move.
+      if (result.error && to === 'applying' && errCode === DUPLICATE_POSTING_ERRCODE) {
+        // Typed, so apply-one branches on the class (certain no-send) instead of a message.
+        throw new DuplicatePostingAppliedError(applicationId, result.error.message);
+      }
+      // Every other result: unchanged (throw on error, as unwrap always has).
+      unwrap(result, 'advanceStatus');
     },
 
     // Delegates to the one local implementation, which the claim also uses.

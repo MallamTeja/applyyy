@@ -7,6 +7,8 @@
 // TypeScript types do not currently describe.
 import { describe, expect, it } from 'vitest';
 import { createSupabaseGateway, type SupabaseLike } from '../src/supabase-gateway.ts';
+// The typed refusal for a second copy of an already-applied posting (round 7, 2026-11-21).
+import { DuplicatePostingAppliedError } from '../src/duplicate-posting.ts';
 // The gate's own reader of the hint aliases: the test proves the claimed row feeds it, not just carries keys.
 import { boardHintsFromSelect } from '../../supabase/functions/_shared/screen/work-auth-gate.ts';
 
@@ -191,6 +193,41 @@ describe('createSupabaseGateway', () => {
     await expect(gateway.advanceStatus('app-1', 'applying', 'applier')).rejects.toThrow(
       /transition refused/,
     );
+  });
+
+  // 2026-11-21 (round 7): the DB refuses a SECOND copy of an already-applied posting entering
+  // 'applying' with errcode 23505 (migration <ts>_guard_one_application_per_posting.sql; Canonical
+  // greenhouse 5150422 went out twice, 11-11 and 11-18). supabase-js RETURNS that as { error: { code } };
+  // the gateway must hand the applier a typed error it can branch on, not a message to regex.
+  it('a 23505 on the move into applying becomes DuplicatePostingAppliedError', async () => {
+    // Exactly the shape supabase-js returns for a unique_violation raised by the trigger.
+    const { client } = fakeClient({
+      rpc: async () => ({ data: null, error: { message: 'application already applied for this posting', code: '23505' } }),
+    });
+    // The production gateway over that client.
+    const gateway = createSupabaseGateway(client, { userId: 'u1' });
+    // Caught, so the type and the message can both be asserted.
+    const err = await gateway.advanceStatus('app-1', 'applying', 'applier').then(() => null, (e: unknown) => e);
+    // The typed refusal, naming the row.
+    expect(err).toBeInstanceOf(DuplicatePostingAppliedError);
+    expect((err as DuplicatePostingAppliedError).applicationId).toBe('app-1');
+  });
+
+  it('a 23505 on any OTHER move, or another code on applying, keeps the plain error', async () => {
+    // The trigger only guards the move into applying, so a 23505 elsewhere is some other unique violation.
+    const dup = fakeClient({ rpc: async () => ({ data: null, error: { message: 'duplicate key', code: '23505' } }) });
+    // The same code on the park edge.
+    const parked = await createSupabaseGateway(dup.client, { userId: 'u1' }).advanceStatus('app-1', 'blocked_needs_human', 'applier').then(() => null, (e: unknown) => e);
+    // Thrown as before, and not the duplicate type.
+    expect(parked).toBeInstanceOf(Error);
+    expect(parked).not.toBeInstanceOf(DuplicatePostingAppliedError);
+    // A different code on the applying move (the agent-key refusal, 42501).
+    const denied = fakeClient({ rpc: async () => ({ data: null, error: { message: 'agent key required', code: '42501' } }) });
+    // Same: today's handling.
+    const refused = await createSupabaseGateway(denied.client, { userId: 'u1' }).advanceStatus('app-1', 'applying', 'applier').then(() => null, (e: unknown) => e);
+    // Plain error, message preserved.
+    expect(refused).not.toBeInstanceOf(DuplicatePostingAppliedError);
+    expect(String((refused as Error).message)).toMatch(/agent key required/);
   });
 
   it('reports the session expiry in epoch SECONDS', async () => {

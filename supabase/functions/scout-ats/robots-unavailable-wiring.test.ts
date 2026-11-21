@@ -55,3 +55,24 @@ describe("scout-ats: a robots 429/5xx leaves consecutive_failures unchanged", ()
     assert.match(branch.slice(0, branch.indexOf("continue;")), /status: "skipped"/);
   });
 });
+
+// R10 (2026-11-21): the liveness sweep (?mode=liveness) counted the same robots 429/5xx as a FAILED board. The 08:46
+// sweep logged 9 "failed" Workday boards (barclays "robots.txt returned HTTP 503", Cloudflare), inflating error_count
+// and, if every board refused, turning the run red. The sweep now skips them exactly as the Scan does.
+describe("scout-ats liveness sweep: a robots 429/5xx is skipped, not failed", () => {
+  // The sweep function's body.
+  const sweepStart = source.indexOf("async function runLivenessSweep(");
+  // Its board loop's catch (the first `} catch (e: unknown) {` inside the sweep).
+  const sweepCatch = source.indexOf("} catch (e: unknown) {", sweepStart);
+  // The sweep's close, after its loop.
+  const sweepClose = source.indexOf("// 4. THE FEED PASS", sweepStart);
+  // Non-vacuous: the catch is inside the sweep, before its feed pass.
+  assert.ok(sweepStart > 0 && sweepCatch > sweepStart && sweepClose > sweepCatch, `sweep ${sweepStart}, catch ${sweepCatch}, close ${sweepClose}`);
+  // The catch body.
+  const catchBody = source.slice(sweepCatch, sweepClose);
+
+  it("the sweep's catch branches on RobotsUnavailableError FIRST and reports the board as skipped", () => {
+    // The type check, then a skipped result and the next board, before the generic failed result.
+    assert.match(catchBody, /if \(e instanceof RobotsUnavailableError\) \{[\s\S]*?status: "skipped"[\s\S]*?continue;[\s\S]*?status: "failed"/);
+  });
+});

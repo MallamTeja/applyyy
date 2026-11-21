@@ -24,6 +24,8 @@ import {
   // The fake gateway's contract.
   type RunGateway,
 } from '../src/claim-loop.ts';
+// The typed refusal for a second copy of an applied posting (round 7, 2026-11-21).
+import { DuplicatePostingAppliedError } from '../src/duplicate-posting.ts';
 
 // checkRobots is REQUIRED on the real loop. These tests are about claiming and pacing, so
 // they default to "allow"; a robots test passes its own (the spread lets it win).
@@ -817,6 +819,46 @@ describe('submit cap and circuit breaker', () => {
   });
 
 
+  // Round 7 (2026-11-21): a duplicate of an already-applied posting is refused by the DB at the move into
+  // applying (23505), BEFORE any click. That is a certain no-send and it repeats for nothing else, so it must
+  // never trip the breaker: N duplicates in a row still let the run reach the real rows behind them.
+  it('the breaker does NOT trip after N duplicates: they are counted, left approved, and the next rows submit', async () => {
+    // Four approved rows; the first two are second copies of postings already applied to.
+    const { gateway, advances, releases } = capQueueGateway(ids(4));
+    // The recording writer, kept so the wrapper below still records every attempt.
+    const recordingAdvance = gateway.advanceStatus;
+    // The production gateway's mapping of the DB's 23505, for those two rows only.
+    gateway.advanceStatus = async (id, to, agent, detail) => {
+      // Recorded like every other attempt, so the assertions below see it.
+      await recordingAdvance(id, to, agent, detail);
+      // The refusal the trigger raises for a duplicate entering applying.
+      if (to === 'applying' && (id === 'app-1' || id === 'app-2')) throw new DuplicatePostingAppliedError(id, 'application already applied for this posting');
+    };
+    // Every page confirms, so only the breaker or the cap could stop the run early.
+    const { openPage } = scriptedPages();
+    // Live, with a cap high enough that nothing but a wrong breaker could stop it.
+    const summary = await runApplierBatch({ gateway, openPage, renderResume, env: { DRY_RUN: 'false', APPLY_MAX_SUBMITS: '10' }, clock: frozenClock });
+    // Both duplicates counted under their own name, never as errors or unknowns.
+    expect(summary.duplicateAlreadyApplied).toBe(2);
+    expect(summary.errors).toBe(0);
+    expect(summary.outcomeUnknown).toBe(0);
+    // The two real rows behind them went out.
+    expect(summary.submitted).toBe(2);
+    // No breaker: the run drained the queue.
+    expect(summary.stoppedReason).not.toMatch(/circuit breaker/);
+    expect(summary.stopKind).toBe('queue_drained');
+    // The duplicates never moved past the refused applying attempt (left approved).
+    expect(advances.filter((a) => a.id === 'app-1' || a.id === 'app-2').map((a) => a.to)).toEqual(['applying', 'applying']);
+    // Each duplicate's lease was handed back naming why; the next claim returned it (oldest approved row),
+    // the existing re-claim guard held it, and it was released once more at run end, as dry-run rows are.
+    expect(releases.filter((r) => r.id === 'app-1' || r.id === 'app-2')).toEqual([
+      // The duplicate refusal, per row, in claim order.
+      ...['app-1', 'app-2'].map((id) => ({ id, reason: expect.stringMatching(/^duplicate posting already applied: .*row left approved$/) })),
+      // The re-claim guard's end-of-run release: never attempted twice in one run.
+      ...['app-1', 'app-2'].map((id) => ({ id, reason: 'already processed earlier in this run' })),
+    ]);
+  });
+
   it('the first unknown outcome stops further claims', async () => {
     // An unconfirmed submit is the outcome a low reCAPTCHA score produces on EVERY
     // row; continuing would park the whole queue at needs_verification.
@@ -1423,7 +1465,7 @@ describe('B2: a live run without the re-check loader is refused (2026-11-05 revi
 // the kill switch, the daily cap, a dry run or zero progress.
 describe('shouldRedispatchDrain', () => {
   // A live run's summary, overridable per case.
-  const base = { runId: 'r', claimed: 25, submitted: 3, blocked: 22, dryRun: 0, outcomeUnknown: 0, robotsRefused: 0, atsUnsupported: 0, errors: 0, stoppedReason: 'x', live: true } as const;
+  const base = { runId: 'r', claimed: 25, submitted: 3, blocked: 22, dryRun: 0, outcomeUnknown: 0, robotsRefused: 0, atsUnsupported: 0, duplicateAlreadyApplied: 0, errors: 0, stoppedReason: 'x', live: true } as const;
 
   it('re-dispatches only on batch_cap or run_budget, live, with at least one submit', () => {
     // Its two triggers.

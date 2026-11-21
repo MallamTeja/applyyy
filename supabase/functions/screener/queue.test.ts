@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 // The screener's entry file, read as text: it calls Deno.serve on import, so its query cannot be run here.
 import { readFileSync } from "node:fs";
 // Units under test.
-import { DEDUPED_QUEUE_SELECT, queueActionFor } from "./queue.ts";
+import { DEDUPED_QUEUE_SELECT, screenVerdictFor } from "./queue.ts";
 
 test("queue: the deduped select embeds the job PLAINLY, so a row with no job is fetched and failed, never hidden", () => {
   // A plain embed (no !inner, which would drop the application row when its job is missing).
@@ -34,11 +34,18 @@ test("queue: the screener's deduped query fetches no-description rows too (2026-
   assert.match(query, /\.eq\("status", "deduped"\)\s*(?:\/\/[^\n]*\n\s*)*\.match\(/);
 });
 
-test("queue: a 'discovered' plan (the scouts' unscreened fallback status) is never written; pass and drop map to their verdicts", () => {
-  // Not a screener verdict: leave the row at deduped.
-  assert.deepEqual(queueActionFor({ job_id: "j", status: "discovered", drop_reason: null }), { kind: "hold" });
-  // Passed.
-  assert.deepEqual(queueActionFor({ job_id: "j", status: "passed_filters", drop_reason: null }), { kind: "persist", verdict: { status: "passed_filters", reason: null } });
+// Round 7 (2026-11-21): the planner's type cannot hold 'discovered' (screen-batch.ts PlannedInsertStatus, proven at compile
+// time there), so the "hold" branch is gone and every planned row maps straight to a verdict.
+test("queue: a planned pass and a planned drop map to their verdicts, the drop carrying its rule", () => {
+  // Passed: no reason.
+  assert.deepEqual(screenVerdictFor({ job_id: "j", status: "passed_filters", drop_reason: null }), { status: "passed_filters", reason: null });
   // Dropped, with its reason.
-  assert.deepEqual(queueActionFor({ job_id: "j", status: "dropped_filter", drop_reason: "tech_gate" }), { kind: "persist", verdict: { status: "dropped_filter", reason: "tech_gate" } });
+  assert.deepEqual(screenVerdictFor({ job_id: "j", status: "dropped_filter", drop_reason: "tech_gate" }), { status: "dropped_filter", reason: "tech_gate" });
+});
+
+test("queue: the screener writes every planned row, with no hold branch left in its loop", () => {
+  // The entry file, EOL-normalised.
+  const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  // The planned row goes straight to a verdict and on to the one write path.
+  assert.match(source, /const verdict = screenVerdictFor\(insertResult\);\s*(?:\/\/[^\n]*\n\s*)*const written = await persistScreenVerdict\(db, app\.id, verdict\);/);
 });

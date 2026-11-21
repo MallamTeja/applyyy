@@ -59,11 +59,35 @@ import type { FilterRuleRow, JobInsert, JobRow } from "../contracts/shared-types
 // via the orchestrator, plan B). It is still upstream of the approval gate and inside the insert guard's allowlist, so
 // the hole described above stays closed. Every reader of this union must now say what it does with a held row:
 // the scouts insert it as is; the screener (screener/queue.ts) leaves the row where it is.
-// UPDATED 2026-11-21 (W1): nothing produces 'discovered' here since 2026-11-18 and the held fields are gone. The member
-// stays only because screener/queue.ts (another owner) still names it; narrow the union together with that reader.
-export type ScreenedInsertStatus = "passed_filters" | "dropped_filter" | "discovered";
+// UPDATED 2026-11-21 (round 7; corrects a W1 comment that said nothing produces 'discovered'): the PLANNER never
+// emits it (no hold since 2026-11-18), and its own type below now cannot hold it. The scouts' UNSCREENED FALLBACK
+// still inserts it when the screen context fails to load (scout-ats/index.ts, worker cli/scout.ts, scout/remote-run.ts),
+// so this wider union stays for that insert path, and only there.
+export type ScreenedInsertStatus = PlannedInsertStatus | "discovered";
 
-// One `applications` row, born already carrying its verdict.
+// What the PLANNER may decide (round 7, 2026-11-21): a pass or a drop, nothing else. A closed union, so a planner row
+// at 'discovered' is a compile error, not a comment (CLAUDE.md section 6); the screener maps it to a verdict with no
+// "hold" branch to fall into.
+export type PlannedInsertStatus = "passed_filters" | "dropped_filter";
+
+// One planned `applications` row, born already carrying its verdict: what planScreenedApplications returns.
+export interface PlannedApplicationInsert {
+  // The job this queues. The row is created after the jobs upsert, so the id is real.
+  readonly job_id: string;
+  // The planner's two verdicts only.
+  readonly status: PlannedInsertStatus;
+  // NAMES THE RULE (see ScreenedApplicationInsert.drop_reason); null on a pass.
+  readonly drop_reason: string | null;
+}
+
+// COMPILE-TIME PROOF that the planner type cannot hold 'discovered'. Type-only (no runtime code); deno check covers this
+// file (test files are excluded from it), so if 'discovered' is ever added to PlannedInsertStatus the directive below
+// goes unused and the check FAILS. Extends<A, B> compiles only when A is assignable to B.
+type Extends<A extends B, B> = A;
+// @ts-expect-error 'discovered' is not a PlannedInsertStatus: the planner cannot produce a held row.
+type _PlannerCannotHoldDiscovered = Extends<"discovered", PlannedInsertStatus>;
+
+// One `applications` row as a SCOUT inserts it: a planned row, or the unscreened fallback at 'discovered'.
 export interface ScreenedApplicationInsert {
   // The job this queues. The row is created after the jobs upsert, so the id is real.
   readonly job_id: string;
@@ -113,7 +137,8 @@ export interface ScreenPreferences extends TechGatePreferences {
 export interface ScreenedBatchPlan {
   // Every job gets a row — passed or dropped. A drop is RECORDED, never omitted, or the
   // dashboard could not explain why a posting visible in `jobs` never reached the queue.
-  readonly inserts: readonly ScreenedApplicationInsert[];
+  // The planner's type (round 7): a pass or a drop, never 'discovered'.
+  readonly inserts: readonly PlannedApplicationInsert[];
   // The dropped ones with their prose, for the run summary.
   readonly dropped: readonly DroppedJob[];
   // Misconfigurations, accumulated rather than thrown: a broken rule must be visible
@@ -195,7 +220,7 @@ export function toScreenableJob(row: JobInsert | JobRow): ScreenableJob {
 // scout impersonate it, or wait for it, just to reach a verdict already in hand. It would
 // also be manufacturing a 'discovered' moment that never meaningfully existed. INSERTs
 // are allowlisted to discovered/passed_filters/dropped_filter (20260917130000), and
-// ScreenedInsertStatus (:44) keeps this module to the last two. Corrected 2026-10-08:
+// PlannedInsertStatus keeps the planner to the last two. Corrected 2026-10-08:
 // this previously said nothing writes 'deduped' and that the Normalizer does not exist.
 // A posting the title blocklist rejected was never a candidate application; creating the
 // row already carrying its verdict is the truer record. See docs/screener/.
@@ -211,7 +236,7 @@ export function planScreenedApplications(
 ): ScreenedBatchPlan {
   // Accumulators. Built as mutable locals and returned as readonly, so a caller cannot
   // reach back in and edit a plan after it was decided.
-  const inserts: ScreenedApplicationInsert[] = [];
+  const inserts: PlannedApplicationInsert[] = [];
   const dropped: DroppedJob[] = [];
   // A Set, because nine rules over fifty jobs would otherwise repeat the same
   // "title_blocklist has no blocked_titles configured" fifty times and bury the signal.
