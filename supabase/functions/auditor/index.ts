@@ -53,6 +53,8 @@ import { supabaseScreenQueries } from "../_shared/screen/supabase-queries.ts";
 
 // The approval-queue re-gate (2026-11-11): today's work-auth gate over rows already waiting for Teja
 import { regateQueue, type QueueRow } from "./regate-queue.ts";
+// Printed facts vs the pinned master (role, company, dates, labels, headline): tailor #5 parcel 1, 2026-11-21.
+import { auditorMasterFactsDrop } from "./master-facts.ts";
 
 // The one config loader the matcher calls too, so both stages read the gate config identically
 import { loadPreGatePreferences, type ConfigReader } from "../_shared/pregate-config-loader.ts";
@@ -547,6 +549,32 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
         // A refused move leaves the row in place; report it rather than count it
         if (contentMove.error) failures.push({ applicationId: row.id, error: contentMove.error.message });
         // Counted with the other permanent failures; the drain reads `failed` as advanced
+        else failedCount += 1;
+        // Never audited, never shown to Teja
+        continue;
+      }
+
+      // THE MASTER-FACTS GATE (tailor #5 parcel 1, 2026-11-21; master-facts.ts): every printed employer, role, date,
+      // school, project and award line must be the pinned master's (or an allow-listed Aczen title), and the headline
+      // must pass the headline rule against this job's title. FamPay reached Teja retitled "Data Analyst Intern" with
+      // this auditor silent. Same exit and same failure handling as the content rules above; a throw is a per-row failure.
+      const factsDrop = auditorMasterFactsDrop(resume, pinned.master, (row.jobs as unknown as AuditorJobEmbed | null)?.title ?? null);
+      // A misstated fact: off the queue through the same `tailored -> failed` edge.
+      if (factsDrop !== null) {
+        // The auditor's one non-audit edge; no new transition, no migration.
+        const factsMove = await db.rpc("advance_application_status", {
+          // Application ID
+          p_application_id: row.id,
+          // Off the queue; a human can send it back after a re-tailor
+          p_to_status: "failed",
+          // Acting agent identity
+          p_agent: "auditor",
+          // Its own stage name, so the event says which gate judged it
+          p_detail: { reason: factsDrop.code, stage: "auditor_master_facts", detail: factsDrop.reason },
+        });
+        // A refused move leaves the row in place; report it rather than count it
+        if (factsMove.error) failures.push({ applicationId: row.id, error: factsMove.error.message });
+        // Counted with the other permanent failures
         else failedCount += 1;
         // Never audited, never shown to Teja
         continue;

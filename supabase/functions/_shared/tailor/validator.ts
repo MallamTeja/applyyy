@@ -75,7 +75,18 @@ export type TailorViolation =
   // The content rules (Teja, 2026-11-08; numbers live in PAGE_FIT_FLOORS, page-trim.ts: 2 projects x 3-4 bullets, Aczen
   // >= 4, certifications >= 5, every achievement, education >= 2) still broken after the tailor topped up from the master and fitted the page. `blockedBy` names each
   // broken rule (content-rules.ts checkContentRules). Produced by the tailorer, like page_overflow.
-  | { readonly kind: "content_floor"; readonly blockedBy: readonly string[] };
+  | { readonly kind: "content_floor"; readonly blockedBy: readonly string[] }
+  // --- Tailor #5 parcel 1 (2026-11-21): the strict reader of the AI-written fields (findings doc section 7) ---
+  // An AI-written bullet dropped a number its `ref` bullet states (the Stripe case: "260+", "878 rows", "59%" lost).
+  | { readonly kind: "dropped_metric"; readonly ref: NodeId; readonly value: string }
+  // An AI-written bullet names a technology none of its cited sources name.
+  | { readonly kind: "untraced_tech"; readonly ref: NodeId; readonly term: string }
+  // An AI-written bullet's `sources` list is malformed: empty, or missing the bullet's own `ref`.
+  | { readonly kind: "invalid_sources"; readonly ref: NodeId; readonly reason: string }
+  // A `role_title` outside the allow-list, or on an experience the list does not name.
+  | { readonly kind: "disallowed_role_title"; readonly ref: NodeId; readonly title: string }
+  // A summary that cites refs but prints nothing (Gushwork and Revature were applied with no summary).
+  | { readonly kind: "empty_summary" };
 
 // Success carries the render input; failure carries every reason. A union rather than
 // a throw, because the caller must persist the violations for the dashboard rather
@@ -116,6 +127,68 @@ const RHETORICAL_VOCABULARY: ReadonlySet<string> = new Set([
   // Plural and singular forms of words the master may hold in the other number.
   "users", "user", "requests", "students", "services",
 ]);
+
+// The titles the model may print for an experience, keyed by the master experience id (Teja, 2026-11-18 21:55: the
+// Aczen internship title is picked per job from titles the actual work supports). A closed list, because employment
+// background checks compare titles with HR records: "Data Analyst Intern" (FamPay) is the case it refuses. Widening
+// it is Teja's call, made explicitly. An experience id absent here takes no title at all: its role is the master's.
+export const EXPERIENCE_TITLE_ALLOW_LIST: Readonly<Record<NodeId, readonly string[]>> = {
+  // The four titles, verbatim from docs/tailor/2026-11-18-tailoring-findings-and-plan.md section 7.
+  exp_aczen: ["Full Stack AI Engineer Intern", "Software Engineer Intern", "Backend Engineer Intern", "AI Engineer Intern"],
+};
+
+// Technology names an AI-written bullet is checked for, ON TOP of every master skill name (a closed list, in display
+// form: matching folds case and aliases, and a violation names the term as written here). The provenance rule can only refuse a name it can recognise, so a stack word the master
+// text uses but the skills list lacks (Spring Boot, WebRTC, EC2...) would otherwise slip through unchecked, and so
+// would a famous name the master never mentions at all (Kafka).
+// ponytail: a fixed list has a ceiling (a tech named nowhere here or in the master skills is not recognised); the
+// upgrade is a curated tech dictionary shared with jd-keywords.ts, owned by the skills parcel.
+const PROVENANCE_TECH_TERMS: readonly string[] = [
+  // Stack words the live master's bullets use outside its skills list (the keep7 checker's list, 2026-11-18).
+  "Spring Boot", "Spring", "WebRTC", "STOMP", "EC2", "Gemini", "OpenAI", "Supabase", "Deno", "Vercel", "Playwright",
+  "GitHub Actions", "Bean Validation", "Socket.IO", "WebSocket", "JWT", "OAuth",
+  // Common names a model may reach for that the master may not hold; refused unless a source names them.
+  "Kafka", "Kubernetes", "Docker", "Redis", "MongoDB", "PostgreSQL", "MySQL", "GraphQL", "gRPC", "AWS", "GCP", "Azure",
+  "Terraform", "Spark", "Hadoop", "Django", "Flask", "FastAPI", "Next.js", "Angular", "Vue", "LangChain", "pgvector",
+  "Elasticsearch", "RabbitMQ", "Java", "Python", "Golang", "Rust", "C#", ".NET", "TypeScript", "JavaScript", "Node.js",
+  "React", "Express", "Tailwind", "Jenkins", "Airflow", "Snowflake", "TensorFlow", "PyTorch",
+];
+
+// Short forms folded onto their long form before matching, so "Postgres" in the text traces to "PostgreSQL" in a
+// source (findings doc section 7: "alias-aware"). Pairs of [short, long], both lowercase.
+const TECH_ALIASES: readonly (readonly [string, string])[] = [
+  // The database short name.
+  ["postgres", "postgresql"],
+  // Language abbreviations.
+  ["js", "javascript"], ["ts", "typescript"],
+  // Framework short names.
+  ["node", "node.js"], ["nodejs", "node.js"], ["react.js", "react"], ["express.js", "express"], ["nextjs", "next.js"],
+  // Cloud and orchestration short names.
+  ["k8s", "kubernetes"],
+];
+
+// Escape a literal for use inside a RegExp.
+function escapeRegExp(text: string): string {
+  // Every character RegExp treats as syntax.
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Lowercase a text and fold every alias onto its long form, padded with spaces so edge words match like inner ones.
+function foldTech(text: string): string {
+  // Padded, lowercased copy.
+  let folded = ` ${text.toLowerCase()} `;
+  // Each alias, as a whole word (no letter or dot on either side, so "node.js" is not refolded and "nodes" is untouched).
+  for (const [short, long] of TECH_ALIASES) folded = folded.replace(new RegExp(`(?<![a-z0-9.])${escapeRegExp(short)}(?![a-z0-9]|\\.[a-z])`, "g"), long);
+  // The folded text.
+  return folded;
+}
+
+// True when a (folded) term appears in a (folded) text as a whole name: "c" is not found inside "cache", "java" not
+// inside "javascript", and a trailing sentence dot does not hide "node.js".
+function namesTech(foldedText: string, foldedTerm: string): boolean {
+  // Whole-name boundaries on both sides.
+  return new RegExp(`(?<![a-z0-9+#.])${escapeRegExp(foldedTerm)}(?![a-z0-9+#])`).test(foldedText);
+}
 
 // Split text into comparable lowercase word tokens. Shares the folding idea with the
 // fingerprint module: punctuation and case are formatting, not content, so
@@ -206,6 +279,22 @@ function masterSkillTokens(master: MasterProfile): ReadonlySet<string> {
   }
   // Returned as a read-only view.
   return tokens;
+}
+
+// The tech names a provenance check recognises: folded form -> display form. Master skill names first, so a violation
+// names a skill exactly as the master spells it; the fixed list adds what the skills list lacks.
+function techVocabulary(master: MasterProfile): ReadonlyMap<string, string> {
+  // Folded name -> display name.
+  const vocab = new Map<string, string>();
+  // Every master skill, then every fixed term; the first spelling of a folded name wins.
+  for (const name of [...master.skills.map((skill) => skill.name), ...PROVENANCE_TECH_TERMS]) {
+    // Folded exactly like the texts it is matched against (trimmed of the padding foldTech adds).
+    const folded = foldTech(name).trim();
+    // An empty name recognises nothing; a repeat keeps the first spelling.
+    if (folded !== "" && !vocab.has(folded)) vocab.set(folded, name);
+  }
+  // Read-only view.
+  return vocab;
 }
 
 // Find every id that appears more than once anywhere in the master profile.
@@ -338,6 +427,111 @@ function indexBullets(master: MasterProfile): ReadonlyMap<NodeId, { bullet: Mast
   return index;
 }
 
+// The METRICS of a text: numbersIn's digit runs, minus those glued to a letter in front. "L1 loss", "EC2", "S3" and
+// "k8s" are names, not claims (keep7 eval 2026-11-21: "L1" read as a dropped metric "1" on 5 of the 33 ideals).
+// Used only by the provenance path; the old reword path keeps numbersIn, so old rows are judged exactly as before.
+function metricsIn(text: string): string[] {
+  // Thousands separators stripped first, exactly as numbersIn does.
+  const withoutSeparators = text.replace(/(\d),(?=\d)/g, "$1");
+  // Digit runs with no letter or digit directly before them (a decimal's second half, "2.5", still counts: "." precedes it).
+  return withoutSeparators.match(/(?<![A-Za-z0-9])\d+/g) ?? [];
+}
+
+// KEPT METRICS (the Stripe case: a cut dropped "260+", "878 rows", "59%"). For one entry's bullets: every metric of a
+// master bullet that is the `ref` of an AI-written bullet must survive in at least one of the entry's AI-written
+// bullets that cite it. Entry-level on purpose: splitting one master bullet into two printed bullets is honest (keep7
+// app3), and each half alone would drop the other half's numbers. A bullet cited only as a SECONDARY source may be drawn
+// on partially (keep7 app15/24/29 borrow one fact from a sibling); the ref is the bullet being rewritten, so its
+// metrics are the ones a shortening must keep. A cited id that does not resolve under this entry is already reported
+// by checkProvenance and is skipped here. Old-path bullets (no `sources`) are not judged by this rule.
+function checkKeptMetrics(
+  bullets: readonly TailoredBullet[],
+  parentRef: NodeId,
+  bulletIndex: ReadonlyMap<NodeId, { bullet: MasterBullet; parentRef: NodeId }>,
+  violations: TailorViolation[],
+): void {
+  // Cited master bullet id -> every metric printed by the AI bullets citing it.
+  const printed = new Map<NodeId, Set<string>>();
+  // The master bullets some AI bullet rewrites (its `ref`): only these must keep every metric.
+  const rewritten = new Set<NodeId>();
+  // Each AI-written bullet.
+  for (const bullet of bullets) {
+    // Old-path bullets are out of scope.
+    if (bullet.sources === undefined) continue;
+    // Its ref is a bullet being rewritten.
+    rewritten.add(bullet.ref);
+    // Its metrics, once.
+    const metrics = metricsIn(bullet.text);
+    // Credited to every id it cites (deduplicated).
+    for (const id of new Set(bullet.sources)) {
+      // The set for this id, created on first sight.
+      const seen = printed.get(id) ?? new Set<string>();
+      // Add this bullet's metrics.
+      for (const value of metrics) seen.add(value);
+      // Stored back.
+      printed.set(id, seen);
+    }
+  }
+  // Each cited master bullet.
+  for (const [id, seen] of printed) {
+    // A secondary-only source may be drawn on partially.
+    if (!rewritten.has(id)) continue;
+    // Resolved under THIS entry only.
+    const found = bulletIndex.get(id);
+    // Unresolved or misattributed: reported elsewhere, and its metrics are not this entry's to keep.
+    if (found === undefined || found.parentRef !== parentRef) continue;
+    // Every metric the master bullet states must have been printed by some bullet citing it.
+    for (const value of new Set(metricsIn(found.bullet.text))) if (!seen.has(value)) violations.push({ kind: "dropped_metric", ref: id, value });
+  }
+}
+
+// The provenance checks for one AI-written bullet (its `ref` already resolved under the right parent). Appends
+// violations; never throws, so one bad bullet does not hide the rest.
+function checkProvenance(
+  tailored: TailoredBullet,
+  parentRef: NodeId,
+  refText: string,
+  bulletIndex: ReadonlyMap<NodeId, { bullet: MasterBullet; parentRef: NodeId }>,
+  techVocab: ReadonlyMap<string, string>,
+  violations: TailorViolation[],
+): void {
+  // The cited ids, as held.
+  const sources = tailored.sources ?? [];
+  // An empty list cites nothing, which is the uncited prose this rule exists to stop.
+  if (sources.length === 0) violations.push({ kind: "invalid_sources", ref: tailored.ref, reason: "sources is empty" });
+  // The ref must be one of its own sources, so "which master bullet is this" and "what does it draw on" agree.
+  else if (!sources.includes(tailored.ref)) violations.push({ kind: "invalid_sources", ref: tailored.ref, reason: "sources must include ref" });
+  // The texts every fact may come from: the ref bullet always, plus each other source that checks out.
+  const pool: string[] = [refText];
+  // Each cited id.
+  for (const id of sources) {
+    // The ref is already in the pool.
+    if (id === tailored.ref) continue;
+    // A malformed id is an invented citation.
+    if (!isValidCitationRef(id)) { violations.push({ kind: "unresolved_ref", ref: String(id), where: `sources of ${tailored.ref}` }); continue; }
+    // Looked up in the same flat index the ref resolved through.
+    const source = bulletIndex.get(id);
+    // An id the master does not hold.
+    if (source === undefined) { violations.push({ kind: "unresolved_ref", ref: id, where: `sources of ${tailored.ref}` }); continue; }
+    // A real bullet from ANOTHER entry: a Student Tribe fact printed under Aczen is fabricated experience made of true
+    // parts, the same misattribution the ref check refuses.
+    if (source.parentRef !== parentRef) { violations.push({ kind: "misattributed_bullet", ref: id, parentRef }); continue; }
+    // Citable.
+    pool.push(source.bullet.text);
+  }
+  // Every metric the sources state ("1,000" = "1000"; "260+" = "260").
+  const pooledNumbers = new Set(pool.flatMap((text) => metricsIn(text)));
+  // A metric in the text that no source states is an invented one. Kept-metrics is an ENTRY-level rule (a bullet may be
+  // split in two), so it runs in checkKeptMetrics, once per entry.
+  for (const value of new Set(metricsIn(tailored.text))) if (!pooledNumbers.has(value)) violations.push({ kind: "invented_metric", ref: tailored.ref, value });
+  // The folded text and folded pool, matched by whole name.
+  const text = foldTech(tailored.text);
+  // All sources as one text.
+  const pooled = foldTech(pool.join(" "));
+  // Every recognised tech name the text uses must also be named by a source.
+  for (const [folded, display] of techVocab) if (namesTech(text, folded) && !namesTech(pooled, folded)) violations.push({ kind: "untraced_tech", ref: tailored.ref, term: display });
+}
+
 // Validate one reworded bullet against the master bullet it claims to rework, and
 // return the resolved node. Violations are appended rather than thrown so a single
 // bad line does not hide the rest.
@@ -346,6 +540,7 @@ function resolveBullet(
   parentRef: NodeId,
   bulletIndex: ReadonlyMap<NodeId, { bullet: MasterBullet; parentRef: NodeId }>,
   skillTokens: ReadonlySet<string>,
+  techVocab: ReadonlyMap<string, string>,
   violations: TailorViolation[],
 ): ResolvedBullet | null {
   // Validate citation reference integrity (3c).
@@ -371,6 +566,18 @@ function resolveBullet(
     violations.push({ kind: "misattributed_bullet", ref: tailored.ref, parentRef });
     // Refused rather than silently reparented.
     return null;
+  }
+
+  // AN AI-WRITTEN BULLET (tailor #5, 2026-11-21): `sources` present means the model wrote the wording itself, so the
+  // word list below would refuse every honest new verb. It is judged by provenance instead (findings doc section 7):
+  // every FACT (number, tech name) must trace to a cited master bullet; wording is free. Absent = the old path, so
+  // every stored tailor_refs and today's prompt are judged exactly as before.
+  if (tailored.sources !== undefined) {
+    // The provenance checks, reported into the same list.
+    checkProvenance(tailored, parentRef, found.bullet.text, bulletIndex, techVocab, violations);
+    // Resolved like any bullet: the ref bullet's text is the diff view's "before". No `sources` key is added, so the
+    // resolved shape is the one every reader already knows.
+    return { ref: tailored.ref, text: tailored.text, master_text: found.bullet.text };
   }
 
   // THE CONTENT CHECK. A valid ref is necessary but not sufficient: the rewording can
@@ -465,6 +672,8 @@ export function validateTailoredProfile(
   const bulletIndex = indexBullets(master);
   // Skill tokens, computed once and shared by every bullet check.
   const skillTokens = masterSkillTokens(master);
+  // The tech names an AI-written bullet is checked for, computed once (master skills + the fixed list).
+  const techVocab = techVocabulary(master);
   // Node lookups for the four referenceable top-level kinds.
   const experienceById = new Map(master.experience.map((node) => [node.id, node]));
   // Projects.
@@ -559,15 +768,25 @@ export function validateTailoredProfile(
     // Resolve each bullet, scoped to THIS employer.
     const bullets = selected.bullets
       // Null entries are the ones that failed; they are already reported.
-      .map((bullet) => resolveBullet(bullet, selected.ref, bulletIndex, skillTokens, violations))
+      .map((bullet) => resolveBullet(bullet, selected.ref, bulletIndex, skillTokens, techVocab, violations))
       // Narrowed so the resolved node contains only bullets that checked out.
       .filter((bullet): bullet is ResolvedBullet => bullet !== null);
+    // AI-written bullets in this entry must keep every metric of the master bullets they cite (entry-level).
+    checkKeptMetrics(selected.bullets, selected.ref, bulletIndex, violations);
+    // THE ONE MODEL-PICKED DISPLAY FIELD (tailor #5, 2026-11-21): a role title, only from the allow-list for this
+    // experience. Free text here would be a title HR records contradict (FamPay's "Data Analyst Intern").
+    const roleTitle = selected.role_title;
+    // Present: it must be one of the titles listed for THIS master experience (no list = no title allowed).
+    const titleAllowed = roleTitle !== undefined && (EXPERIENCE_TITLE_ALLOW_LIST[node.id] ?? []).includes(roleTitle);
+    // Anything else is refused, never printed and never silently replaced by the master's role.
+    if (roleTitle !== undefined && !titleAllowed) violations.push({ kind: "disallowed_role_title", ref: node.id, title: String(roleTitle) });
     // Every display field is materialised from the master, never from the model —
-    // which is why aa's TailoredExperience carries no company or role text.
+    // which is why aa's TailoredExperience carries no company text and no free role text.
     resolvedExperience.push({
       ref: node.id,
       company: node.company,
-      role: node.role,
+      // The allow-listed title when one was picked, else the master's role, byte for byte (absent = as before).
+      role: titleAllowed ? roleTitle : node.role,
       // Nullable: an absent key in the stored master becomes an explicit null here.
       location: nullIfAbsent(node.location),
       start_display: node.start_display,
@@ -602,9 +821,11 @@ export function validateTailoredProfile(
     // Bullets scoped to this project.
     const bullets = selected.bullets
       // Resolve each.
-      .map((bullet) => resolveBullet(bullet, selected.ref, bulletIndex, skillTokens, violations))
+      .map((bullet) => resolveBullet(bullet, selected.ref, bulletIndex, skillTokens, techVocab, violations))
       // Keep only those that resolved.
       .filter((bullet): bullet is ResolvedBullet => bullet !== null);
+    // AI-written bullets in this entry must keep every metric of the master bullets they cite (entry-level).
+    checkKeptMetrics(selected.bullets, selected.ref, bulletIndex, violations);
     // Display fields from the master.
     resolvedProjects.push({
       ref: node.id,
@@ -646,9 +867,11 @@ export function validateTailoredProfile(
     // Bullets scoped to this qualification.
     const bullets = selected.bullets
       // Resolve each.
-      .map((bullet) => resolveBullet(bullet, selected.ref, bulletIndex, skillTokens, violations))
+      .map((bullet) => resolveBullet(bullet, selected.ref, bulletIndex, skillTokens, techVocab, violations))
       // Keep only those that resolved.
       .filter((bullet): bullet is ResolvedBullet => bullet !== null);
+    // AI-written bullets in this entry must keep every metric of the master bullets they cite (entry-level).
+    checkKeptMetrics(selected.bullets, selected.ref, bulletIndex, violations);
     // Display fields from the master, grade included — the template must not decide
     // how to render a grade (aa's DATE CONTRACT reasoning applied to grades).
     resolvedEducation.push({
@@ -694,9 +917,11 @@ export function validateTailoredProfile(
     // Bullets scoped to THIS achievement.
     const bullets = selected.bullets
       // Resolve each.
-      .map((bullet) => resolveBullet(bullet, selected.ref, bulletIndex, skillTokens, violations))
+      .map((bullet) => resolveBullet(bullet, selected.ref, bulletIndex, skillTokens, techVocab, violations))
       // Keep only those that resolved.
       .filter((bullet): bullet is ResolvedBullet => bullet !== null);
+    // AI-written bullets in this entry must keep every metric of the master bullets they cite (entry-level).
+    checkKeptMetrics(selected.bullets, selected.ref, bulletIndex, violations);
     // `label` and `description` are materialised from the master and nowhere else —
     // which is exactly why `TailoredAchievement` carries neither. This one line is
     // what stops "Winner" being tailored into "International Winner".
@@ -747,9 +972,11 @@ export function validateTailoredProfile(
     // Bullets scoped to this certification.
     const bullets = selected.bullets
       // Resolve each.
-      .map((bullet) => resolveBullet(bullet, selected.ref, bulletIndex, skillTokens, violations))
+      .map((bullet) => resolveBullet(bullet, selected.ref, bulletIndex, skillTokens, techVocab, violations))
       // Keep only those that resolved.
       .filter((bullet): bullet is ResolvedBullet => bullet !== null);
+    // AI-written bullets in this entry must keep every metric of the master bullets they cite (entry-level).
+    checkKeptMetrics(selected.bullets, selected.ref, bulletIndex, violations);
     // Name and issuer detail from the master, so neither can be upgraded in wording.
     resolvedCertifications.push({
       ref: node.id,
@@ -787,6 +1014,9 @@ export function validateTailoredProfile(
       // Named for the dashboard.
       violations.push({ kind: "summary_without_refs" });
     }
+    // A summary that prints nothing is not a summary (P0, 2026-11-21: Gushwork and Revature shipped with none). A null
+    // summary stays the content rules' question (checkContentRules "summary: missing"), so old null rows still rebuild.
+    if (typeof tailored.summary.text !== "string" || tailored.summary.text.trim() === "") violations.push({ kind: "empty_summary" });
     // Every declared ref must resolve against some real master node, with no duplicate citations (3c).
     const seenSummaryRefs = new Set<NodeId>();
     for (const ref of tailored.summary.refs) {

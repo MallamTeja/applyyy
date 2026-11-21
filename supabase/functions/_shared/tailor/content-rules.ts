@@ -319,6 +319,48 @@ export function cleanRoleTitle(jobTitle: string): string | null {
   return ROLE_TITLE_SHAPE.test(cleaned) ? cleaned : null;
 }
 
+// The headlines that pass for ANY job (keep7 SPEC.md, 2026-11-18): the Aczen allow-list titles without "Intern", for a
+// posting whose own words make no clean job title ("Analyst I Software Engineering"). Each names work the master shows.
+export const HEADLINE_FALLBACKS: readonly string[] = ["Full Stack AI Engineer", "Software Engineer", "Backend Engineer", "AI Engineer"];
+
+// Lowercase word tokens for the headline trace: "Full-Stack" -> full, stack (punctuation is formatting, not content).
+function titleWords(text: string): string[] {
+  // Split on anything that is not a letter or digit; drop the empty edges.
+  return text.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word !== "");
+}
+
+/**
+ * THE HEADLINE RULE (Teja, 2026-11-18 21:47: the AI writes the whole-resume title; findings doc section 7: "must be a
+ * job title: not a team name, not bare Intern, never more senior than the JD's"). Null when the headline passes, else
+ * the reason. It passes when it has the printable shape, names a role, is not only "Intern", carries no seniority word
+ * (STRICTER than "never above the JD's", on purpose: the candidate is early-career and holds none, and cleanRoleTitle
+ * already strips them), and is either a fallback title or made only of the job title's own words ("Intern" too when
+ * the posting is an internship). `jobTitle` null: only a fallback passes, because nothing to trace is not a pass.
+ * Every headline cleanRoleTitle produces passes this rule for the same title (content-rules-headline.test.ts).
+ */
+export function checkHeadline(headline: string, jobTitle: string | null): string | null {
+  // The printable shape the validator already enforces.
+  if (!ROLE_TITLE_SHAPE.test(headline)) return `headline "${headline}" is not a printable job title`;
+  // Only an intern word (season and year aside): a status, not a job title.
+  if (INTERN_ONLY.test(headline.replace(INTERN_FILLER, " ").replace(/[^A-Za-z]+/g, " ").trim())) return `headline "${headline}" is only an intern word`;
+  // No role noun: a team or product name ("Models Infrastructure Platform Enablement"). `.search` ignores lastIndex.
+  if (headline.search(ROLE_NOUN) === -1) return `headline "${headline}" names no role (a team or product name?)`;
+  // A seniority word the candidate does not hold.
+  if (headline.search(SENIORITY_WORDS) !== -1) return `headline "${headline}" carries a seniority word`;
+  // A fallback passes for any job.
+  if (HEADLINE_FALLBACKS.some((title) => title.toLowerCase() === headline.toLowerCase())) return null;
+  // Nothing to trace the headline to.
+  if (jobTitle === null) return `headline "${headline}" cannot be traced: no job title`;
+  // The posting's words, each also without a plural s ("Engineers" -> "engineer").
+  const posted = new Set(titleWords(jobTitle).flatMap((word) => [word, word.replace(/s$/, "")]));
+  // "Intern" is the posting's own word when the posting is an internship.
+  if (HAS_INTERN.test(jobTitle)) posted.add("intern");
+  // Every headline word the posting does not hold, by its own form or without a plural s.
+  const foreign = titleWords(headline).filter((word) => !posted.has(word) && !posted.has(word.replace(/s$/, "")));
+  // A word the posting never used is a claim about the role nobody offered.
+  return foreign.length === 0 ? null : `headline "${headline}" uses words the job title does not: ${foreign.join(", ")}`;
+}
+
 /**
  * Exactly one summary variant cited and none picked: pick it (LSEG 2b7db9a2, 2026-11-08: the model cited
  * summary-ai-llm without picking variant-ai-llm, and validator.ts accepts only the PICKED variant's
