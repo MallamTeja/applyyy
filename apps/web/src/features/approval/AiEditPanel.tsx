@@ -70,7 +70,7 @@ export const BatchPreviewContext = createContext<((applicationId: string, action
 /* The action kinds that put content ON the resume, the only ones a card previews (a remove or move never overflows). */
 const ADDING_KINDS: ReadonlySet<EditAction['kind']> = new Set<EditAction['kind']>(['add_skill', 'attest_skill', 'add_master_bullet', 'add_master_entry', 'attest_bullet']);
 // The pure halves: build the ask, resolve and apply ops, read applied state and outcomes, format the bill.
-import { outcomeText, withServerApply, applyTogether, batchRunLine, bulletParents, buildAssistDraft, formatUsage, holdReason, isApplied, historyTurnText, isPairedHalf, removedInChat, replyNote, resolveOps, sectionTitle, shouldAutoApply, opLabel, runApplyBatch, swapPartners, toEditAction } from './aiEdit';
+import { outcomeText, withServerApply, applyTogether, batchRunLine, bulletParents, buildAssistDraft, formatUsage, holdReason, isApplied, historyTurnText, isPairedHalf, isServerRecord, removedInChat, replyNote, resolveOps, sectionTitle, shouldAutoApply, opLabel, runApplyBatch, swapPartners, toEditAction } from './aiEdit';
 // Types for the ask and its parts.
 import type { ApplicableOp, AssistBody, AssistProgress, AssistResult, AssistStructure, AuditAdvice, StoredOp } from './aiEdit';
 // The memory: grouping into chats and the window sent back as context.
@@ -606,8 +606,13 @@ export function AiEditPanel({
       ];
       // Stored here only when the server did not store it.
       const stored = result.chatSaved === true || chat === undefined ? null : await chat.save(diff.applicationId, pair);
-      // Shown either way.
-      setMessages((current) => [...current, ...(stored !== null && stored.kind === 'ok' ? stored.messages : pair.map((m) => ({ ...m, id: null, createdAt: new Date().toISOString() })))]);
+      /* The server stored it: the history is re-read, so the bubbles carry their stored ids. Local copies (id null) read
+         "Not saved to history" over an exchange that WAS saved (found by aiEditServerApplyE2e, 2026-11-23). */
+      const reread = result.chatSaved === true && chat !== undefined ? await chat.load(diff.applicationId) : null;
+      // The stored history when the re-read worked; else the page's own rows, or local copies.
+      if (reread !== null && reread.kind === 'ok') setMessages(reread.messages);
+      // Otherwise appended as before.
+      else setMessages((current) => [...current, ...(stored !== null && stored.kind === 'ok' ? stored.messages : pair.map((m) => ({ ...m, id: null, createdAt: new Date().toISOString() })))]);
       // A failed write is said.
       if (stored !== null && stored.kind === 'error') setError(stored.message);
       // The row the server wrote, adopted by the page (onReloadRow is defined in this mode).
@@ -1021,7 +1026,8 @@ export function AiEditPanel({
               {/* The AI's reply, as it wrote it: its answer, never the record of what changed. */}
               {replyNote(message.content, ops) !== '' ? <p className="ai-chat__note">{replyNote(message.content, ops)}</p> : null}
               {/* The record, read from the resume right now: what is applied, what is not, what could not be done. */}
-              <p className="ai-chat__summary">{replySummary(ops, diff, structure ?? null)}</p>
+              {/* S9i P2: a server-applied reply already leads with the server's record; a card-less summary would say "No changes". */}
+              {isServerRecord(message.content) ? null : <p className="ai-chat__summary">{replySummary(ops, diff, structure ?? null)}</p>}
               {/* The proposals, each with its own Apply. */}
               {ops.length > 0 ? (
                 <ol className="ai-chat__ops">

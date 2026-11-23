@@ -74,3 +74,16 @@ describe('S9i P2: the web body and the server reader agree', () => {
     assert.deepEqual(parsed.ok ? [parsed.request.serverApply, parsed.request.applicationId, parsed.request.chatId, parsed.request.applyMaps] : parsed, [true, '11111111-2222-4333-8444-555555555555', '99999999-8888-4777-8666-555555555555', { bullets: {}, entries: {}, availableBullets: {}, availableEntries: {}, skills: [] }]);
   });
 });
+
+describe('S9i P2: a server-applied reply shows its record (found by aiEditServerApplyE2e, 2026-11-23)', () => {
+  it('replyNote never hides the server record of a card-less reply; an AI claim with no cards is still hidden', () => {
+    // The text chatRows / the panel store for a server-applied answer: record first, then the AI's note.
+    const record = '[Applied: Remove skill "Redis" | Could not do: Remove skill "Kubernetes" (It is not on this resume.)] Removed it.';
+    // Shown whole, though it says "Applied" and "Removed" with no cards beside it.
+    assert.equal(ai.replyNote(record, []), record);
+    // The old guard still holds for an AI note that claims a change nothing can back.
+    assert.equal(ai.replyNote('I removed Redis.', []), '');
+    // Matched on the record's exact opening only: a note that merely mentions the word is not a record.
+    assert.deepEqual([ai.isServerRecord(record), ai.isServerRecord('Applied: nothing'), ai.isServerRecord('[Suggested, not applied: x (y)]')], [true, false, true]);
+  });
+});

@@ -1551,11 +1551,22 @@ export function describeOp(op: StoredOp): string {
    broad: hiding a true sentence is the safe error, because the status line and the op cards carry the truth. */
 const CLAIMS_A_CHANGE = /\b(?:added|removed|changed|moved|applied|updated|rewrote|rephrased|replaced|deleted|inserted|swapped|done)\b/i;
 
+/* S9i P2 (2026-11-23, found by aiEditServerApplyE2e): whether a stored reply opens with the server's outcome record
+   (server-plan.ts outcomeText: "[Applied: … | Could not do: … | Suggested, not applied: …]"). Such a reply has ops []
+   because the server applied it, so the claim filter above hid the whole record and the summary said "No changes made"
+   over edits that HAD landed. Matched on the record's exact opening, never on a word an AI note could contain. */
+export function isServerRecord(content: string): boolean {
+  // The bracket and one of the three group names the server writes first.
+  return /^\[(?:Applied|Could not do|Suggested, not applied): /.test(content);
+}
+
 /* The reply text the panel shows (bug a, Teja 2026-11-06, live Revature row: "Added GCP, MySQL, Redis, MongoDB"
    with 0 ops applied). A reply whose ops could never land (none, or every one rejected) must not claim a
    change: its words are hidden when they claim one, so the panel never shows a change that did not happen.
    A reply with a landable op keeps its words; its cards and status line say what really changed. */
 export function replyNote(note: string, ops: readonly StoredOp[]): string {
+  // A server-applied reply (S9i P2) has no cards: its text IS the app's record of what landed, so it is never hidden.
+  if (ops.length === 0 && isServerRecord(note)) return note;
   // Whether anything in this reply could ever land (a rejected card never does; an empty list has none).
   const somethingCanLand = ops.some((op) => op.op !== 'rejected');
   // Landable: the cards beside the words prove or disprove them.
