@@ -349,9 +349,10 @@ describe('T10 attestSkill into a group the master does not have yet (2026-11-10)
 
 /* ONE LINE PER SKILL GROUP (2026-11-12, after commit 4b7e75a). The check runs BEFORE any write: refused
    after the master insert, a new master version would stay behind (versions are immutable). */
-describe('attestSkill keeps every skill group on one line (2026-11-12)', () => {
-  // Long enough that "Frameworks: Node.js, <this>" cannot print on one line at any typography rung.
-  const LONG = 'Java Enterprise Edition and Spring Framework Microservices Architecture Patterns';
+describe('attestSkill keeps every skill group within SKILL_GROUP_MAX_LINES (2) lines (2026-11-12; 2 lines since round 6)', () => {
+  // Round 6 (2026-11-21): the gate allows 2 lines now, so the fixture must reach a THIRD. The old 80-char name is 2 lines
+  // with Node.js; three of it (250 chars) is 3 lines at every rung (skillGroupLineCount, measured 2026-11-21).
+  const LONG = Array(3).fill('Java Enterprise Edition and Spring Framework Microservices Architecture Patterns').join(' and ');
 
   it('refuses an add that would wrap its group, with no master version and no row write', async () => {
     // No `wrap` passed, like any caller that omits it: must fail CLOSED.
@@ -359,7 +360,7 @@ describe('attestSkill keeps every skill group on one line (2026-11-12)', () => {
     // Awaited.
     const out = await done;
     // Refused, naming the full group, and nothing was inserted.
-    assert.deepEqual(out, { ok: false, message: `"Frameworks" is full: adding ${LONG} would wrap it onto a second line. Remove a skill from that group first, or say "all" to add it anyway.`, masterInserted: false });
+    assert.deepEqual(out, { ok: false, message: `"Frameworks" is full: adding ${LONG} would wrap it onto a third line. Remove a skill from that group first, or say "all" to add it anyway.`, masterInserted: false });
     // No master version.
     assert.equal(callsOf(calls, 'master_profiles', 'insert').length, 0);
     // No row write.
@@ -374,7 +375,8 @@ describe('attestSkill keeps every skill group on one line (2026-11-12)', () => {
     // Saved.
     assert.equal(out.ok, true);
     // And the wrap is never silent.
-    assert.match(out.ok ? out.notice ?? '' : '', /"Frameworks" now wraps onto a second line/);
+    // The same spill line the refusal names (round 9: derived from SKILL_GROUP_MAX_LINES, "third" while it is 2).
+    assert.match(out.ok ? out.notice ?? '' : '', /"Frameworks" now wraps onto a third line, because you said "all"/);
   });
 });
 

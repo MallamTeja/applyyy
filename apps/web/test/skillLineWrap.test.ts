@@ -41,14 +41,31 @@ const MASTER = {
 // A resume printing the five; addSkill reads only `skills` and spreads the rest.
 const RESUME = { skills: PRINTED.map((name, index) => ({ ref: `s${index}`, name, category: DEVOPS })) };
 
-describe('addSkill keeps every skill group on one line', () => {
-  it('refuses an add that would wrap the group, naming the full group', () => {
-    // The sixth DevOps skill.
-    const out = edits.addSkill(RESUME as never, MASTER as never, 's5');
+/* ROUND 6 (2026-11-21): the gate moved from ONE line to SKILL_GROUP_MAX_LINES (2), because the tailor now prints
+   2-line groups by design (Teja 11-18: "compact skills block, a group may wrap to 2 lines"); a one-line gate would
+   refuse every add to a group the tailor itself emitted. Measured with skillGroupLineCount at every rung (2026-11-21):
+   the five PRINTED are 1 line, plus WRAPPER 2 lines, plus four more (TEN) still 2 lines, and an ELEVENTH makes 3. */
+const TWO_LINE_EXTRA = ['Terraform', 'Prometheus', 'Grafana Observability Stack', 'Amazon Elastic Kubernetes Service'];
+// The skill whose add would push the ten-skill group onto a THIRD line.
+const THIRD_LINER = 'HashiCorp Vault';
+// A master holding all eleven DevOps skills.
+const MASTER_TEN = { skills: [...PRINTED, WRAPPER, ...TWO_LINE_EXTRA, THIRD_LINER].map((name, index) => ({ id: `t${index}`, name, category: DEVOPS })) };
+// A resume printing the first ten: a full two-line group.
+const RESUME_TEN = { skills: MASTER_TEN.skills.slice(0, 10).map((skill) => ({ ref: skill.id, name: skill.name, category: DEVOPS })) };
+
+describe('addSkill keeps every skill group within SKILL_GROUP_MAX_LINES (2) lines', () => {
+  it('refuses an add that would push the group onto a THIRD line, naming the full group', () => {
+    // The eleventh DevOps skill, onto a full two-line group.
+    const out = edits.addSkill(RESUME_TEN as never, MASTER_TEN as never, 't10');
     // Refused, so nothing is written.
     assert.equal(out.ok, false);
-    // The reason names the group that is full, so the owner knows what to trim.
-    assert.match(out.ok ? '' : out.reason, /"DevOps & Cloud" is full/);
+    // The reason names the group and the limit, so the owner knows what to trim.
+    assert.equal(out.ok ? '' : out.reason, '"DevOps & Cloud" is full: adding HashiCorp Vault would wrap it onto a third line. Remove a skill from that group first, or say "all" to add it anyway.');
+  });
+
+  it('allows an add that wraps a one-line group onto its second line (the tailor prints such groups)', () => {
+    // The sixth DevOps skill: one line becomes two, within the limit.
+    assert.equal(edits.addSkill(RESUME as never, MASTER as never, 's5').ok, true);
   });
 
   it('still adds a skill that fits (positive control)', () => {
@@ -56,9 +73,9 @@ describe('addSkill keeps every skill group on one line', () => {
     assert.equal(edits.addSkill(RESUME as never, MASTER as never, 'go').ok, true);
   });
 
-  it('adds past the line when the caller allows it (the owner said "all")', () => {
-    // The same add, allowed.
-    assert.equal(edits.addSkill(RESUME as never, MASTER as never, 's5', 'allow').ok, true);
+  it('adds past the limit when the caller allows it (the owner said "all")', () => {
+    // The third-line add, allowed.
+    assert.equal(edits.addSkill(RESUME_TEN as never, MASTER_TEN as never, 't10', 'allow').ok, true);
   });
 });
 

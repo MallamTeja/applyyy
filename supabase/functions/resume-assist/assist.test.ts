@@ -19,8 +19,13 @@ import {
 } from "./assist.ts";
 // Types only, for the fake Gemini call.
 import type { GeminiCallOutcome, GeminiResponseBody, GenerateGeminiOptions } from "../_shared/gemini/client.ts";
-// The one-line width model the top-up fills with (2026-11-12), so the test checks the line the PDF prints.
-import { skillGroupFitsOneLine } from "../../../packages/resume-template/src/index.ts";
+// The width model the top-up fills with, so the test checks the lines the PDF prints (two lines since S9a, 2026-11-21).
+import { skillGroupLineCount, TYPOGRAPHY_LADDER } from "../../../packages/resume-template/src/index.ts";
+// The line limit the web's edit gate and the server share (S9a).
+import { SKILL_GROUP_MAX_LINES } from "../../../packages/resume-template/src/page-fit.ts";
+
+// True when a group prints within the shared line limit at every typography rung (the server's groupFits, restated).
+const fitsTwoLines = (category: string, names: readonly string[]): boolean => TYPOGRAPHY_LADDER.every((_, index) => skillGroupLineCount(category, names, index) <= SKILL_GROUP_MAX_LINES);
 
 // A valid request body, as the browser would send it.
 function body(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -489,17 +494,17 @@ test("parseAssistOps drops a move of a bullet removed earlier in the answer, and
   assert.deepEqual(flat.ok ? [flat.ops.length, flat.dropped] : null, [0, 1]);
 });
 
-test("the schema and the system text offer exactly the eleven ops the model may write (add_group joined 2026-11-21)", () => {
+test("the schema and the system text offer exactly the twelve ops the model may write (add_group and S9j move_entry joined 2026-11-21)", () => {
   // The prompt parts.
   const prompt = buildAssistPrompt(request());
   // The schema, read through its nested shape.
   const schema = prompt.responseSchema as { properties: { ops: { items: { properties: { op: { enum: string[] }; direction: { enum: string[] } } } } } };
   // Closed to what parseAssistOps reads; the two remove ops joined on 2026-11-04.
-  assert.deepEqual(schema.properties.ops.items.properties.op.enum, ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "add_back", "new_bullet", "remove_entry", "set_role", "add_group"]);
+  assert.deepEqual(schema.properties.ops.items.properties.op.enum, ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "move_entry", "add_back", "new_bullet", "remove_entry", "set_role", "add_group"]);
   // Direction closed in the schema too.
   assert.deepEqual(schema.properties.ops.items.properties.direction.enum, ["up", "down"]);
   // Since 2026-11-04 the system text spells every op as exact JSON, so a skill's name cannot land in "text".
-  for (const kind of ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "add_back", "new_bullet", "remove_entry", "set_role", "add_group"]) {
+  for (const kind of ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "move_entry", "add_back", "new_bullet", "remove_entry", "set_role", "add_group"]) {
     // Each kind appears as a JSON example, quoted exactly as the model must write it.
     assert.match(prompt.systemInstruction, new RegExp(`\\{"op":"${kind}"`), kind);
   }
@@ -1481,6 +1486,10 @@ test("the system text: titles are a set_role op, skills are not entries, moves c
   assert.match(prompt.systemInstruction, /Skills are not entries: never send the owner to the Master profile page for a skill they name./);
   // A move without a direction is ruled out in words as well as by the parser.
   assert.match(prompt.systemInstruction, /move and move_section ALWAYS carry "direction"/);
+  // S9j: a place states the end position, and the prompt says every edit is possible except personal details.
+  assert.match(prompt.systemInstruction, /"op":"move_entry","entry":"e2","place":1/);
+  // Same.
+  assert.match(prompt.systemInstruction, /Personal details \(name, email, phone, links, location\) are never changed in this chat/);
   // "do it" is the previous request, never a reorder.
   assert.match(prompt.systemInstruction, /repeats the owner's previous request from CHAT SO FAR: make those ops now; it is never a reorder request./);
 });
@@ -1530,37 +1539,40 @@ function addedNames(ops: unknown[], req: AssistRequest): string[] {
   return parsed.ops.flatMap((op) => (op.op === "add_skill" ? [op.name] : []));
 }
 
-test("top-up 1 (live fcf3a2dd): 'devops and clousde too, hld lld too' + only Docker fills DevOps & Cloud to 6, JD first, and adds System Design", () => {
+test("top-up 1 (live fcf3a2dd): 'devops and clousde too, hld lld too' + only Docker fills DevOps & Cloud within two lines, JD first, and adds System Design", () => {
   // The live answer: Docker alone. Kubernetes and Monitoring are the job's missing keywords.
   const names = addedNames([{ op: "add_skill", name: "Docker", category: "DevOps & Cloud" }], v41Request("devops and clousde too, hld lld too", ["Kubernetes", "Monitoring"]));
-  // Docker first (the model's own), then the JD-named ones, then master order up to 6 in the group; one Azure, never both spellings.
-  assert.deepEqual(names, ["Docker", "Kubernetes", "Monitoring", "AWS", "azure", "CI/CD & GitHub Actions", "System Design (LLD/HLD)"]);
+  /* Docker first (the model's own), then the JD-named ones, then master order while the group fits TWO lines (S9a; one
+     line until then, which stopped it at 6). One Azure, never both spellings: with two lines of room this test caught
+     "azure" + "Microsoft Azure" both landing, because the vocabulary match was case-sensitive (skillTerm fixes it). */
+  assert.deepEqual(names, ["Docker", "Kubernetes", "Monitoring", "AWS", "azure", "CI/CD & GitHub Actions", "Google Cloud Platform", "System Design (LLD/HLD)"]);
 });
 
-/* ONE LINE (Teja, 2026-11-12 13:57: "each having up to 7 skills ... in 1 line but full in that 1 line"). A top-up fills the
-   group's printed line and stops where one more name would wrap, never at a fixed count. RED-ON-REVERT: the old fixed
-   cap of 6 adds the six long names below, which print on two lines. */
-test("top-up 4 (2026-11-12): a named group is topped up to ONE full line, never a wrap; 'all' still lifts both limits", () => {
-  // Long real-world DevOps names: six of them do not fit one line.
-  const long = ["Google Cloud Platform", "CI/CD & GitHub Actions", "Infrastructure as Code", "Microsoft Azure", "Kubernetes", "Monitoring", "Terraform"];
-  // Non-vacuity: Docker plus the first five of them (six, the old cap) really wraps, so only the line rule can stop it.
-  assert.equal(skillGroupFitsOneLine("DevOps & Cloud", ["Docker", ...long.slice(0, 5)]), false, "six fit one line; the line rule is not under test");
+/* THE LINE LIMIT (Teja, 2026-11-12 13:57: "in 1 line but full in that 1 line"; two lines since round 6 / S9a, 2026-11-21,
+   the same SKILL_GROUP_MAX_LINES the web's edit gate reads). A top-up fills the group's printed lines and stops where one
+   more name would spill onto a third, never at a fixed count. RED-ON-REVERT: dropping the width check adds names up to
+   the cap of 10, and the long names below spill past two lines well before that. */
+test("top-up 4 (2026-11-12): a named group is topped up to its line limit, never a spill; 'all' still lifts both limits", () => {
+  // Long real-world DevOps names: far more than two lines of them.
+  const long = ["Google Cloud Platform", "CI/CD & GitHub Actions", "Infrastructure as Code", "Microsoft Azure", "Kubernetes", "Monitoring", "Terraform", "Prometheus & Grafana Stack", "Site Reliability Engineering", "Distributed Tracing Systems", "Configuration Management"];
+  // Non-vacuity: Docker plus the first nine of them (ten, the cap) really spills, so only the line rule can stop it.
+  assert.equal(fitsTwoLines("DevOps & Cloud", ["Docker", ...long.slice(0, 9)]), false, "ten fit the line limit; the line rule is not under test");
   // The request, those names available.
   const parsed = parseAssistRequest(body({ instruction: "devops too", job: { title: "Platform Engineer", company: "Example", missing: [] }, skills: "Python", printedSkills: [{ name: "Python", category: "Languages" }], availableSkills: [{ name: "Docker", category: "DevOps & Cloud" }, ...long.map((name) => ({ name, category: "DevOps & Cloud" }))], categories: ["Languages", "DevOps & Cloud"] }));
   // Valid fixture.
   if (!parsed.ok) throw new Error(parsed.message);
   // The model added Docker; the server tops up the rest of the line.
   const names = addedNames([{ op: "add_skill", name: "Docker", category: "DevOps & Cloud" }], parsed.request);
-  // ONE line, by the tailor's own width model.
-  assert.ok(skillGroupFitsOneLine("DevOps & Cloud", names), `the topped-up group wraps: ${names.join(", ")}`);
-  // FULL: no unseated name would still fit (or the cap of 7 is reached).
-  assert.ok(names.length === 7 || long.filter((n) => !names.includes(n)).every((n) => !skillGroupFitsOneLine("DevOps & Cloud", [...names, n])), `room left on the line: ${names.join(", ")}`);
-  // "all": the owner dictated every skill of the group, so neither limit applies (all 8, two lines and all).
+  // Within the line limit, by the tailor's own width model.
+  assert.ok(fitsTwoLines("DevOps & Cloud", names), `the topped-up group spills: ${names.join(", ")}`);
+  // FULL: no unseated name would still fit (or the cap of 10 is reached).
+  assert.ok(names.length === 10 || long.filter((n) => !names.includes(n)).every((n) => !fitsTwoLines("DevOps & Cloud", [...names, n])), `room left on the lines: ${names.join(", ")}`);
+  // "all": the owner dictated every skill of the group, so neither limit applies (all 12, spill and all).
   const all = parseAssistRequest(body({ instruction: "add all devops", job: { title: "Platform Engineer", company: "Example", missing: [] }, skills: "Python", printedSkills: [{ name: "Python", category: "Languages" }], availableSkills: [{ name: "Docker", category: "DevOps & Cloud" }, ...long.map((name) => ({ name, category: "DevOps & Cloud" }))], categories: ["Languages", "DevOps & Cloud"] }));
   // Valid fixture.
   if (!all.ok) throw new Error(all.message);
-  // Every one of the eight.
-  assert.equal(addedNames([{ op: "add_skill", name: "Docker", category: "DevOps & Cloud" }], all.request).length, 8);
+  // Every one of the twelve.
+  assert.equal(addedNames([{ op: "add_skill", name: "Docker", category: "DevOps & Cloud" }], all.request).length, 12);
 });
 
 test("top-up 2: a skill named alone tops up nothing ('add docker' names no group)", () => {
@@ -1708,4 +1720,238 @@ test("set_role on the allow-listed experience: an unlisted title is refused with
   const other = parsedOps([{ op: "set_role", entry: "e2", text: "Data Analyst Intern" }], aczenRequest("set acme title to data analyst intern"));
   // Kept.
   assert.deepEqual(other.ops, [{ op: "set_role", entry: "e2", text: "Data Analyst Intern" }]);
+});
+
+// --- S9c: a misspelt GROUP name still names the group (Teja 2026-11-21, "add toools 7") ------------------------------
+//
+// groupNamedIn wanted the group's exact words, so "toools" named no group and a group-less add fell through to the
+// skill's kind. Group names now go through the shared typo matcher (_shared/text/name-match.ts), plus one typo on a
+// 5-letter group name ("Tools"), which a skill name of 5 letters does not get.
+
+// The groups of these tests: Databases is where a group-less Redis lands by its kind when no group is named.
+function groupRequest(instruction: string, categories: string[] = ["Languages", "Tools", "Databases"]): AssistRequest {
+  // Through the real validator.
+  const parsed = parseAssistRequest(body({ instruction, categories }));
+  // Valid fixture.
+  if (!parsed.ok) throw new Error(parsed.message);
+  // The request.
+  return parsed.request;
+}
+
+test("S9c: 'toools' and 'databse' name their groups, so a group-less add lands in the group the owner meant", () => {
+  // RED before the fix: no group named, so Redis went to Databases by its kind.
+  assert.deepEqual(parsedOps([{ op: "add_skill", name: "Redis" }], groupRequest("add redis to toools")).ops, [{ op: "add_skill", name: "Redis", category: "Tools" }]);
+  // A two-typo spelling of an 8+ letter group, through the same matcher as skill names.
+  assert.deepEqual(parsedOps([{ op: "add_skill", name: "Kafka" }], groupRequest("add kafka in databse group")).ops, [{ op: "add_skill", name: "Kafka", category: "Databases" }]);
+});
+
+test("S9c: typo forgiveness never names a group from an ordinary word ('could' is not 'Cloud')", () => {
+  // "could" is two edits from "cloud" (a swap plus a shift), so no group is named and Redis files by its kind.
+  assert.deepEqual(parsedOps([{ op: "add_skill", name: "Redis" }], groupRequest("could you add redis", ["Languages", "Cloud", "Databases"])).ops, [{ op: "add_skill", name: "Redis", category: "Databases" }]);
+});
+
+// --- S9e: fewer skills than asked comes with the reason (Teja 2026-11-21, "add 6 cs fundamentals" gave 5) -----------
+
+test("S9e: an add_group for more skills than the master holds says so in the note", () => {
+  // Six asked; the master holds five Tools (TOOLS_MASTER).
+  const parsed = parsedOps([{ op: "add_group", name: "Tools", n: 6 }], toolsRequest("add 6 tools"));
+  // All five proposed.
+  assert.equal(parsed.ops.length, 5);
+  // RED before the fix: the note was the bare count. Now it names the shortfall's cause.
+  assert.match(parsed.note, /Your master has only 5 more Tools skills to add\./);
+});
+
+test("S9e: past the per-group limit, the note names the limit; when the count is met there is no shortfall note", () => {
+  // Twelve short master Tools, so neither the master nor the line width is what stops the fill.
+  const twelve = Array.from({ length: 12 }, (_, i) => ({ name: `T${i}`, category: "Tools" }));
+  // Through the real validator.
+  const parsed = parseAssistRequest(body({ instruction: "add 20 tools", categories: ["Tools"], availableSkills: twelve }));
+  // Valid fixture.
+  if (!parsed.ok) throw new Error(parsed.message);
+  // Twenty asked, ten given, and the note says why.
+  assert.match(parsedOps([{ op: "add_group", name: "Tools", n: 20 }], parsed.request).note, /At most 10 skills are added to one group at a time/);
+  // Three asked, three given: nothing to explain.
+  assert.doesNotMatch(parsedOps([{ op: "add_group", name: "Tools", n: 3 }], parsed.request).note, /only|At most/);
+});
+
+// --- S9b-server: a skill the owner removed in this chat is never re-proposed (Teja 2026-11-21) -----------------------
+//
+// Live: "rm vs code", then "add 3 more tools" put VS Code back 7 s later: the server's pickers choose from the master
+// skills not on the resume, and a removed skill is exactly that. The web now sends removed_skills (orch contract).
+
+// toolsRequest plus the removed list, as the web sends it.
+function removedRequest(instruction: string, removed: unknown): AssistRequest {
+  // Through the real validator.
+  const parsed = parseAssistRequest(body({ instruction, job: { title: "Backend Engineer", company: "Acme", missing: ["Jira"] }, categories: ["Languages", "Tools", "Databases"], availableSkills: TOOLS_MASTER, removed_skills: removed }));
+  // Valid fixture.
+  if (!parsed.ok) throw new Error(parsed.message);
+  // The request.
+  return parsed.request;
+}
+
+test("S9b: removed_skills is optional; a malformed one reads as none and never refuses the ask", () => {
+  // Absent: an older web.
+  assert.deepEqual(removedRequest("add tools", undefined).removedSkills, []);
+  // A list of names: kept, trimmed.
+  assert.deepEqual(removedRequest("add tools", [" VS Code "]).removedSkills, ["VS Code"]);
+  // Not a list of short strings: none, never a partial list and never a 400 (it only steers; the ask is still valid).
+  for (const bad of ["VS Code", [42], [""], ["x".repeat(61)], { 0: "VS Code" }, null]) assert.deepEqual(removedRequest("add tools", bad).removedSkills, [], JSON.stringify(bad));
+});
+
+test("S9b: add_group and the top-up skip a skill the owner removed in this chat", () => {
+  // All five master Tools asked for, VS Code removed earlier: four come back.
+  const filled = parsedOps([{ op: "add_group", name: "Tools", n: 5 }], removedRequest("add 5 more tools", ["VS Code"]));
+  // RED before the fix: VS Code was the fifth.
+  assert.deepEqual(filled.ops.map((op) => (op.op === "add_skill" ? op.name : op.op)), ["Jira", "Postman", "Cursor", "Swagger"]);
+  // The top-up path: the model adds one, the server fills the named group, and still never VS Code.
+  assert.ok(!addedNames([{ op: "add_skill", name: "Postman", category: "Tools" }], removedRequest("add more tools", ["vs code"])).includes("VS Code"));
+});
+
+test("S9b: an add_skill of a removed skill is refused with its reason unless the owner names it again in this message", () => {
+  // The model re-proposes it on a general ask: refused, and the card says how to get it back.
+  const again = parsedOps([{ op: "add_skill", name: "VS Code", category: "Tools" }], removedRequest("add more tools", ["VS Code"]));
+  // No op.
+  assert.deepEqual(again.ops, []);
+  // The reason.
+  assert.deepEqual(again.rejected.map((r) => r.why), ['You removed "VS Code" earlier in this chat. Name it in your message to add it back.']);
+  // The owner asks for it by name (with a typo): their word wins.
+  assert.deepEqual(parsedOps([{ op: "add_skill", name: "VS Code", category: "Tools" }], removedRequest("actually add vs cod back", ["VS Code"])).ops, [{ op: "add_skill", name: "VS Code", category: "Tools" }]);
+});
+
+test("S9b: the prompt lists the removed skills only when there are some, and the rule is in the stable system text", () => {
+  // One removed.
+  const prompt = buildAssistPrompt(removedRequest("add tools", ["VS Code"]));
+  // Its own labelled line in the RESUME block.
+  assert.match(prompt.userContent, /^REMOVED IN THIS CHAT: VS Code$/m);
+  // The rule, in the cached system text.
+  assert.match(prompt.systemInstruction, /REMOVED IN THIS CHAT/);
+  // None removed: no line, so an older web's prompt is byte-identical to before.
+  assert.doesNotMatch(buildAssistPrompt(removedRequest("add tools", undefined)).userContent, /REMOVED IN THIS CHAT/);
+});
+
+// --- S9a: an explicit count lifts the width limit, and the limit is the web's TWO lines (Teja 2026-11-21) --------------
+//
+// Live: 7 adds were dropped by a group-width check while the reply said "Proposed N". The server measured ONE line while
+// the web's gate allows SKILL_GROUP_MAX_LINES (2), and only the word "all" lifted it. "add 7 tools" now dictates 7.
+
+// Seven long master Tools: far more than two printed lines' worth at any type size.
+const LONG_TOOLS = Array.from({ length: 7 }, (_, i) => ({ name: `Enterprise Observability Platform ${i}`, category: "Tools" }));
+
+// A request whose master holds LONG_TOOLS.
+function longToolsRequest(instruction: string): AssistRequest {
+  // Through the real validator.
+  const parsed = parseAssistRequest(body({ instruction, categories: ["Tools"], availableSkills: LONG_TOOLS }));
+  // Valid fixture.
+  if (!parsed.ok) throw new Error(parsed.message);
+  // The request.
+  return parsed.request;
+}
+
+test("S9a: 'add 7 tools' adds all seven even past the line limit; with no count the two-line limit still holds", () => {
+  // RED before the fix: the one-line check kept only what fit one line.
+  assert.equal(parsedOps([{ op: "add_group", name: "Tools", n: 7 }], longToolsRequest("add 7 tools")).ops.length, 7);
+  // No count in the owner's words: the width limit stops the fill short of seven.
+  const plain = parsedOps([{ op: "add_group", name: "Tools", n: 7 }], longToolsRequest("add more tools")).ops.length;
+  // Some fit, never all seven.
+  assert.ok(plain > 0 && plain < 7, String(plain));
+});
+
+// --- S9i P2 + S9j: the server applies the answer itself (Teja 2026-11-21 15:34 and 18:54) ------------------------------
+//
+// "every edit he prompts in the resume chat is applied and done … even if he closes the chat, the tab or the job". A page
+// that sends server_apply + application_id + apply_maps gets its ops applied HERE (server-apply.ts, bound in index.ts),
+// and the body carries one outcome per op. Place-moves (S9j) are only offered to such a page: an older page's strict
+// reader would refuse the kind, so the parser refuses them by name for it instead.
+
+// The maps a server-applied ask carries for body()'s resume (bullets b0..).
+const APPLY_MAPS = { bullets: { b0: "ref-b0" }, entries: {}, available_bullets: {}, available_entries: {}, skills: [] };
+// A real-looking application id.
+const APP_ID = "11111111-2222-4333-8444-555555555555";
+
+test("S9i P2: a server-apply ask is applied by the server and the body names each op's outcome", async () => {
+  // The ops the apply seam received.
+  const received: unknown[] = [];
+  // The happy-path deps, plus an apply seam that records and answers.
+  const d = deps();
+  // The original connect.
+  const connect = d.connect;
+  // Wrapped: the same connection plus apply.
+  const withApply: AssistDeps = { ...d, connect: async () => { const c = await connect(); return c.ok ? { ...c, apply: async (args) => { received.push(args); return [{ status: "applied", label: "Remove bullet" }] as const; } } : c; } };
+  // The ask, server-applied.
+  const res = await handleResumeAssist(post("good", body({ server_apply: true, application_id: APP_ID, apply_maps: APPLY_MAPS })), withApply);
+  // The answer.
+  const json = await res.json() as { status: string; applied?: unknown[] };
+  // Applied, with the outcome list.
+  assert.deepEqual([json.status, json.applied], ["ok", [{ status: "applied", label: "Remove bullet" }]]);
+  // The seam got this row, the kept op and the maps.
+  assert.deepEqual(received, [{ applicationId: APP_ID, ops: [{ op: "remove", id: "b0" }], maps: { bullets: { b0: "ref-b0" }, entries: {}, availableBullets: {}, availableEntries: {}, skills: [] } }]);
+});
+
+test("S9i P2: an op the parser drops is a refused outcome in `applied` and in the chat row the server writes", async () => {
+  // The chat rows the server wrote.
+  const written: unknown[] = [];
+  // The model keeps b0 and names b99, a bullet it was never shown (the parser drops it).
+  const d = deps({ answer: { ok: true, keyIndex: 1, attempts: 1, data: { candidates: [{ content: { parts: [{ text: JSON.stringify({ ops: [{ op: "remove", id: "b0" }, { op: "remove", id: "b99" }], note: "" }) }] }, finishReason: "STOP" }] } } });
+  // The original connect.
+  const connect = d.connect;
+  // Apply answers for the kept op; saveChat records the rows.
+  const seams: AssistDeps = { ...d, connect: async () => { const c = await connect(); return c.ok ? { ...c, apply: async () => [{ status: "applied", label: "Remove bullet" }] as const, saveChat: async (rows) => { written.push(...rows); return true; } } : c; } };
+  // The ask, server-applied, naming its chat.
+  const json = await (await handleResumeAssist(post("good", body({ server_apply: true, application_id: APP_ID, apply_maps: APPLY_MAPS, chat_id: APP_ID })), seams)).json() as { applied?: { status: string; why?: string }[] };
+  // The kept op applied, then the dropped one refused WITH its reason (a page showing only this list must see it).
+  assert.deepEqual(json.applied?.map((o) => [o.status, typeof o.why]), [["applied", "undefined"], ["refused", "string"]]);
+  // The stored answer names the refusal too, so a reopened chat tells the same story.
+  assert.match(String((written[1] as { content?: unknown } | undefined)?.content), /Could not do/);
+});
+
+test("S9i P2: without server_apply (or with malformed maps) nothing is applied server-side", async () => {
+  // Calls to the apply seam.
+  let applies = 0;
+  // Deps with a counting apply.
+  const d = deps();
+  // The original connect.
+  const connect = d.connect;
+  // Wrapped.
+  const counting: AssistDeps = { ...d, connect: async () => { const c = await connect(); return c.ok ? { ...c, apply: async () => { applies += 1; return []; } } : c; } };
+  // An older page: no flag.
+  const old = await (await handleResumeAssist(post("good"), counting)).json() as Record<string, unknown>;
+  // A malformed map: one bullet ref is a number.
+  const bad = await (await handleResumeAssist(post("good", body({ server_apply: true, application_id: APP_ID, apply_maps: { ...APPLY_MAPS, bullets: { b0: 7 } } })), counting)).json() as Record<string, unknown>;
+  // Neither was applied, and neither body carries "applied".
+  assert.deepEqual([applies, "applied" in old, "applied" in bad], [0, false, false]);
+});
+
+test("S9j: place-moves reach only a server-applied page; an older page gets a named refusal", () => {
+  // A structured request (sections and entries), as an older page sends it.
+  const older = structuredRequest();
+  // The same, server-applied.
+  const served = { ...older, serverApply: true, applicationId: APP_ID, applyMaps: { bullets: {}, entries: {}, availableBullets: {}, availableEntries: {}, skills: [] } };
+  // An entry and a section to a place.
+  const ops = [{ op: "move_entry", entry: "e0", place: 1 }, { op: "move_section", section: older.sections[1], place: 1 }];
+  // Kept for the server-applied page.
+  assert.deepEqual(parsedOps(ops, served).ops, [{ op: "move_entry", entry: "e0", place: 1 }, { op: "move_section", section: older.sections[1], place: 1 }]);
+  // Refused by name for the older page.
+  assert.deepEqual(parsedOps(ops, older).rejected.map((r) => r.why), ["Moving to a place needs the updated page; reload it and ask again.", "Moving to a place needs the updated page; reload it and ask again."]);
+});
+
+test("S9i P2: a closed tab still finds the bubble: the server writes the exchange, the record first", async () => {
+  // The rows the seam received.
+  const written: unknown[] = [];
+  // Deps with apply + saveChat.
+  const d = deps();
+  // The original connect.
+  const connect = d.connect;
+  // Wrapped.
+  const both: AssistDeps = { ...d, connect: async () => { const c = await connect(); return c.ok ? { ...c, apply: async () => [{ status: "applied", label: "Remove bullet" }, { status: "refused", label: "Move section", why: "already first" }] as const, saveChat: async (rows) => { written.push(...rows); return true; } } : c; } };
+  // A server-applied ask naming its chat.
+  const chatId = "99999999-8888-4777-8666-555555555555";
+  // Sent.
+  const json = await (await handleResumeAssist(post("good", body({ instruction: "drop the first point", server_apply: true, application_id: APP_ID, apply_maps: APPLY_MAPS, chat_id: chatId })), both)).json() as { chat_saved?: boolean };
+  // Stored, and the page is told so it does not write a second copy.
+  assert.equal(json.chat_saved, true);
+  // The ask, then the answer led by what landed and what did not.
+  assert.deepEqual(written.map((r) => [(r as { role: string }).role, (r as { content: string }).content, (r as { ops: unknown }).ops]), [
+    ["user", "drop the first point", null],
+    ["assistant", "[Applied: Remove bullet | Could not do: Move section (already first)] Dropped one.", []],
+  ]);
 });

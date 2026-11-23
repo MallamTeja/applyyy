@@ -326,7 +326,8 @@ describe('attestBullet: one click puts the line in the master, then on the resum
   /* The test above passes on a faithful COPY too, which is the drift risk itself. This is the red
      half: the owner's literal sentences may appear in exactly one source file. Derived from
      storeRefusalMessage at run time, so a rewording moves with it instead of breaking this. */
-  it('keeps the refusal wording in one source file, masterStore.ts', async () => {
+  // S9i (2026-11-21): the store moved to supabase/functions/_shared/resume-edit/master-store.ts; that is the one home now.
+  it('keeps the refusal wording in one source file, the shared master-store.ts', async () => {
     // Node stdlib only: a recursive listing and a read.
     const { readdirSync, readFileSync } = await import('node:fs');
     // The web source root, beside this test directory.
@@ -345,8 +346,10 @@ describe('attestBullet: one click puts the line in the master, then on the resum
       const sentence = store.storeRefusalMessage({ kind });
       // Every file that spells the sentence out.
       const homes = files.filter((p) => readFileSync(new URL(p, srcRoot), 'utf8').includes(sentence));
-      // Exactly one home.
-      assert.deepEqual(homes, ['features/settings/masterStore.ts'], `"${sentence}" is written out in: ${homes.join(', ')}`);
+      // No web file spells it out (masterStore.ts there only re-exports the shared module).
+      assert.deepEqual(homes, [], `"${sentence}" is written out in: ${homes.join(', ')}`);
+      // The one home: the shared store itself.
+      assert.ok(readFileSync(new URL('../../../supabase/functions/_shared/resume-edit/master-store.ts', import.meta.url), 'utf8').includes(sentence), `"${sentence}" is not in the shared master-store.ts`);
     }
   });
 

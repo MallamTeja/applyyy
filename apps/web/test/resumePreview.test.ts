@@ -144,7 +144,8 @@ describe('approval queue: Bucket A rows open', () => {
        both halves: the page sends the builder's output, and the builder names 'human'. */
     assert.match(page, /rpc\(\s*'advance_application_status',[\s\S]*?buildSettleArgs\(/);
     // The builder's own source names the human agent.
-    assert.match(source('features/approval/saveTailoredEdit.ts'), /p_agent: 'human'/);
+    // The save moved to the shared engine (S9i, 2026-11-21); the web file only re-exports it, so read the module itself.
+    assert.match(readFileSync(fileURLToPath(new URL('../../../supabase/functions/_shared/resume-edit/save-tailored-edit.ts', import.meta.url)), 'utf8'), /p_agent: 'human'/);
   });
 
   it('a Bucket A row can preview its resume with the pinned master version', () => {

@@ -1079,4 +1079,34 @@ describe('setEntryRole (2026-11-11)', () => {
     // A job not on the resume.
     assert.equal(edits.setEntryRole(orig, 'exp-gone', 'Data Analyst Intern').ok, false);
   });
+
+  /* Round 6 (2026-11-21), the FamPay path: a chat set_role wrote any title onto the Aczen internship, past the tailor's
+     allow-list. Orch ruling reconciling Teja 11-11 ("dictated title") with 11-18 21:55 ("allow-list, anything else
+     refused; background checks compare titles with HR records"): exp_aczen takes ONLY an allow-listed title; every
+     other experience keeps its dictated title (the test above). */
+  it('refuses a title outside the allow-list on exp_aczen, naming the allowed titles, and never touches the resume', () => {
+    // The tailor's version with its first job as the Aczen internship (the master id is the entry's ref).
+    const orig = original();
+    // Same entry, re-keyed to the allow-listed experience.
+    const aczen = { ...orig, experience: [{ ...orig.experience[0]!, ref: 'exp_aczen' }, ...orig.experience.slice(1)] };
+    // The FamPay title.
+    const out = edits.setEntryRole(aczen, 'exp_aczen', 'Data Analyst Intern');
+    // Refused, with a reason that lists every allowed title so the owner can pick one.
+    assert.deepEqual(out, { ok: false, reason: 'This job title must be one of: Full Stack AI Engineer Intern, Software Engineer Intern, Backend Engineer Intern, AI Engineer Intern. Background checks compare it with HR records.' });
+  });
+
+  it('accepts an allow-listed title on exp_aczen, printed in the list spelling whatever case the chat used', () => {
+    // The same re-keyed fixture.
+    const orig = original();
+    // The Aczen entry.
+    const aczen = { ...orig, experience: [{ ...orig.experience[0]!, ref: 'exp_aczen' }, ...orig.experience.slice(1)] };
+    // Lower case and extra spaces, as a chat may send it.
+    const out = edits.setEntryRole(aczen, 'exp_aczen', '  software  engineer intern ');
+    // Landed.
+    assert.equal(out.ok, true);
+    // Narrowed.
+    if (!out.ok) return;
+    // The list's own spelling, which the tailor's validator compares exactly.
+    assert.equal(out.resume.experience[0]!.role, 'Software Engineer Intern');
+  });
 });

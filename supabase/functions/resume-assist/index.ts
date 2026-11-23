@@ -13,6 +13,12 @@ import { handleResumeAssist } from "./assist.ts";
 // Counts this request's Gemini call into one agent_runs row. Imported from job-link-intake by relative
 // path (as that function imports ../scout-web/fetch-board.ts); gemini-meter.ts says why it lives there.
 import { geminiMeter } from "../job-link-intake/gemini-meter.ts";
+// S9i P2: the server-side apply of a chat answer (Teja 15:34: edits land even with the tab closed).
+import { applyOnServer } from "./server-apply.ts";
+
+// The apply's wall-clock budget: under the edge function's own limit, so it refuses and reports rather than being
+// killed half-way (the orchestrator's note: finish inside the wall time). ponytail: a fixed guess; tune from logs.
+const APPLY_BUDGET_MS = 60_000;
 
 // Supabase's background-task hook. Deno's own types do not declare it.
 declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void };
@@ -37,8 +43,19 @@ Deno.serve(withErrorBoundary("resume-assist", async (req: Request): Promise<Resp
       // The gates read through `db`; Gemini claims its key through the same client.
       // The call goes through the meter, which writes gemini_calls into this request's run row.
       // The call is kept in `call` so the run row below is written only once it has settled.
-      return { ok: true, db: client.db, userId: client.userId, generate: (options) => (call = meter.call(client.db, () => generateGeminiContent(client.db, options))) };
+      return {
+        // The narrow client the gates read.
+        ok: true, db: client.db, userId: client.userId,
+        // The metered Gemini call.
+        generate: (options) => (call = meter.call(client.db, () => generateGeminiContent(client.db, options))),
+        // S9i P2: the apply under this same signed-in client, with a deadline counted from now.
+        apply: async (args) => (await applyOnServer(client.db, { ...args, deadline: Date.now() + APPLY_BUDGET_MS }, { now: Date.now, uuid: () => crypto.randomUUID() })).outcomes,
+        // S9i P2: the exchange under the same client; supabase-js reports a refusal as a value, so false then.
+        saveChat: async (rows) => { try { const { error } = await client.db.from("resume_chat_messages").insert(rows); return !error; } catch { return false; } },
+      };
     },
+    // S9i P2: the answer-then-apply chain outlives the response, so a closed tab never stops an edit half-way.
+    keepAlive: (work) => EdgeRuntime.waitUntil(work.catch(() => {})),
   });
   // The run row in the background, after the call settles (a throw too), so the person waiting pays no extra
   // round trip and a streamed call is metered with its real outcome; no call, no row.

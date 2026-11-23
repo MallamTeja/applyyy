@@ -31,7 +31,11 @@
     // already writes its imports.
     "allowImportingTsExtensions": true,
     // Vite injects import.meta.env typings through this reference.
-    "types": ["vite/client"]
+    "types": ["vite/client"],
+    // S9i (2026-11-21): the resume-edit engine moved to supabase/functions/_shared/resume-edit, and two of its files
+    // import the SupabaseClient TYPE by its bare name. Resolved from there, tsc finds no node_modules (that tree has
+    // none), so the bare name is mapped to this app's own copy. Type-only: Vite never resolves it (the import is erased).
+    "paths": { "@supabase/supabase-js": ["./node_modules/@supabase/supabase-js"] }
   },
   // Only application sources are roots. vite.config.ts runs in Node, not the
   // browser, so it is typechecked by its own project below.

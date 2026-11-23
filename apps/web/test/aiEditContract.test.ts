@@ -51,6 +51,8 @@ const SAMPLES: Record<string, Record<string, unknown>> = {
   remove_entry: { op: 'remove_entry', id: 'e1' },
   // A job's title set to the owner's wording (2026-11-11).
   set_role: { op: 'set_role', entry: 'e0', text: 'Data Analyst Intern' },
+  // S9j (2026-11-21): an entry to a place, sent only to a server-applied page; the reader must take it.
+  move_entry: { op: 'move_entry', entry: 'e2', place: 1 },
 };
 
 // The smallest request parseAssistRequest accepts, so buildAssistPrompt can run.

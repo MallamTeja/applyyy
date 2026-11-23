@@ -70,7 +70,7 @@ export const BatchPreviewContext = createContext<((applicationId: string, action
 /* The action kinds that put content ON the resume, the only ones a card previews (a remove or move never overflows). */
 const ADDING_KINDS: ReadonlySet<EditAction['kind']> = new Set<EditAction['kind']>(['add_skill', 'attest_skill', 'add_master_bullet', 'add_master_entry', 'attest_bullet']);
 // The pure halves: build the ask, resolve and apply ops, read applied state and outcomes, format the bill.
-import { applyTogether, batchRunLine, bulletParents, buildAssistDraft, formatUsage, holdReason, isApplied, isPairedHalf, outcomeNote, replyNote, resolveOps, sectionTitle, shouldAutoApply, opLabel, runApplyBatch, swapPartners, toEditAction } from './aiEdit';
+import { outcomeText, withServerApply, applyTogether, batchRunLine, bulletParents, buildAssistDraft, formatUsage, holdReason, isApplied, historyTurnText, isPairedHalf, removedInChat, replyNote, resolveOps, sectionTitle, shouldAutoApply, opLabel, runApplyBatch, swapPartners, toEditAction } from './aiEdit';
 // Types for the ask and its parts.
 import type { ApplicableOp, AssistBody, AssistProgress, AssistResult, AssistStructure, AuditAdvice, StoredOp } from './aiEdit';
 // The memory: grouping into chats and the window sent back as context.
@@ -400,6 +400,8 @@ export function AiEditPanel({
   seed,
   // T10: the page's atomic batch save; required since T16, so no caller can fall back to op-by-op saves.
   onEditBatch,
+  // S9i P2: present when the page can re-read this row; it switches the chat to server-side apply.
+  onReloadRow,
 }: {
   // The rendered diff: the AI's context is built from it, so it sees what the operator sees.
   readonly diff: ResumeDiff;
@@ -425,6 +427,11 @@ export function AiEditPanel({
      T16 (2026-11-10): REQUIRED. It replaced the per-op onPreflight check (2026-11-07), which never ran once
      every caller passed this; a missing batch save is now a compile error, not a silent op-by-op fallback. */
   readonly onEditBatch: (actions: readonly EditAction[], editSource: ChatSource) => Promise<EditResult>;
+  /* S9i P2 (Teja 2026-11-21 15:34: "every edit he prompts in the resume chat is applied and done … NO Apply button …
+     even if he closes the chat, the tab or the job"). When the page passes this, the SERVER applies each answer
+     (withServerApply) and the panel only shows what landed, then asks the page to re-read the row the server wrote.
+     Absent: the browser applies as before (a page or test that cannot re-read a row). */
+  readonly onReloadRow?: (() => Promise<void>) | undefined;
 }): ReactElement {
   // Ties labels to controls and the heading to the region.
   const baseId = useId();
@@ -554,13 +561,18 @@ export function AiEditPanel({
     /* The chat's last turns, each earlier reply led by what its changes amount to NOW, read from the
        resume (aiEdit.outcomeNote). First, because historyFor cuts each turn at 500 characters, and
        the outcome is the part the model must not lose: "I added C" alone was resent as a fact. */
-    const turns = active.map((m) => (m.role === 'assistant' && m.ops !== null ? { ...m, content: [outcomeNote(m.ops, diff, structure ?? null), m.content].filter((part) => part !== '').join(' ') } : m));
-    // Built from the diff as it is NOW (every applied edit included), its structure, and those turns.
-    const draft = buildAssistDraft(diff, categories, text, historyFor(turns), structure ?? null);
+    // S9b (2026-11-21): historyTurnText also drops the server's empty "Proposed N change" line from each turn.
+    const turns = active.map((m) => (m.role === 'assistant' && m.ops !== null ? { ...m, content: historyTurnText(m.ops, m.content, diff, structure ?? null) } : m));
+    // Built from the diff as it is NOW (every applied edit included), its structure, those turns, and (S9b) the skills
+    // this chat removed and that are still off, so the server never re-proposes them.
+    const draft = buildAssistDraft(diff, categories, text, historyFor(turns), structure ?? null, removedInChat(active.map((m) => m.ops), diff));
     // A fresh ask starts with no stale stage line or half reply from the last one.
     setProgress({});
     // The call; never throws. Each streamed update replaces the whole progress view.
-    const result = await onAssist(draft.body, setProgress);
+    // S9i P2: the server applies the answer when the page can re-read the row; otherwise the browser does, as before.
+    const sent = onReloadRow === undefined ? draft : withServerApply(draft, diff.applicationId, chatId);
+    // The call; never throws. Each streamed update replaces the whole progress view.
+    const result = await onAssist(sent.body, setProgress);
     // The answer is in: the final reply renders from the result, so the streamed draft goes.
     setProgress({});
     // A failed ask is said and nothing is stored; the prompt goes back to the head of the queue for a retry.
@@ -576,6 +588,33 @@ export function AiEditPanel({
       // Unlocks.
       setAsking(false);
       // Nothing else changes.
+      return;
+    }
+    /* S9i P2: the server already applied this answer. No cards and no Apply buttons: one reply that leads with what
+       landed, what did not and why (outcomeText, the server's own wording), then the AI's note. The server wrote the
+       exchange when it says chat_saved; otherwise this page writes it, ops [] like the server's. Then the row is
+       re-read, so the resume on screen is the one the server saved. */
+    if (result.applied !== undefined) {
+      // The reply text, inside the table's 2000-character check.
+      const replyText = ([outcomeText(result.applied), result.note].filter((part) => part !== '').join(' ') || 'No changes.').slice(0, 2000);
+      // The exchange as the server stores it.
+      const pair: NewChatMessage[] = [
+        // The owner's words.
+        { chatId, role: 'user', content: text, ops: null, usage: null },
+        // The answer, with no cards.
+        { chatId, role: 'assistant', content: replyText, ops: [], usage: result.usage },
+      ];
+      // Stored here only when the server did not store it.
+      const stored = result.chatSaved === true || chat === undefined ? null : await chat.save(diff.applicationId, pair);
+      // Shown either way.
+      setMessages((current) => [...current, ...(stored !== null && stored.kind === 'ok' ? stored.messages : pair.map((m) => ({ ...m, id: null, createdAt: new Date().toISOString() })))]);
+      // A failed write is said.
+      if (stored !== null && stored.kind === 'error') setError(stored.message);
+      // The row the server wrote, adopted by the page (onReloadRow is defined in this mode).
+      await onReloadRow?.();
+      // The composer unlocks.
+      setAsking(false);
+      // Nothing for the browser to apply.
       return;
     }
     /* Each op resolved to this resume's targets, in order (so repeated moves pass different siblings);

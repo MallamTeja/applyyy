@@ -273,12 +273,15 @@ describe('shouldAutoApply (the AI performs the actions, 2026-11-01)', () => {
   /* 2026-11-05: a NAMED skill the master lacks no longer applies by itself. Naming vouches for the
      skill, not for the group the AI filed it under, and Apply writes that group into the master
      (master v14 got "Testing" and "Code review" under "AI" this way). Same rule as a new bullet. */
-  it('never adds a master-less skill by itself, even one the operator named; its card waits for the group check', () => {
-    // The 2026-11-01 message that used to auto-apply all four.
+  /* REVERSED by Teja 2026-11-21 15:11 (S9g): "if i say once add it need to add without need of my click or confirmation
+     even though it is not there in my resume". A NAMED new skill now applies by itself (its group comes from the
+     server's chain, the owner's named group first); an AI-chosen one still waits. */
+  it('adds a master-less skill by itself only when the operator named it (S9g); an AI-chosen one still waits', () => {
+    // The 2026-11-01 message naming all four.
     const said = 'hey i wanan add dbms , os , cn , oops skills to';
-    // Named, but new to the master: every one waits for a click.
-    assert.deepEqual(['DBMS', 'OS', 'CN', 'OOPS'].map((n) => ai.shouldAutoApply(skill(n), said)), [false, false, false, false]);
-    // A skill the AI chose on its own waits too, as before.
+    // Named and new to the master: every one applies (S9g).
+    assert.deepEqual(['DBMS', 'OS', 'CN', 'OOPS'].map((n) => ai.shouldAutoApply(skill(n), said)), [true, true, true, true]);
+    // A skill the AI chose on its own still waits.
     assert.equal(ai.shouldAutoApply(skill('Kubernetes'), said), false);
     // The held card says why it waits, so a named skill that did not land never reads as "did nothing".
     assert.match(ai.holdReason(skill('DBMS')) ?? '', /group/);
@@ -940,7 +943,7 @@ describe('T10 buildAssistDraft offers unused master bullets by job relevance', (
 // --- T10: a skill group the owner names, new to the master (2026-11-10) --------------------------
 
 describe('T10 a new owner-named skill group', () => {
-  it('T10 skill group: a new owner-named group survives the reader and becomes an attest_skill held for a click', async () => {
+  it('T10 skill group: a new owner-named group survives the reader and becomes an attest_skill that applies by itself (S9g)', async () => {
     // The op the server now sends when the owner dictated the group: a category the master has never had.
     const op = { op: 'add_skill', name: 'Pulumi', category: 'Infrastructure as Code' };
     // A client answering with it, in the server's ok shape.
@@ -957,8 +960,8 @@ describe('T10 a new owner-named skill group', () => {
     assert.deepEqual(stored, { op: 'add_skill', name: 'Pulumi', category: 'Infrastructure as Code', inMaster: false });
     // The page action is an attest carrying that group, so Apply writes it into the master.
     assert.deepEqual(ai.toEditAction(stored as never), { kind: 'attest_skill', keyword: 'Pulumi', category: 'Infrastructure as Code' });
-    // Held: a skill new to the master never applies by itself, even when the owner named it.
-    assert.equal(ai.shouldAutoApply(stored!, body.instruction), false);
+    // Named by the owner, so it applies by itself (S9g, Teja 2026-11-21 15:11), new group and all.
+    assert.equal(ai.shouldAutoApply(stored!, body.instruction), true);
     // And the card says why it waits.
     assert.match(ai.holdReason(stored!) ?? '', /group/);
   });

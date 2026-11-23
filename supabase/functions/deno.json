@@ -1,9 +1,10 @@
 {
   "// purpose": "Deno's configuration root for supabase/functions/**. It exists for a second reason beyond settings: WITHOUT a deno.json here, Deno walks up the tree looking for a workspace root, finds pnpm-workspace.yaml, and REWRITES the repo's root package.json to add a `workspaces` key. That file belongs to another stream. Anchoring Deno here stops the walk.",
 
-  "// imports": "Import map. @supabase/supabase-js is pinned HERE, once (P2 #7, 2026-11-05): it used to be written as jsr:@supabase/supabase-js@2.58.0 in 7 files, so a bump had 7 places to drift. Every file imports the bare name. Node never resolves it: the files node --test loads use `import type` only, which Node's type stripping erases, and the value importers (_shared/db/client.ts, rls-proof) are Deno-only. Note Node's worker pins supabase-js 2.50.0 separately (worker/package.json): the two runtimes still run different client versions. @applyy/shared-types stays a relative import (_shared/contracts/shared-types.ts) because node --test cannot read this map.",
+  "// imports": "Import map. @supabase/supabase-js is pinned HERE, once (P2 #7, 2026-11-05): it used to be written as jsr:@supabase/supabase-js@2.58.0 in 7 files, so a bump had 7 places to drift. Every file imports the bare name. Node never resolves it: the files node --test loads use `import type` only, which Node's type stripping erases, and the value importers (_shared/db/client.ts, rls-proof) are Deno-only. Note Node's worker pins supabase-js 2.50.0 separately (worker/package.json): the two runtimes still run different client versions. @applyy/shared-types is mapped here for DENO ONLY (S9i, 2026-11-21): packages/master-ingest imports it by its bare name, and the server-side resume-chat apply needs master-ingest's checks (findDuplicateNodeIds). Node never reads this map; it keeps resolving the bare name through node_modules (the pnpm workspace link). Code under supabase/functions still imports the types relatively via _shared/contracts/shared-types.ts.",
   "imports": {
-    "@supabase/supabase-js": "jsr:@supabase/supabase-js@2.58.0"
+    "@supabase/supabase-js": "jsr:@supabase/supabase-js@2.58.0",
+    "@applyy/shared-types": "../../packages/shared-types/src/index.ts"
   },
 
   "// compilerOptions": "Kept aligned with the repo's tsconfig.base.json. Deno does not read that file, so the strictness settings that matter for the anti-fabrication work are restated rather than assumed.",

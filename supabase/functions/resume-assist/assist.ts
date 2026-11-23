@@ -44,6 +44,12 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { authorizeCaller, readKillSwitch, type CallerAuthClient, type CallerRefused, type KillSwitchClient } from "../_shared/db/gates.ts";
 // Types only: the call options and outcome of the one Gemini client.
 import type { GeminiCallOutcome, GeminiResponseBody, GenerateGeminiOptions } from "../_shared/gemini/client.ts";
+// S9i P2 (2026-11-21): the id -> ref maps a server-applied ask carries, and the wire op shape the server applies.
+import type { ApplyMaps, WireOp } from "../_shared/resume-edit/resolve-ops.ts";
+// What the server-side apply reports per op.
+import type { ServerOutcome } from "../_shared/resume-edit/server-plan.ts";
+// The one wording of an apply report, shared with the web panel (S9i P2), so both sides print the same record.
+import { outcomeText } from "../_shared/resume-edit/server-plan.ts";
 // The operator-readable sentence for a failed Gemini call.
 import { describeGeminiFailure } from "../_shared/gemini/failure-message.ts";
 // The tailor's own number extractor, reused so "a new metric" means the same thing here as there; the one printable job-title shape (set_role, 2026-11-11); and the title allow-list the validator and the web enforce (2026-11-21).
@@ -59,9 +65,11 @@ import { TAILOR_SECTION_KINDS } from "../_shared/tailor/prompt.ts";
 import { canonicalSkillTerm } from "../_shared/tailor/jd-keywords.ts";
 // The ONE "did the owner name this?" matcher, shared with the web's auto-apply predicate (S5, 2026-11-21), so the
 // server and the browser can never disagree about whether "rm vs cod e" named VS Code.
-import { namedIn, withinOneEdit } from "../_shared/text/name-match.ts";
+import { compactName, namedIn, withinOneEdit } from "../_shared/text/name-match.ts";
 // The one-skill-group-one-line width model (2026-11-12), the same one the tailor fills groups with.
-import { skillGroupFitsOneLine } from "../../../packages/resume-template/src/index.ts";
+import { skillGroupLineCount, TYPOGRAPHY_LADDER } from "../../../packages/resume-template/src/index.ts";
+// S9a (2026-11-21): the tailor's line LIMIT, the same constant the web's edit gate reads (tailoredEdits skillGroupWrapReason).
+import { SKILL_GROUP_MAX_LINES } from "../../../packages/resume-template/src/page-fit.ts";
 
 // At most this many ops per answer. A bigger rewrite is a re-tailor, not an assist, and the cap
 // also bounds the output the model is asked to produce.
@@ -173,6 +181,20 @@ export interface AssistRequest {
   readonly entries: readonly { readonly id: string; readonly section: string; readonly label: string }[];
   // Master items NOT on the resume, which add_back can restore.
   readonly available: readonly AvailableItem[];
+  /* S9b (2026-11-21): skills the owner removed earlier IN THIS CHAT (the web derives them from applied remove_skill
+     ops). Live: "rm vs code", then "add 3 more tools" put VS Code back 7 s later, because every picker here chooses
+     from master-skills-not-on-resume and a removed skill is exactly that. Empty when not sent (an older web). */
+  readonly removedSkills: readonly string[];
+  /* S9i P2 (Teja 15:34: every chat edit is applied, even with the tab closed): the page asks the SERVER to apply the
+     answer. Only with an application id and the id -> ref maps it minted; false for an older page, which keeps
+     applying in the browser. */
+  readonly serverApply: boolean;
+  // The row to apply to, when serverApply.
+  readonly applicationId: string | null;
+  // The page's id -> ref maps, when serverApply.
+  readonly applyMaps: ApplyMaps | null;
+  // The chat this ask belongs to (a uuid), when serverApply: the server writes the exchange into it. Null: no write.
+  readonly chatId: string | null;
 }
 
 // One master item not on the resume. The id's prefix says which kind, so the model needs no field.
@@ -205,10 +227,16 @@ export type AssistOp =
   // 2026-11-04: take a printed skill off the resume; `name` is the resume's own spelling.
   // `category` only when the same name prints under two groups and the AI named one of them.
   | { readonly op: "remove_skill"; readonly name: string; readonly category?: string }
-  // One bullet one place up or down among the bullets of its entry.
+  // One bullet one place up or down among the bullets of its entry, or (S9j) to a 1-based place.
   | { readonly op: "move"; readonly id: string; readonly direction: MoveDirection }
+  // S9j: a bullet to a place (server-applied pages only).
+  | { readonly op: "move"; readonly id: string; readonly place: number }
   // One section one place up or down in the printed order.
   | { readonly op: "move_section"; readonly section: string; readonly direction: MoveDirection }
+  // S9j: a section to a place (server-applied pages only).
+  | { readonly op: "move_section"; readonly section: string; readonly place: number }
+  // S9j: an entry (eN) to a place within its section (server-applied pages only).
+  | { readonly op: "move_entry"; readonly entry: string; readonly place: number }
   // An AVAILABLE item (mN bullet or nN entry) back onto the resume, in the master's own words.
   | { readonly op: "add_back"; readonly id: string }
   // 2026-11-11 (Teja: "it need to allow me to change the internship titles or roles too, by prompting it"): the job
@@ -460,8 +488,87 @@ export function parseAssistRequest(raw: unknown): { ok: true; request: AssistReq
       sections: rawSections.map(String),
       entries,
       available,
+      // Steering only, so a malformed list reads as none rather than refusing an otherwise valid ask.
+      removedSkills: readRemovedSkills(raw.removed_skills),
+      // S9i P2: all three or none; a malformed map turns server apply off (the page then applies, as before).
+      ...readServerApply(raw),
     },
   };
+}
+
+/* S9i P2: the server-apply request from the wire: an explicit true, a uuid-shaped application id and well-formed maps,
+   or server apply is OFF. Never a partial: a map with one bad entry could send an op to the wrong node, so the whole
+   thing is refused and the page applies in the browser as it always did. Refs are still re-checked at apply time. */
+function readServerApply(raw: Record<string, unknown>): { serverApply: boolean; applicationId: string | null; applyMaps: ApplyMaps | null; chatId: string | null } {
+  // Off, unless every part reads.
+  const off = { serverApply: false, applicationId: null, applyMaps: null, chatId: null };
+  // Asked for explicitly.
+  if (raw.server_apply !== true) return off;
+  // A uuid.
+  const id = typeof raw.application_id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw.application_id) ? raw.application_id : null;
+  // The maps object.
+  const maps = isRecord(raw.apply_maps) ? raw.apply_maps : null;
+  // Either missing.
+  if (id === null || maps === null) return off;
+  // A short string (a ref).
+  const ref = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 120;
+  // A section an entry may live in.
+  const section = (value: unknown): value is "experience" | "projects" | "education" | "achievements" | "certifications" => typeof value === "string" && SECTION_KINDS.has(value) && value !== "summary" && value !== "skills";
+  // id -> ref, bounded.
+  const refMap = (value: unknown): Record<string, string> | null => (isRecord(value) && Object.keys(value).length <= MAX_BULLETS && Object.values(value).every(ref) ? (value as Record<string, string>) : null);
+  // id -> {section, ref}, bounded.
+  const entryMap = (value: unknown): Record<string, { section: "experience" | "projects" | "education" | "achievements" | "certifications"; ref: string }> | null => (isRecord(value) && Object.keys(value).length <= MAX_ENTRIES && Object.values(value).every((e) => isRecord(e) && section(e.section) && ref(e.ref)) ? (value as never) : null);
+  // The printed skills with refs.
+  const skills = Array.isArray(maps.skills) && maps.skills.length <= MAX_PRINTED_SKILLS && maps.skills.every((k) => isRecord(k) && typeof k.name === "string" && typeof k.category === "string" && ref(k.ref)) ? (maps.skills as { name: string; category: string; ref: string }[]) : null;
+  // Every part.
+  const bullets = refMap(maps.bullets), entries = entryMap(maps.entries), availableBullets = refMap(maps.available_bullets), availableEntries = entryMap(maps.available_entries);
+  // One bad part turns the whole thing off.
+  if (bullets === null || entries === null || availableBullets === null || availableEntries === null || skills === null) return off;
+  // The chat id, optional: without it the apply still runs and the page writes the bubble as before.
+  const chatId = typeof raw.chat_id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw.chat_id) ? raw.chat_id : null;
+  // On.
+  return { serverApply: true, applicationId: id, applyMaps: { bullets, entries, availableBullets, availableEntries, skills }, chatId };
+}
+
+// One resume_chat_messages row as the server writes it (the table's own columns; user_id and created_at are defaults).
+export interface ChatRow {
+  // The application.
+  readonly application_id: string;
+  // The chat.
+  readonly chat_id: string;
+  // Who spoke.
+  readonly role: "user" | "assistant";
+  // 1-2000 characters (the table's check).
+  readonly content: string;
+  // null for the ask; an array for the answer (the table's ops_by_role check). Empty: the outcome is in the text.
+  readonly ops: readonly unknown[] | null;
+  // Token counts for the answer, or null.
+  readonly usage: unknown;
+}
+
+/* The two rows of one server-applied exchange, each inside the table's 1-2000 character check. */
+export function chatRows(applicationId: string, chatId: string, instruction: string, note: string, outcomes: readonly ServerOutcome[], usage: unknown): ChatRow[] {
+  // The answer: the record first (history keeps the first 500 characters), then the AI's own note.
+  const answer = [outcomeText(outcomes), note].filter((part) => part !== "").join(" ") || "No changes.";
+  // The ask, then the answer.
+  return [
+    // The owner's words.
+    { application_id: applicationId, chat_id: chatId, role: "user", content: instruction.slice(0, 2000), ops: null, usage: null },
+    // The answer; ops [] because the card list is replaced by the outcome text (S9i: no Apply buttons).
+    { application_id: applicationId, chat_id: chatId, role: "assistant", content: answer.slice(0, 2000), ops: [], usage: usage ?? null },
+  ];
+}
+
+/* S9b: the removed-in-this-chat list from the wire. Absent or malformed reads as NONE, never a partial list and never
+   a 400: the list only stops re-proposals, so dropping it costs a re-proposed skill (today's behaviour), while
+   refusing would cost the whole ask. A partial list is worse than none: it would look honoured while letting one back. */
+function readRemovedSkills(value: unknown): string[] {
+  // Not a short array: none.
+  if (!Array.isArray(value) || value.length > MAX_PRINTED_SKILLS) return [];
+  // Each name trimmed and bounded like a skill name.
+  const names = value.map((item) => boundedString(item, MAX_SKILL_NAME));
+  // One bad item voids the list (all-or-nothing, as above); otherwise the trimmed names.
+  return names.every((name): name is string => name !== null) ? names : [];
 }
 
 // One AVAILABLE item from the wire, or null. The id's prefix is the discriminator: "m" is a master
@@ -553,7 +660,11 @@ const SYSTEM_INSTRUCTION = [
   // 2026-11-04: the same ops as exact JSON, plus remove_entry.
   // 2026-11-21: the set_role example was "Data Analyst Intern", the very title the FamPay row shipped wrongly; an example
   // is a suggestion, so it now shows an allow-listed Aczen title (Teja 2026-11-18 21:55).
-  'Structure ops: {"op":"move","id":"b0","direction":"up"} moves a bullet one place up or down within its entry (repeat to move further). {"op":"move_section","section":"projects","direction":"down"} moves one SECTION ORDER name one place. {"op":"add_back","id":"m0"} restores an AVAILABLE item (mN bullet, nN entry). {"op":"new_bullet","entry":"e0","text":"..."} adds a bullet under entry eN, only for a fact the owner states; prefer add_back when AVAILABLE has it. {"op":"remove_entry","id":"e0"} takes entry eN off this resume. {"op":"set_role","entry":"e0","text":"Software Engineer Intern"} sets the job title of experience entry eN to the title the owner states, spelled correctly. move and move_section ALWAYS carry "direction" ("up" or "down"); never send one without it.',
+  'Structure ops: {"op":"move","id":"b0","direction":"up"} moves a bullet one place up or down within its entry (repeat to move further). {"op":"move_section","section":"projects","direction":"down"} moves one SECTION ORDER name one place. {"op":"add_back","id":"m0"} restores an AVAILABLE item (mN bullet, nN entry). {"op":"new_bullet","entry":"e0","text":"..."} adds a bullet under entry eN, only for a fact the owner states; prefer add_back when AVAILABLE has it. {"op":"remove_entry","id":"e0"} takes entry eN off this resume. {"op":"set_role","entry":"e0","text":"Software Engineer Intern"} sets the job title of experience entry eN to the title the owner states, spelled correctly. move and move_section ALWAYS carry "direction" ("up" or "down") or a "place"; never send one with neither.',
+  /* S9j (Teja 2026-11-21 18:54: "my ai need to full autonomous able to do most of things except those personal details"). Live,
+     "place applyy at first place" was refused for lacking up/down and "one on one at 2nd place" had no op at all. */
+  'Places: {"op":"move_section","section":"projects","place":1} puts a section at that place; {"op":"move_entry","entry":"e2","place":1} puts entry eN at that place within its own section ("applyyy first, One-on-One second" is two move_entry ops); {"op":"move","id":"b3","place":1} puts a bullet at that place in its entry. Use "place" whenever the owner names a position (first, second, top, last as the count of that list). Every edit to this resume is possible with these ops: never answer that a section, entry, project, job or bullet cannot be moved, removed, added back or reworded.',
+  'Personal details (name, email, phone, links, location) are never changed in this chat: send no op, and the note says in one line that they change on the Master profile page.',
   /* What this page cannot do, and where it is done instead (2026-11-04), so a request no op covers gets
      a plain answer with a place to go, not an invented op or a claimed change. */
   /* 2026-11-05, live row ce0d1730: "add 2 tools from my master that are not on this resume" got "check
@@ -579,6 +690,8 @@ const SYSTEM_INSTRUCTION = [
   /* add_group (2026-11-21): one op per group fill instead of one per skill, so "add tools with 6, cs fund 5" costs ~4 ops
      of output, not 21. The server picks the skills from the master (job-relevant first), so the model chooses nothing. */
   'To fill a skill group from MASTER SKILLS NOT ON RESUME, send ONE {"op":"add_group","name":"Tools","n":5} per group: "name" is the group, "n" how many skills the owner asked for (5 when they gave no number); the app picks that group\'s master skills, the job\'s first. Use add_skill only for a specific skill the owner names.',
+  /* S9b (2026-11-21): the chat remembers removals. Stable text, so the cached prefix holds for every call. */
+  "REMOVED IN THIS CHAT lists skills the owner removed earlier in this chat: never add_skill or add_group them back unless the INSTRUCTION names them again.",
   /* The edge cases, each with its one right answer (2026-11-07), so none falls through to a refusal card. */
   "Edge cases: a skill SKILLS already prints is never re-added (say it is already there); a group the resume does not print yet is fine for add_skill (it appears with its first skill); a skill in neither SKILLS nor MASTER SKILLS NOT ON RESUME that the owner names IS added with add_skill (never answer that it is missing from their master), and one they did not name is not added: say it is not in their master and that it is added on the Master profile page; a remove or reorder request uses remove, remove_skill, remove_entry, move or move_section; a vague request still gets concrete ops chosen by the job rules above; a request beyond the master (a new employer, a degree, a metric the text lacks) gets no op and an honest note saying why and where it can be done.",
   /* 2026-11-11 (RainFocus row): "add typography, wireframing, ux skills etc.. in skills" was refused, then the owner's
@@ -608,7 +721,7 @@ const RESPONSE_SCHEMA = {
         properties: {
           // The kind, closed to the seven the page can apply. Nine since 2026-11-04: remove_skill, remove_entry.
           // add_group joined 2026-11-21: model-only, expanded into add_skill ops before the browser sees the answer.
-          op: { type: "STRING", enum: ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "add_back", "new_bullet", "remove_entry", "set_role", "add_group"] },
+          op: { type: "STRING", enum: ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "move_entry", "add_back", "new_bullet", "remove_entry", "set_role", "add_group"] },
           // A bullet id or "summary"; an AVAILABLE id for add_back; an entry id (eN) for remove_entry.
           id: { type: "STRING" },
           // The new text, for edit and new_bullet.
@@ -625,6 +738,8 @@ const RESPONSE_SCHEMA = {
           entry: { type: "STRING" },
           // How many skills, for add_group; checked as a positive integer after parsing.
           n: { type: "INTEGER" },
+          // S9j: a 1-based place, for move, move_section and move_entry; checked as a positive integer after parsing.
+          place: { type: "INTEGER" },
         },
         // Only the kind is universal.
         required: ["op"],
@@ -701,6 +816,8 @@ export function buildAssistPrompt(request: AssistRequest): GenerateGeminiOptions
     request.printedSkills === null ? `SKILLS: ${oneLine(request.skills) || "(none)"}` : `SKILLS (by group): ${groupedSkills(request.printedSkills) || "(none)"}`,
     // The owner's own master skills not printed (2026-11-05), only when sent: what add_skill adds from.
     ...(request.availableSkills.length > 0 ? [`MASTER SKILLS NOT ON RESUME (by group): ${groupedSkills(request.availableSkills)}`] : []),
+    // S9b: skills the owner removed in this chat, only when there are some, so an older web's prompt is byte-identical.
+    ...(request.removedSkills.length > 0 ? [`REMOVED IN THIS CHAT: ${request.removedSkills.join(", ")}`] : []),
     // The summary, or a marker that there is none.
     `SUMMARY: ${request.summary === null ? "(none)" : oneLine(request.summary)}`,
     // The printed section order, only when sent: what move_section reorders.
@@ -730,6 +847,12 @@ export function buildAssistPrompt(request: AssistRequest): GenerateGeminiOptions
 }
 
 // A direction from the model's JSON, or null for anything outside the closed pair.
+// S9j: a 1-based place, or null when absent or not a whole number from 1 (never coerced: "first" is not 1 here).
+function placeOf(value: unknown): number | null {
+  // A positive whole number only.
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 100 ? value : null;
+}
+
 function moveDirection(value: unknown): MoveDirection | null {
   // Exactly one of two words; "top" or "UP" is not coerced into one.
   return value === "up" || value === "down" ? value : null;
@@ -766,6 +889,8 @@ const WHY = {
   noSkillName: "The AI's answer did not name the skill.",
   // move or move_section without "up" or "down".
   noDirection: "The AI's answer did not say up or down.",
+  // S9j: a place-move reached a page that applies in the browser and cannot apply it.
+  needsServerApply: "Moving to a place needs the updated page; reload it and ask again.",
   // new_bullet or remove_entry with no entry id.
   noEntry: "The AI's answer did not name the entry.",
   // An entry id this request did not list.
@@ -883,10 +1008,62 @@ function groupWords(text: string): string {
 function groupNamedIn(instruction: string, categories: readonly string[]): string | undefined {
   // The instruction's words, once.
   const said = groupWords(instruction);
-  // Every group whose whole name appears in them.
-  const named = categories.filter((category) => groupWords(category).trim() !== "" && said.includes(groupWords(category)));
+  // Every group whose whole name appears in them, or that the owner MISSPELT (S9c, 2026-11-21: "add toools 7" named no
+  // group, so the adds fell to each skill's kind). groupTypoNamed says how far a misspelling may go.
+  const named = categories.filter((category) => groupWords(category).trim() !== "" && (said.includes(groupWords(category)) || groupTypoNamed(category, instruction)));
   // Exactly one, or no answer.
   return named.length === 1 ? named[0] : undefined;
+}
+
+/* The vocabulary term a skill name spells, case-blind (S9a, 2026-11-21). canonicalSkillTerm matches the vocabulary's own
+   casing, so a master written "azure" got no term and the top-up added it AND "Microsoft Azure" once a group had two
+   lines of room. Case is not a spelling here: a skill name is compared as a name, so a title-cased retry is safe. */
+function skillTerm(name: string): string | null {
+  // As written first, then with each word capitalised ("azure" -> "Azure").
+  return canonicalSkillTerm(name) ?? canonicalSkillTerm(name.replace(/\b[a-z]/g, (letter) => letter.toUpperCase()));
+}
+
+/* S9c: did the owner name this group with a typo? The shared skill-name matcher (namedIn: one typo on 6+ letters, two on
+   8+, whole word runs only), plus ONE typo on a group name of exactly 5 letters ("toools" is Tools), which a 5-letter
+   skill name does not get: a group name only steers WHERE a skill is filed, never WHETHER something is added, so the
+   looser match costs less. Still whole words and still one edit, so "could" (two edits) never names "Cloud". */
+function groupTypoNamed(category: string, instruction: string): boolean {
+  // The skill-name rule first: it already covers 6+ letter names and multi-word runs.
+  if (namedIn(category, [instruction])) return true;
+  // The group's compact form ("Tools" -> "tools").
+  const target = compactName(category);
+  // Only a 5-letter group gets the extra allowance; shorter names stay exact (one edit from "AI" is any word).
+  if (target.length !== 5) return false;
+  // Any single word of the instruction one edit away.
+  return instruction.toLowerCase().split(/[^a-z0-9+#]+/).some((word) => word !== "" && withinOneEdit(word, target));
+}
+
+/* S9b (2026-11-21): did the owner remove this skill earlier in this chat (request.removedSkills), and NOT ask for it
+   again in THIS message? Then no picker may propose it. Matched by key or vocabulary term, so "vs code" covers
+   "VS Code" and "Postgres" covers "PostgreSQL". Only the current instruction can bring it back: an earlier turn is the
+   one where they removed it. */
+function removedAndNotAskedBack(name: string, request: AssistRequest): boolean {
+  // Its vocabulary term, or null.
+  const term = skillTerm(name);
+  // Removed under this spelling or another of the same term.
+  const removed = request.removedSkills.some((gone) => skillKey(gone) === skillKey(name) || (term !== null && skillTerm(gone) === term));
+  // Removed and not named again now.
+  return removed && !namedIn(name, [request.instruction]);
+}
+
+/* S9a (2026-11-21): does this group still print within SKILL_GROUP_MAX_LINES at every typography rung? The web's edit gate
+   asks exactly this (skillGroupWrapReason). Before, this file asked "ONE line" while the web allowed two, so the server
+   held back skills the page would have taken, and the reverse was never checked: one model on both sides now. */
+function groupFits(category: string, names: readonly string[]): boolean {
+  // Every rung, like the web gate: a group that fits only at the largest type would wrap after a shrink.
+  return TYPOGRAPHY_LADDER.every((_, index) => skillGroupLineCount(category, names, index) <= SKILL_GROUP_MAX_LINES);
+}
+
+/* S9a (2026-11-21): the owner gave an explicit count ("add 7 tools", "add toools 7"). Like "all", that dictates how many,
+   so the width limit yields to it (Teja's live rows lost 7 adds to the width check while the reply said "Proposed N"). */
+function saysCount(instruction: string): boolean {
+  // A whole number of 2+ written as digits.
+  return /\b([2-9]|[1-9]\d)\b/.test(instruction);
 }
 
 /* WHAT ONE CHANGE IS, for MAX_OPS (2026-11-21, tailor pending #5 P3). Every add_skill filed under one skill group is ONE
@@ -902,7 +1079,7 @@ function capUnit(group: string, index: number): string {
 const GROUP_FILLER_WORDS = new Set(["and", "the", "for", "with", "skill", "skills", "group", "groups", "other"]);
 /* A group never grows past this by a top-up, unless the owner says "all". 7 since 2026-11-12 13:57 IST (Teja: "each having
    up to 7 skills ... in 1 line but full in that 1 line"; was 6, the 11-11 "4-6 skills"). The line itself is the second
-   limit: a top-up never makes a group wrap (skillGroupFitsOneLine, the tailor's own width model). */
+   limit: a top-up never makes a group wrap past SKILL_GROUP_MAX_LINES (groupFits, the tailor's own width model; one line until S9a). */
 // 10 since 2026-11-21 14:41 (Teja: "increase that cap to 3 more skills in each"), so a chat top-up matches the tailor cap.
 const TOP_UP_GROUP_SIZE = 10;
 
@@ -931,7 +1108,7 @@ function topUpNamedSkills(kept: readonly AssistOp[], request: AssistRequest, pri
   // The JD's missing keywords by key, so the job-relevant skills go first.
   const missing = new Set(request.job.missing.map((keyword) => skillKey(keyword)));
   // A skill's vocabulary term, or its key: two spellings of one skill share it.
-  const termOf = (name: string): string => canonicalSkillTerm(name) ?? skillKey(name);
+  const termOf = (name: string): string => skillTerm(name) ?? skillKey(name);
   // Terms already on the resume or in this answer, so a second spelling is never added.
   const terms = new Set([...printed.values(), ...kept.flatMap((op) => (op.op === "add_skill" ? [op.name] : []))].map(termOf));
   // Each group's printed line (by key): the resume's own skills plus this answer's adds, in page order. Names, not a
@@ -950,7 +1127,7 @@ function topUpNamedSkills(kept: readonly AssistOp[], request: AssistRequest, pri
     // The line as it stands.
     const names = lines.get(skillKey(category)) ?? [];
     // Under the cap, and one line with the new name at every typography rung.
-    return names.length < TOP_UP_GROUP_SIZE && skillGroupFitsOneLine(category, [...names, name]);
+    return names.length < TOP_UP_GROUP_SIZE && groupFits(category, [...names, name]);
   };
   // The ops this pass adds, in order.
   const added: AssistOp[] = [];
@@ -964,6 +1141,8 @@ function topUpNamedSkills(kept: readonly AssistOp[], request: AssistRequest, pri
     const key = `skill:${skillKey(skill.name)}`;
     // Printed, already proposed, or another spelling of one that is: skipped.
     if (printed.has(skillKey(skill.name)) || claimed.has(key) || terms.has(termOf(skill.name))) return false;
+    // S9b: removed by the owner earlier in this chat and not asked back now: never re-proposed.
+    if (removedAndNotAskedBack(skill.name, request)) return false;
     // Claimed, so parseAssistOps's one-op-per-target rule holds for the top-up too.
     claimed.add(key);
     // Its term taken, so a twin spelling later in the pool is skipped.
@@ -1008,9 +1187,9 @@ function topUpNamedSkills(kept: readonly AssistOp[], request: AssistRequest, pri
    by the "already on the resume" check first. */
 function masterSkillNamed(name: string, available: readonly PrintedSkill[]): PrintedSkill | undefined {
   // The requested name's term, once ("Amazon Web Services" -> "AWS"), or null.
-  const term = canonicalSkillTerm(name);
+  const term = skillTerm(name);
   // The first master skill that is the same name, or the same term.
-  return available.find((skill) => skillKey(skill.name) === skillKey(name) || (term !== null && canonicalSkillTerm(skill.name) === term));
+  return available.find((skill) => skillKey(skill.name) === skillKey(name) || (term !== null && skillTerm(skill.name) === term));
 }
 
 /* Did the OWNER name this skill (2026-11-09)? Read from the instruction and the owner's own earlier chat turns, never
@@ -1197,7 +1376,7 @@ const CATCH_ALL_GROUP = /\btools?\b|\bother\b|\bmisc/i;
 // The owner's group for a skill's kind, or undefined when the skill has no kind or no group fits it.
 function groupForKind(name: string, categories: readonly string[]): string | undefined {
   // The skill's term, then its kind.
-  const term = canonicalSkillTerm(name);
+  const term = skillTerm(name);
   // No term or no kind: nothing to go on.
   const kind = term === null ? undefined : KIND_OF_TERM.get(term);
   // The first of the owner's groups whose name says it holds this kind.
@@ -1376,6 +1555,8 @@ export function parseAssistOps(
       // Already printed: checked BEFORE the group (2026-11-05 live bug: a group-less add of a printed
       // skill said "did not say which skill group", hiding the real reason; the model then claimed it).
       if (spelling !== undefined) return `"${clip(spelling, 40)}" is already on the resume.`;
+      // S9b: the owner removed it earlier in this chat; only their naming it again in THIS message brings it back.
+      if (removedAndNotAskedBack(finalName, request)) return `You removed "${clip(finalName, 40)}" earlier in this chat. Name it in your message to add it back.`;
       /* A skill the master lacks needs the OWNER's naming (2026-11-09). The prompt asks for this, but a prompt
          is not a control (CLAUDE.md §6): "improve my skills" must never come back with an invented Kubernetes.
          Checked after "already printed", so a printed skill keeps its more useful reason. */
@@ -1446,6 +1627,8 @@ export function parseAssistOps(
     if (raw.op === "move") {
       // The bullet to move.
       const id = textField(raw.id);
+      // S9j: a place states the end position; only a server-applied page can apply it (an older page refuses the kind).
+      const place = placeOf(raw.place);
       // Closed to the two directions.
       const direction = moveDirection(raw.direction);
       /* A bullet with an entry (siblings to move among), a real direction, not removed earlier in this
@@ -1456,10 +1639,12 @@ export function parseAssistOps(
       if (!bulletEntry.has(id)) return WHY.unknownBullet;
       // No structure sent: no siblings to move among.
       if (bulletEntry.get(id) === null) return "The page did not say which entry this bullet is under, so it cannot move.";
-      // "top", "UP" or nothing.
-      if (direction === null) return WHY.noDirection;
       // Removed earlier in this answer.
       if (removed.has(id)) return "Another change in this answer removes this bullet.";
+      // S9j: to a place.
+      if (place !== null) return request.serverApply ? { op: "move", id, place } : WHY.needsServerApply;
+      // "top", "UP" or nothing.
+      if (direction === null) return WHY.noDirection;
       // Kept.
       return { op: "move", id, direction };
     }
@@ -1475,10 +1660,29 @@ export function parseAssistOps(
       if (sections.size === 0) return "The page did not send the section order, so sections cannot move.";
       // A section this resume does not print.
       if (!sections.has(section)) return `"${clip(section, 40)}" is not a section on this resume.`;
+      // S9j: to a place ("place projects first"), no direction needed.
+      const place = placeOf(raw.place);
+      // Only a server-applied page applies it.
+      if (place !== null) return request.serverApply ? { op: "move_section", section, place } : WHY.needsServerApply;
       // "top", "UP" or nothing.
       if (direction === null) return WHY.noDirection;
       // Kept.
       return { op: "move_section", section, direction };
+    }
+    // S9j: an entry to a place within its section ("applyyy first, One-on-One second").
+    if (raw.op === "move_entry") {
+      // The eN id.
+      const entry = textField(raw.entry);
+      // The place.
+      const place = placeOf(raw.place);
+      // No id.
+      if (entry === "") return WHY.noEntry;
+      // An entry this request did not list.
+      if (!entryIds.has(entry)) return WHY.unknownEntry;
+      // No usable place.
+      if (place === null) return "The AI's answer did not say which place.";
+      // Only a server-applied page applies it.
+      return request.serverApply ? { op: "move_entry", entry, place } : WHY.needsServerApply;
     }
     // Restore a master item.
     if (raw.op === "add_back") {
@@ -1609,6 +1813,8 @@ export function parseAssistOps(
      A group with nothing to add stays an add_group, and check() refuses it with a reason. */
   // The groups an add_group filled, so the top-up leaves them at the owner's count.
   const filledGroups = new Set<string>();
+  // S9e: one sentence per group fill that came up short of the owner's count, appended to the note.
+  const shortfalls: string[] = [];
   // The owner said "all": no count and no line limit, the same reading the top-up uses.
   const saidAll = groupWords(request.instruction).trim().split(" ").includes("all");
   // The job's missing keywords by key, for the ranking.
@@ -1620,7 +1826,7 @@ export function parseAssistOps(
     // The group as the model wrote it; matched by key, so "tools" finds the master's "Tools".
     const key = skillKey(textField(raw.name));
     // That group's master skills not already printed.
-    const pool = request.availableSkills.filter((skill) => skillKey(skill.category) === key && !printed.has(skillKey(skill.name)));
+    const pool = request.availableSkills.filter((skill) => skillKey(skill.category) === key && !printed.has(skillKey(skill.name)) && !removedAndNotAskedBack(skill.name, request));
     // Missing keywords first; stable, so master order otherwise.
     const ranked = [...pool].sort((a, b) => Number(missingKeys.has(skillKey(b.name))) - Number(missingKeys.has(skillKey(a.name))));
     // The count: a positive whole number capped at the group size; anything else is not a count (§6), so the group size.
@@ -1634,12 +1840,25 @@ export function parseAssistOps(
       // "all" takes every one; otherwise stop at the count.
       if (!saidAll && picked.length >= want) break;
       // A name that would wrap the line is skipped, and a shorter later one may still fit (as in the top-up).
-      if (!saidAll && !skillGroupFitsOneLine(skill.category, [...line, ...picked.map((p) => p.name), skill.name])) continue;
+      // S9a: an explicit count ("add 7") lifts the width limit too: the owner dictated how many.
+      if (!saidAll && !saysCount(request.instruction) && !groupFits(skill.category, [...line, ...picked.map((p) => p.name), skill.name])) continue;
       // Taken.
       picked.push(skill);
     }
     // Nothing to add: left for check() to refuse with its reason.
     if (picked.length === 0) return [raw];
+    /* S9e (2026-11-21, "add 6 cs fundamentals" gave 5 with no reason): when fewer land than the owner's count, say why.
+       Only for a real count (a positive whole n) and never on "all" (no count to fall short of). The master's group
+       spelling, so the sentence names the group the owner sees. */
+    const asked = typeof raw.n === "number" && Number.isInteger(raw.n) && raw.n > 0 && !saidAll ? raw.n : 0;
+    // The group as the master spells it.
+    const groupName = picked[0]!.category;
+    // Every candidate taken and still short: the master ran out.
+    if (asked > picked.length && picked.length === ranked.length) shortfalls.push(`Your master has only ${picked.length} more ${groupName} skills to add.`);
+    // Stopped by the per-group cap.
+    else if (asked > TOP_UP_GROUP_SIZE && picked.length === TOP_UP_GROUP_SIZE) shortfalls.push(`At most ${TOP_UP_GROUP_SIZE} skills are added to one group at a time; ask again for more.`);
+    // Stopped by the printed line width.
+    else if (asked > picked.length) shortfalls.push(`Only ${picked.length} more ${groupName} skills fit on that group's printed lines; say "all" to add every one anyway.`);
     // Remembered, so the top-up does not pad past the owner's count.
     filledGroups.add(key);
     // Ordinary add_skill ops in the master's spelling and group: the browser already reads and auto-applies these.
@@ -1735,7 +1954,8 @@ export function parseAssistOps(
   ops.push(...topUpNamedSkills(ops, request, printed, claimed, filledGroups));
   // The note is display text, never a made-up success: claim sentences dropped, and an all-failed answer
   // led by what happened (honestNote). A note with nothing to read gets a one-line count (honestNote).
-  const note = honestNote(parsed.note, ops, rejected);
+  // S9e: the shortfall reasons follow the model's own note, so "add 6" giving 5 always says why.
+  const note = [honestNote(parsed.note, ops, rejected), ...shortfalls].join(" ");
   // The surviving ops, the drop count, the named drops and the note.
   return { ok: true, ops, dropped, rejected, note };
 }
@@ -1810,11 +2030,20 @@ export interface AssistDeps {
         readonly userId: string;
         // generateGeminiContent bound to the signed-in client (it claims keys through it).
         readonly generate: (options: GenerateGeminiOptions) => Promise<GeminiCallOutcome<GeminiResponseBody>>;
+        /* S9i P2: applies an answer's ops to the row under this same signed-in client (server-apply.ts), bound in
+           index.ts. Absent in tests that do not exercise it; then a server-apply ask is answered without applying. */
+        readonly apply?: (args: { readonly applicationId: string; readonly ops: readonly WireOp[]; readonly maps: ApplyMaps }) => Promise<readonly ServerOutcome[]>;
+        /* S9i P2: writes one chat exchange (the ask and its answer) into resume_chat_messages under the owner's RLS, so a
+           closed tab still finds the bubble on reopen. True when stored. Absent in tests that do not exercise it. */
+        readonly saveChat?: (rows: readonly ChatRow[]) => Promise<boolean>;
       }
     | { readonly ok: false; readonly reason: string }
     // The caller was refused BEFORE the sign-in (W15, 2026-11-05): answered 401/403, no grant spent.
     | CallerRefused
   >;
+  /* S9i P2: keeps a promise running after the response is sent (EdgeRuntime.waitUntil in index.ts), so the apply
+     finishes even when the owner closes the tab, the chat or the job. Absent in tests. */
+  readonly keepAlive?: (work: Promise<unknown>) => void;
 }
 
 // A JSON response with CORS headers.
@@ -1884,10 +2113,34 @@ export async function handleResumeAssist(req: Request, deps: AssistDeps): Promis
     // Short gaps between attempts, and the first 503 switches to the fallback model with no sleep (client contract A).
     interactive: true,
   };
+  /* S9i P2: after an ok answer, a server-apply ask applies its ops here and the body gains "applied" (one outcome per
+     op, in order). Only when the page asked for it with valid maps (parseAssistRequest) and index.ts bound apply. */
+  const applied = async (answer: { status: number; body: Record<string, unknown> }): Promise<{ status: number; body: Record<string, unknown> }> => {
+    // Not asked, not ok, or no apply seam: the answer as is.
+    if (!parsed.request.serverApply || conn.apply === undefined || answer.body.status !== "ok" || parsed.request.applicationId === null || parsed.request.applyMaps === null) return answer;
+    // The ops the parser kept, in the wire shape the server applies.
+    const ops = (answer.body.ops ?? []) as WireOp[];
+    /* The ops the parser dropped, as refused outcomes (2026-11-23). A server-applied page shows only this list (no
+       cards), so without them a dropped op vanished from the reply AND from the chat row the server writes, breaking
+       the 2026-11-04 rule that nothing the AI proposed is silently left out. After the applied ones: the order asked. */
+    const refusals: ServerOutcome[] = ((answer.body.rejected ?? []) as RejectedOp[]).map((r) => ({ status: "refused", label: r.what, why: r.why }));
+    // Nothing to apply: the refusals alone (the page writes the bubble, as chat_saved is absent).
+    if (ops.length === 0) return { ...answer, body: { ...answer.body, applied: refusals } };
+    // Applied under the owner's client; never throws (every failure is an outcome); the parser's refusals follow.
+    const outcomes = [...await conn.apply({ applicationId: parsed.request.applicationId, ops, maps: parsed.request.applyMaps }), ...refusals];
+    // The exchange, written here when the page named its chat, so the bubble survives a closed tab.
+    const saved = parsed.request.chatId !== null && conn.saveChat !== undefined ? await conn.saveChat(chatRows(parsed.request.applicationId, parsed.request.chatId, parsed.request.instruction, String(answer.body.note ?? ""), outcomes, answer.body.usage)) : false;
+    // The body names what landed and what did not, and whether the page still has to write the bubble.
+    return { ...answer, body: { ...answer.body, applied: outcomes, chat_saved: saved } };
+  };
   // The streaming opt-in is a header, not a body field: an old server ignores it and answers JSON as before.
   if (!(req.headers.get("accept") ?? "").includes("application/x-ndjson")) {
-    // Today's path: one JSON answer when the call is done.
-    const answer = answerFor(await conn.generate(options), parsed.request);
+    // Today's path: one JSON answer when the call is done; the apply is kept alive past a closed tab (S9i P2).
+    const work = conn.generate(options).then((outcome) => applied(answerFor(outcome, parsed.request)));
+    // Kept running after the response, when the platform offers it.
+    deps.keepAlive?.(work);
+    // The answer, applied.
+    const answer = await work;
     // Status and body from the one builder both paths share.
     return json(answer.status, answer.body);
   }
@@ -1912,7 +2165,8 @@ export async function handleResumeAssist(req: Request, deps: AssistDeps): Promis
   // The last note sent, so an unchanged chunk sends no duplicate line.
   let lastNote = "";
   // Started BEFORE the Response is returned, so index.ts can hand this same call to waitUntil and meter it.
-  conn
+  // S9i P2: the whole chain (answer, then apply) is kept alive too, so a closed tab never stops the apply.
+  const chain = conn
     .generate({
       ...options,
       // A new attempt: say why, and restart the note (the next attempt writes its own from the start).
@@ -1940,6 +2194,13 @@ export async function handleResumeAssist(req: Request, deps: AssistDeps): Promis
     })
     // The same builder as the JSON path, so the result body is exactly what JSON would have sent.
     .then((outcome) => answerFor(outcome, parsed.request))
+    // S9i P2: applied server-side before the result line, so the page shows what landed.
+    .then((answer) => {
+      // Said while it runs: the reply is in, the edits are being saved.
+      if (parsed.request.serverApply && answer.body.status === "ok") send({ type: "status", stage: "applying", text: "Applying your changes..." });
+      // The same apply as the JSON path.
+      return applied(answer);
+    })
     // A throw gets withErrorBoundary's 500 body, the shape a crash has on the JSON path.
     .catch((err) => {
       // For the function logs; the body stays generic, as withErrorBoundary's does.
@@ -1959,6 +2220,8 @@ export async function handleResumeAssist(req: Request, deps: AssistDeps): Promis
         // The reader is gone.
       }
     });
+  // Kept running after the response (S9i P2).
+  deps.keepAlive?.(chain);
   // 200 for the stream itself; the real outcome rides in the result line. CORS like json().
   return new Response(stream, { status: 200, headers: { "content-type": "application/x-ndjson", ...corsHeaders } });
 }

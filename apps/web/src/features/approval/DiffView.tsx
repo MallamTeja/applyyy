@@ -150,6 +150,9 @@ export interface DiffViewProps {
   /* T10 (2026-11-10): the page's ATOMIC batch save, handed through to the chat: every action folded, the end
      state fitted and rule-checked once, then one write (a swap can never pass a check after each op). */
   readonly onEditBatch?: ((actions: readonly EditAction[], editSource: EditSource) => Promise<EditResult>) | undefined;
+  /* S9i P2 (2026-11-21): the page's re-read of this row, handed through to the chat, which then lets the SERVER apply
+     each answer (Teja 15:34: edits land even with the tab closed) and re-reads the row it wrote. */
+  readonly onReloadRow?: (() => Promise<void>) | undefined;
   /* D4: why editing is off for this row, shown instead of controls that could not be honest. */
   readonly editDisabledReason?: string | null | undefined;
   /* Whether the row carries a generated cover letter, which an edit does not regenerate. */
@@ -843,6 +846,8 @@ export function DiffView({
   onEdit,
   // T10: the atomic batch save, wrapped below like onEdit.
   onEditBatch,
+  // S9i P2: handed to the chat as is.
+  onReloadRow,
   editDisabledReason,
   hasCoverLetter,
   locked,
@@ -1095,7 +1100,7 @@ export function DiffView({
         const panel =
           /* T16: the batch save is required by the panel, so it mounts only where the page gave one (both pages do). */
           runEdit !== null && runEditBatch !== undefined && onAssist !== undefined && !editDisabledReason ? (
-            <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onEditBatch={runEditBatch} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} chat={chat} structure={assistStructure ?? undefined} seed={chatSeed} />
+            <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onEditBatch={runEditBatch} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} chat={chat} structure={assistStructure ?? undefined} seed={chatSeed} onReloadRow={onReloadRow} />
           ) : /* Docked and read-only: say why, instead of a dock that is silently empty. */ chatDock?.active === true && editDisabledReason ? (
             <p className="diff__edit-note">AI chat is off for this resume: {editDisabledReason}</p>
           ) : null;

@@ -1601,6 +1601,41 @@ export function ApprovalQueuePage(): ReactElement {
 
   /* Show what the DATABASE holds after a write we could not confirm or that was refused (fix 1,
      fix 2a). Showing the operator's unsaved version here is how the UI used to drift from the DB. */
+  /* S9i P2 (2026-11-21): re-read a row the SERVER just wrote (resume-assist applies chat answers itself, Teja 15:34) and
+     redraw it. A server attest may have re-pinned the row to a new master version, so the pinned master, the tailor's
+     original and FULL are rebuilt at the row's pin when it moved; the same readers the load uses (masterFromRow,
+     rebuildOriginal, resolveFullMaster). Never throws: a failed read leaves the screen as it was. */
+  async function reloadRow(applicationId: string): Promise<void> {
+    // No client: nothing to read.
+    if (supabase === null) return;
+    // The row now.
+    const { data, error } = await supabase.from('applications').select('tailored_profile, updated_at, status, tailor_refs').eq('id', applicationId).maybeSingle();
+    // Unreadable: keep what is shown.
+    if (error || data === null || typeof data.updated_at !== 'string') return;
+    // Settled or malformed: the existing path says so.
+    if (data.status !== 'awaiting_approval' || !isResumeShape(data.tailored_profile)) { adoptStored(applicationId, { resume: data.tailored_profile, updatedAt: data.updated_at, status: data.status }); return; }
+    // The page's source for this row.
+    const source = latestSources.current.get(applicationId);
+    // The row's pin now.
+    const version = data.tailored_profile.master_version;
+    // Same pin: only the resume changed.
+    if (source === undefined || source.original?.master_version === version) { adoptRow(applicationId, data.tailored_profile, data.updated_at); return; }
+    // Re-pinned: the master at the new pin.
+    const masterRead = await supabase.from('master_profiles').select('profile').eq('version', version).maybeSingle();
+    // Shape-gated, as the load does.
+    const master = masterFromRow(masterRead.data?.profile);
+    // Unreadable master: redraw nothing rather than diff against the wrong one.
+    if (master === null) return;
+    // The new source, as the attest path builds it (Page attestRow).
+    const nextSource: RowSource = { ...source, master, original: rebuildOriginal(data.tailor_refs, master, version), tailorRefs: data.tailor_refs, full: resolveFullMaster(master, version) };
+    // Published to the render state, as attestRow does, so the card's edit gates read the new pin too.
+    setSources((previous) => new Map(previous).set(applicationId, nextSource));
+    // Remembered synchronously, so the next edit or approval reads the new pin.
+    latestSources.current.set(applicationId, nextSource);
+    // Redrawn against it.
+    adoptRow(applicationId, data.tailored_profile, data.updated_at, nextSource);
+  }
+
   function adoptStored(applicationId: string, stored: StoredRow): void {
     // Approved or rejected elsewhere: it is no longer in this queue.
     if (stored.status !== 'awaiting_approval') {
@@ -2504,6 +2539,8 @@ export function ApprovalQueuePage(): ReactElement {
                     onEdit={(action, editSource) => editRow(diff.applicationId, action, editSource)}
                     /* T10: the AI chat's atomic batch save (a swap is judged on its end state); see editRows. */
                     onEditBatch={(actions, editSource) => editRows(diff.applicationId, actions, editSource)}
+                    /* S9i P2: the chat lets the server apply its answers, then re-reads the row it wrote. */
+                    onReloadRow={() => reloadRow(diff.applicationId)}
                     /* D4: only when the tailor's original could not be rebuilt. */
                     editDisabledReason={editOffReason(sources.get(diff.applicationId))}
                     /* So the diff can say the letter predates the edits. */
@@ -2683,6 +2720,8 @@ export function ApprovalQueuePage(): ReactElement {
                         onEdit={(action, editSource) => editRow(diff.applicationId, action, editSource)}
                     /* T10: the AI chat's atomic batch save (a swap is judged on its end state); see editRows. */
                     onEditBatch={(actions, editSource) => editRows(diff.applicationId, actions, editSource)}
+                    /* S9i P2: the chat lets the server apply its answers, then re-reads the row it wrote. */
+                    onReloadRow={() => reloadRow(diff.applicationId)}
                         /* D4, as in Bucket B. */
                         editDisabledReason={editOffReason(sources.get(diff.applicationId))}
                         /* Cover-letter note, as in Bucket B. */

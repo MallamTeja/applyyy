@@ -50,6 +50,13 @@ import type { AddableBullet, AddableEntry, BulletSection, MoveDirection, Section
 import { bulletGroundingGaps, tokenizeText } from '../../../../../supabase/functions/_shared/audit/detector.ts';
 // "Did the owner name this?", the server's own matcher (resume-assist reads names the same way), 2026-11-21.
 import { namedIn } from '../../../../../supabase/functions/_shared/text/name-match.ts';
+// S9d: the exact stale-row message the shared save returns, so the retry matches it by identity, never a copied string.
+import { SAVE_MESSAGES } from './saveTailoredEdit.ts';
+/* S9i P2: the server's apply report type and its one wording, from the shared planner the server itself uses, so the
+   panel prints exactly the record the server wrote into the chat. Re-exported for the panel. */
+import { outcomeText, type ServerOutcome } from '../../../../../supabase/functions/_shared/resume-edit/server-plan.ts';
+// Same.
+export { outcomeText, type ServerOutcome };
 /* The closed list of section names, shared with the tailor's schema and the edge function, so a
    stored op naming a section is checked against the same seven words everywhere. */
 import { TAILOR_SECTION_KINDS } from '../../../../../supabase/functions/_shared/tailor/prompt.ts';
@@ -106,6 +113,29 @@ export interface AssistBody {
   readonly entries?: readonly { readonly id: string; readonly section: BulletSection; readonly label: string }[];
   // Master items not on the resume: a bullet under an entry above, or a whole entry.
   readonly available?: readonly ({ readonly id: string; readonly entry: string; readonly text: string } | { readonly id: string; readonly section: BulletSection; readonly label: string })[];
+  /* S9b (2026-11-21): skills removed in THIS chat by a remove_skill that is applied now (removedInChat), so the server
+     never re-proposes them ("rm vs code" then "add 3 more tools" re-added VS Code). Sent only when non-empty. */
+  readonly removed_skills?: readonly string[];
+  /* S9i P2 (Teja 15:34: every chat edit is applied, even with the tab closed): ask the SERVER to apply the answer.
+     Sent only by withServerApply, all four together; an older server ignores them and the page applies as before. */
+  readonly server_apply?: true;
+  // The row the server applies to.
+  readonly application_id?: string;
+  // The chat the server writes the exchange into.
+  readonly chat_id?: string;
+  // The short-id -> ref maps this draft minted, so the server resolves ops exactly as resolveOps would.
+  readonly apply_maps?: {
+    // bN -> bullet ref.
+    readonly bullets: Readonly<Record<string, string>>;
+    // eN -> entry section and ref.
+    readonly entries: Readonly<Record<string, { readonly section: BulletSection; readonly ref: string }>>;
+    // mN -> master bullet ref.
+    readonly available_bullets: Readonly<Record<string, string>>;
+    // nN -> master entry section and ref.
+    readonly available_entries: Readonly<Record<string, { readonly section: BulletSection; readonly ref: string }>>;
+    // Every printed skill with its ref.
+    readonly skills: readonly { readonly name: string; readonly category: string; readonly ref: string }[];
+  };
 }
 
 /* One entry on the current resume, as the page describes it (see AssistStructure). */
@@ -151,9 +181,17 @@ export type AssistOp =
   // Add a skill under one of the master's groups.
   | { readonly op: 'add_skill'; readonly name: string; readonly category: string }
   // A bullet one place up or down within its entry.
-  | { readonly op: 'move'; readonly id: string; readonly direction: MoveDirection }
+  | { readonly op: 'move'; readonly id: string; readonly direction: MoveDirection; readonly place?: undefined }
+  // S9j (2026-11-21): the same bullet move to a 1-based place, in the server's exact wire shape.
+  | { readonly op: 'move'; readonly id: string; readonly place: number; readonly direction?: undefined }
   // A section one place up or down; a name from the sent order, checked again on resolve.
-  | { readonly op: 'move_section'; readonly section: string; readonly direction: MoveDirection }
+  | { readonly op: 'move_section'; readonly section: string; readonly direction: MoveDirection; readonly place?: undefined }
+  // S9j: the same section move to a place.
+  | { readonly op: 'move_section'; readonly section: string; readonly place: number; readonly direction?: undefined }
+  /* S9j (2026-11-21): a bullet, a section or an entry to a 1-based place. The server sends these only to a page that
+     asked it to apply (server_apply), and applies them itself; read here so the strict reader never refuses an answer
+     over them. In browser-apply mode they resolve to a named refusal (resolveOne). */
+  | { readonly op: 'move_entry'; readonly entry: string; readonly place: number }
   // A master item back onto the resume, by its "mN" or "nN" id.
   | { readonly op: 'add_back'; readonly id: string }
   // New bullet text under an entry, by its "eN" id.
@@ -189,9 +227,19 @@ export interface AssistUsage {
 /* The answer, read into a closed union; an unreadable answer is an error, never "no changes". */
 export type AssistResult =
   // The validated ops, every op the server refused with its reason, the model's note and the bill.
-  | { readonly kind: 'ok'; readonly ops: readonly AssistOp[]; readonly rejected: readonly Rejection[]; readonly note: string; readonly usage: AssistUsage }
+  | { readonly kind: 'ok'; readonly ops: readonly AssistOp[]; readonly rejected: readonly Rejection[]; readonly note: string; readonly usage: AssistUsage; readonly applied?: readonly ServerOutcome[]; readonly chatSaved?: boolean }
   // Anything else, in words the operator can act on.
   | { readonly kind: 'error'; readonly message: string };
+
+/* One outcome from the wire, or null when its shape is wrong (CLAUDE.md §6: check the shape, never repair it). */
+function readOutcome(value: unknown): ServerOutcome | null {
+  // An object with a label.
+  if (!isRecord(value) || typeof value.label !== 'string') return null;
+  // Applied needs nothing else.
+  if (value.status === 'applied') return { status: 'applied', label: value.label };
+  // The other two carry why.
+  return (value.status === 'refused' || value.status === 'suggested') && typeof value.why === 'string' ? { status: value.status, label: value.label, why: value.why } : null;
+}
 
 /* The request plus the map that turns the answer's ids back into this resume's targets. */
 export interface AssistDraft {
@@ -340,6 +388,8 @@ export function buildAssistDraft(
   instruction: string,
   history: readonly ChatTurn[] = [],
   structure: AssistStructure | null = null,
+  // S9b: skills this chat removed (removedInChat); empty sends no key, so an older body stays byte-identical.
+  removedSkills: readonly string[] = [],
 ): AssistDraft {
   // Short entry id -> entry, numbered in the page's order and capped like the function.
   const entries = new Map<string, AssistEntry>((structure?.entries ?? []).slice(0, MAX_ENTRIES).map((entry, index) => [`e${index}`, entry]));
@@ -499,6 +549,8 @@ export function buildAssistDraft(
     ...(availableSkills.length === 0 ? {} : { availableSkills }),
     // The caller (resumeChat.historyFor) already windowed and trimmed it to the function's caps.
     history,
+    // S9b: only when any, like availableSkills; capped to the server's list size and name length.
+    ...(removedSkills.length === 0 ? {} : { removed_skills: removedSkills.filter((name) => name.trim() !== '' && name.length <= MAX_SKILL_NAME).slice(0, MAX_PRINTED_SKILLS) }),
     // The structure, only when the page passed one, so an old body stays byte-identical.
     ...(structure === null
       ? {}
@@ -522,6 +574,40 @@ export function buildAssistDraft(
   for (const skill of printed) printedSkills.set(skill.name.trim().toLowerCase(), [...(printedSkills.get(skill.name.trim().toLowerCase()) ?? []), skill]);
   // Sent with the maps the answer and the audit advice need.
   return { body, refs, before, masterText, skillTokens, masterSkills, entries, availableBullets, availableEntries, structure, printedSkills };
+}
+
+/* S9i P2 (2026-11-21): the same draft, asking the server to apply its answer. The maps are the ones THIS draft minted
+   (refs, entries, availableBullets, availableEntries, printedSkills), so the server's resolveWireOp reads every short
+   id exactly as resolveOps would; the server re-checks every ref against the row it reads, so nothing here is trusted. */
+export function withServerApply(draft: AssistDraft, applicationId: string, chatId: string): AssistDraft {
+  // Map -> plain object, value by value.
+  const record = <V, W>(map: ReadonlyMap<string, V>, pick: (value: V) => W): Record<string, W> => Object.fromEntries([...map].map(([id, value]) => [id, pick(value)]));
+  // The body with the four server-apply fields.
+  return {
+    ...draft,
+    body: {
+      ...draft.body,
+      // Asked for.
+      server_apply: true,
+      // This row.
+      application_id: applicationId,
+      // This chat.
+      chat_id: chatId,
+      // The maps.
+      apply_maps: {
+        // bN -> ref.
+        bullets: record(draft.refs, (ref) => ref),
+        // eN -> section and ref.
+        entries: record(draft.entries, (entry) => ({ section: entry.section, ref: entry.ref })),
+        // mN -> ref.
+        available_bullets: record(draft.availableBullets, (bullet) => bullet.ref),
+        // nN -> section and ref.
+        available_entries: record(draft.availableEntries, (entry) => ({ section: entry.section, ref: entry.ref })),
+        // Every printed copy, in print order.
+        skills: [...draft.printedSkills.values()].flat().map((skill) => ({ name: skill.name, category: skill.category, ref: skill.ref })),
+      },
+    },
+  };
 }
 
 /* The audit's verdict on one AI op, or null for an op that changes no wording. */
@@ -587,7 +673,7 @@ export function holdReason(op: StoredOp): string | null {
   if (op.op === 'set_role') return 'Waiting for your click: a job title change always needs your OK.';
   /* A skill new to the master (2026-11-05): said, because a skill the operator named used to apply by
      itself, and a card that now waits would otherwise read as "did nothing". */
-  if (op.op === 'add_skill' && !op.inMaster) return 'Waiting for your click: check its group first. A skill new to your master profile never applies by itself.';
+  if (op.op === 'add_skill' && !op.inMaster) return 'Waiting for your click: your message did not name this skill, and one new to your master profile applies by itself only when you name it (S9g). Check its group first.';
   // Nothing to add.
   return null;
 }
@@ -615,6 +701,9 @@ export type StoredOp =
   | { readonly op: 'move'; readonly ref: string; readonly direction: MoveDirection; readonly past: string; readonly before: string | null }
   // A section one place up or down, past the neighbouring section, for the same reason.
   | { readonly op: 'move_section'; readonly section: SectionKind; readonly direction: MoveDirection; readonly past: SectionKind }
+  /* S9j place-moves (move_entry, move/move_section with "place") have NO stored shape on purpose (2026-11-23): only the
+     server applies them (resume-assist server-apply), and a server-applied answer stores no cards. In this page they
+     resolve to a rejected card (SERVER_ONLY_MOVE), so the page's EditAction never needs a place kind. */
   // A master bullet back under its entry, with its master text and the entry's label for the card.
   | { readonly op: 'add_bullet'; readonly ref: string; readonly text: string; readonly parentLabel: string }
   // A whole master entry back onto the resume.
@@ -659,7 +748,8 @@ function reject(what: string, why: string): StoredOp {
    say "added" over nothing. Replaced the one-op toStoredOp on 2026-11-01, because a move can only be
    resolved knowing the moves before it. The orders are copied and each move (and removal) is played
    on the copy, because the saves land in order: "move b3 up" twice must pass two different siblings,
-   and a bullet already first cannot go up. */
+   and a bullet already first cannot go up. S9j place-moves always become SERVER_ONLY_MOVE cards here: a server-applied
+   answer never reaches this function (the panel shows the server's outcome list instead). */
 export function resolveOps(ops: readonly AssistOp[], draft: AssistDraft): StoredOp[] {
   // Each entry's bullet refs, copied so the ask's structure is never changed.
   const lists = (draft.structure?.entries ?? []).map((entry) => [...entry.bulletRefs]);
@@ -674,7 +764,9 @@ export function resolveOps(ops: readonly AssistOp[], draft: AssistDraft): Stored
 }
 
 // The owner said "all" as a word: the one override of the one-line skill group rule (2026-11-12).
-const SAYS_ALL = /\ball\b/i;
+// S9a (2026-11-21): an explicit count of 2+ ("add 7 tools", "add toools 7") dictates how many just as "all" does, so it
+// lifts the line limit too (7 of Teja's adds were dropped by the width check while the reply said "Proposed N").
+const SAYS_ALL = /\ball\b|\b([2-9]|[1-9]\d)\b/i;
 
 // The reason every op on something an earlier remove_entry took away is refused with.
 const GONE_WITH_ENTRY = 'An earlier change in this answer removes its entry.';
@@ -700,7 +792,14 @@ function swapPast<T>(list: T[], item: T, direction: MoveDirection): T | undefine
 
 /* One op against the orders as played so far (see resolveOps); a rejected card, with the one check it
    failed, wherever it cannot land. */
+// S9j: the refusal a place-move gets when this page applies in the browser (only the server applies it).
+const SERVER_ONLY_MOVE = 'This move is applied by the server; reload the page and ask again.';
+
 function resolveOne(op: AssistOp, draft: AssistDraft, lists: string[][], sections: SectionKind[], gone: Set<string>): StoredOp {
+  // S9j: an entry to a place is applied only by the server; this page names the refusal instead of guessing a move.
+  if (op.op === 'move_entry') return reject(`Move entry ${op.entry} to place ${op.place}`, SERVER_ONLY_MOVE);
+  // Same for a bullet or a section sent with a place: a direction move below still resolves here.
+  if ((op.op === 'move' || op.op === 'move_section') && op.place !== undefined) return reject(`Move ${op.op === 'move' ? op.id : op.section} to place ${op.place}`, SERVER_ONLY_MOVE);
   // A skill needs no target; the master check is made once, now.
   if (op.op === 'add_skill') {
     // The card as before: name, group, and whether the master holds it.
@@ -855,7 +954,10 @@ export function shouldAutoApply(op: StoredOp, instruction: string): boolean {
   if (op.op !== 'add_skill' && op.op !== 'remove_skill') return true;
   /* A skill on: only a master claim, which attest reuses with the master's own group. A new one
      waits even when named (2026-11-05): the group it would land under is the AI's pick. */
-  if (op.op === 'add_skill') return op.inMaster;
+  /* S9g, Teja 2026-11-21 15:11: "if i say once add it need to add without need of my click or confirmation even though it
+     is not there in my resume". A master skill lands as before; a skill new to the master lands too when HIS message
+     names it (the shared matcher, as for removals), so it is dictated, not invented. An AI-picked new skill still waits. */
+  if (op.op === 'add_skill') return op.inMaster || namedIn(op.name, [instruction]);
   /* A skill off (2026-11-04, the JD reason above): only when the operator named it; "remove the
      duplicate testing" names Testing, "trim my skills" names none. */
   /* Named by the server's own matcher (2026-11-21): runs of 1-4 words, compacted, one typo on 6+ letters, two on 8+,
@@ -1008,17 +1110,17 @@ export async function runApplyBatch<T>(
   let saved = 0;
   // Only when there is something to fold.
   if (pure.length > 0) {
-    // ONE save of the end state.
-    const result = await saveBatch(pure);
+    // ONE save of the end state, retried once when the row moved under it (S9d, below).
+    const result = await onceMore(() => saveBatch(pure));
     // Refused: nothing landed, and no attest runs on top of it.
     if (!result.ok) return { kind: 'none_saved', reason: result.reason };
     // All of them landed together.
     saved = pure.length;
   }
-  // The attests in order; the first refusal stops the run (the row probably changed).
+  // The attests in order; the first refusal stops the run, after one retry when the row had moved (S9d).
   for (const [i, item] of attests.entries()) {
     // Its own save.
-    const result = await saveOne(item);
+    const result = await onceMore(() => saveOne(item));
     // Landed: count it.
     if (result.ok) { saved += 1; continue; }
     // Refused with nothing before it: nothing landed at all.
@@ -1028,6 +1130,17 @@ export async function runApplyBatch<T>(
   }
   // Everything landed.
   return { kind: 'all_saved' };
+}
+
+/* S9d (2026-11-21, live BA4 msg 823: "rm vector search" got the right op but never saved). A save refused because the
+   row changed under it says exactly SAVE_MESSAGES.changedShown, and by then the page has ADOPTED the newer row (its
+   stamp lives in a ref, latestSources), so the same edit can simply be tried again. Once: a second stale refusal means
+   something keeps writing the row, and the owner should see that rather than a loop. Every other refusal is final. */
+async function onceMore(save: () => Promise<EditResult>): Promise<EditResult> {
+  // The first try.
+  const first = await save();
+  // Anything but the reloaded-stale refusal is the answer.
+  return !first.ok && first.reason === SAVE_MESSAGES.changedShown ? save() : first;
 }
 
 /* The one line a batch run puts above the composer, or null when everything landed. */
@@ -1093,7 +1206,7 @@ export function bulletParents(structure: AssistStructure | null): ReadonlyMap<st
 export function isApplied(stored: StoredOp, diff: ResumeDiff, structure: AssistStructure | null = null): boolean {
   // A rejected card never landed, whatever the resume holds now.
   if (stored.op === 'rejected') return false;
-  // The six structural shapes have their own reader.
+  // The nine structural shapes have their own reader.
   if (stored.op === 'move' || stored.op === 'move_section' || stored.op === 'add_bullet' || stored.op === 'add_entry' || stored.op === 'new_bullet' || stored.op === 'remove_entry') {
     // Nothing to read them against.
     return structure !== null && structureApplied(stored, diff, structure);
@@ -1341,6 +1454,14 @@ function readOp(value: unknown): AssistOp | null {
   if (!isRecord(value)) return null;
   // A direction, for the two moves.
   const direction = moveDirection(value.direction);
+  // S9j: a place, a whole number from 1 (never coerced), on move, move_section or move_entry.
+  const place = typeof value.place === 'number' && Number.isInteger(value.place) && value.place >= 1 ? value.place : null;
+  // S9j: a bullet to a place.
+  if (value.op === 'move' && typeof value.id === 'string' && place !== null) return { op: 'move', id: value.id, place };
+  // S9j: a section to a place.
+  if (value.op === 'move_section' && typeof value.section === 'string' && place !== null) return { op: 'move_section', section: value.section, place };
+  // S9j: an entry to a place.
+  if (value.op === 'move_entry' && typeof value.entry === 'string' && place !== null) return { op: 'move_entry', entry: value.entry, place };
   // A bullet move: an id and a direction.
   if (value.op === 'move' && typeof value.id === 'string' && direction !== null) return { op: 'move', id: value.id, direction };
   // A section move: a name (checked against the order on resolve) and a direction.
@@ -1447,6 +1568,42 @@ export function replyNote(note: string, ops: readonly StoredOp[]): string {
    Not applied yet: … | Could not do: … (why)]", or '' for a reply with no ops. The chat sends this
    ahead of each earlier AI reply, so the model reads the outcome of its own turns instead of its own
    claims; the old note "I added C" was resent as fact and the model went on believing it. */
+/* S9b (2026-11-21): every skill this chat took off that is STILL off now, once each, in first-removed order. Read from
+   the resume (isApplied), never stored: a removal the owner undid by adding the skill back no longer counts, so the
+   server may offer it again. Takes each assistant reply's ops (null for a reply with none). */
+export function removedInChat(opLists: readonly (readonly StoredOp[] | null)[], diff: ResumeDiff): string[] {
+  // Names already listed, by lower case, so a removal proposed twice is listed once.
+  const seen = new Set<string>();
+  // The list, in order.
+  const names: string[] = [];
+  // Every reply's ops, oldest first.
+  for (const op of opLists.flatMap((ops) => ops ?? [])) {
+    // Only a skill removal that has landed and still holds.
+    if (op.op !== 'remove_skill' || !isApplied(op, diff)) continue;
+    // Its key.
+    const key = op.name.trim().toLowerCase();
+    // Listed once.
+    if (seen.has(key)) continue;
+    // Remembered.
+    seen.add(key);
+    // Kept in the master's spelling, as the card showed it.
+    names.push(op.name);
+  }
+  // The list.
+  return names;
+}
+
+// The server's fallback note for a reply with no text of its own (resume-assist honestNote): it carries no fact.
+const PROPOSED_FALLBACK = /^Proposed \d+ changes?\. See the list below\.\s*/;
+
+/* S9b (2026-11-21): one earlier reply as the model reads it back. The app's record of what landed comes first (outcomeNote),
+   because history cuts each turn at 500 characters; the server's empty "Proposed 1 change. See the list below." is
+   dropped, so the turn reads "[Applied: remove skill "VS Code"]" and not a count the model cannot act on. */
+export function historyTurnText(ops: readonly StoredOp[], content: string, diff: ResumeDiff, structure: AssistStructure | null): string {
+  // The record, then whatever real text the reply had.
+  return [outcomeNote(ops, diff, structure), content.replace(PROPOSED_FALLBACK, '')].filter((part) => part !== '').join(' ');
+}
+
 export function outcomeNote(ops: readonly StoredOp[], diff: ResumeDiff, structure: AssistStructure | null): string {
   // Landed, by the same reading the cards use.
   const applied = ops.filter((op) => isApplied(op, diff, structure)).map(describeOp);
@@ -1662,6 +1819,11 @@ function readAssistBody(ok: boolean, data: unknown): AssistResult {
   const unlisted = (count(data.dropped) ?? 0) - rejected.length;
   // Any it counted but did not itemise are still said, never lost.
   if (unlisted > 0) rejected.push({ what: `${unlisted} ${rejected.length > 0 ? 'more ' : ''}proposed change${unlisted === 1 ? '' : 's'}`, why: 'The AI service did not say why.' });
+  /* S9i P2: the server's apply report, only from a server that applied. A malformed report is a drifted contract,
+     refused whole like an unreadable op: showing part of it could hide a change that did land. */
+  const appliedRaw = data.applied === undefined ? undefined : Array.isArray(data.applied) ? data.applied.map(readOutcome) : null;
+  // Malformed.
+  if (appliedRaw === null || (appliedRaw !== undefined && appliedRaw.some((o) => o === null))) return { kind: 'error', message: 'The AI answer had an unexpected shape.' };
   // The validated answer.
   return {
     kind: 'ok',
@@ -1670,5 +1832,7 @@ function readAssistBody(ok: boolean, data: unknown): AssistResult {
     note: typeof data.note === 'string' ? data.note : '',
     // The bill, every count checked.
     usage: readUsage(data.usage),
+    // S9i P2: present only when the server applied; chat_saved only as an exact true.
+    ...(appliedRaw === undefined ? {} : { applied: appliedRaw.filter((o): o is ServerOutcome => o !== null), chatSaved: data.chat_saved === true }),
   };
 }
