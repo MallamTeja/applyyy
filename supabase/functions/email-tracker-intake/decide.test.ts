@@ -1032,9 +1032,16 @@ test("owner-sent: the owner's own reply quoting a rejection is never a rejection
   assert.deepEqual(decision.matchedSignals, ["owner_sent"]);
 });
 
-test("owner-sent control: the same text from the employer IS a rejection (the fixture really carries one)", () => {
-  // Without this, the test above could pass on a fixture no classifier would call a rejection.
-  assert.equal(classifyMessage({ ...OWNER_REPLY, from: "HackerRank <no-reply@hackerrank.com>" }, OWNER).classification, "rejection");
+// The same thread's rejection written as NEW text, not quoted. Since bug 16 (2026-11-21, parser.ts
+// stripQuotedHistory) a quoted rejection no longer classifies from anyone, so OWNER_REPLY cannot serve as an
+// employer rejection any more: the controls below need the phrase where the classifier still reads it.
+const UNQUOTED_REJECTION = { ...OWNER_REPLY, snippet: "Unfortunately we will not be moving forward with your application." };
+
+test("owner-sent control: an unquoted rejection is a rejection from the employer and NOT from the owner", () => {
+  // Without the first half, the owner-sent tests could pass on a fixture no classifier would call a rejection.
+  assert.equal(classifyMessage({ ...UNQUOTED_REJECTION, from: "HackerRank <no-reply@hackerrank.com>" }, OWNER).classification, "rejection");
+  // The owner sending the very same new text: owner-sent alone stops it, with quote-stripping out of play.
+  assert.deepEqual(classifyMessage(UNQUOTED_REJECTION, OWNER).matchedSignals, ["owner_sent"]);
 });
 
 test("owner-sent: the address is compared case-insensitively, and a bare address counts", () => {
@@ -1044,7 +1051,8 @@ test("owner-sent: the address is compared case-insensitively, and a bare address
 
 test("owner-sent: the owner's address in a DISPLAY NAME does not make mail owner-sent", () => {
   // A display name is anyone's text; only the bracketed address counts, so this stays the rejection it is.
-  assert.equal(classifyMessage({ ...OWNER_REPLY, from: '"tejamallam00@gmail.com" <hr@acme.com>' }, OWNER).classification, "rejection");
+  // The unquoted fixture, so a "rejection" answer can only come from the classifier reading the new text.
+  assert.equal(classifyMessage({ ...UNQUOTED_REJECTION, from: '"tejamallam00@gmail.com" <hr@acme.com>' }, OWNER).classification, "rejection");
 });
 
 test("owner-sent: an owner-sent row is stored blanked, like every unclassified unmatched row", () => {

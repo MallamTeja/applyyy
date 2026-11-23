@@ -371,6 +371,40 @@ export function detectAutoReplyOrConfirmation(subject: string, body: string): bo
   return false;
 }
 
+// Where quoted reply history starts (bug 16, 2026-11-21). Each pattern is a HEADER a mail client writes above the
+// quote, never quote content, so it also works on the whitespace-collapsed body Apps Script sends
+// (email-tracker.gs applyyTruncate_ folds every newline into a space, so line-start ">" markers are gone there).
+const QUOTE_HEADERS: readonly RegExp[] = [
+  // Gmail / Apple Mail: "On Mon, Nov 10, 2025 at 3:02 PM Name <a@b.com> wrote:", "On 10 Nov 2025, at 15:02, …".
+  // Case-sensitive "On" FOLLOWED BY A DATE, then "wrote:" within a bounded span. A looser "on … digit … wrote:"
+  // matched "on our team … 2025 … wrote:" and cut the new text too (caught by the bug-16 tests).
+  /\bOn\s+(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+)?(?:\d{1,4}[/.-]\d{1,2}|\d{1,2}\s+[A-Z][a-z]{2,}|[A-Z][a-z]{2,}\s+\d{1,2})[^]{0,200}?\bwrote\s*:/,
+  // Outlook: the "From: … Sent: … To:" block it puts above the quoted message.
+  /\bFrom:\s[^]{1,200}?\bSent:\s[^]{1,120}?\bTo:\s/i,
+  // Older Outlook / Exchange separator.
+  /-{3,}\s*Original Message\s*-{3,}/i,
+];
+
+// Removes quoted reply history so only the sender's NEW text is classified (bug 16, 2026-11-21).
+//
+// WHY: an employer reply that quoted an older rejection read as a rejection, because the parser classified the whole
+// body. Two steps: drop ">" lines while the body still has line breaks (getPlainBody keeps them), then cut at the
+// first reply header (the collapsed form only has those). A forward is NOT cut: "Forwarded message" is the content.
+export function stripQuotedHistory(body: string): string {
+  // Line-quoted text, where newlines survive.
+  const unquoted = body.split(/\r?\n/).filter((line) => !/^\s*>/.test(line)).join("\n");
+  // The earliest header among the patterns, if any.
+  let cut = unquoted.length;
+  for (const header of QUOTE_HEADERS) {
+    // First match of this header style.
+    const at = unquoted.search(header);
+    // Keep the earliest.
+    if (at >= 0 && at < cut) cut = at;
+  }
+  // The new text only, trimmed.
+  return unquoted.slice(0, cut).trim();
+}
+
 // The main parsing entry point. Takes raw subject, body, and optional sender header,
 // and returns a fully parsed, normalized, and feature-annotated `ParsedEmail` object.
 //
@@ -386,17 +420,19 @@ export function parseEmail(input: ParseEmailInput): ParsedEmail {
 
   // Normalize subject text to clean lowercase.
   const cleanSubject = normalizeText(rawSubject);
+  // The sender's new text only: quoted history must not decide the class (bug 16). rawBody stays as received.
+  const newText = stripQuotedHistory(rawBody);
   // Normalize body text by sanitizing HTML and lowercasing.
-  const cleanBody = normalizeText(rawBody);
+  const cleanBody = normalizeText(newText);
 
   // Extract hiring company domain from sender header if present.
   const extractedCompanyDomain = extractCompanyDomain(sender);
 
-  // Extract interview scheduling link from body content.
-  const detectedSchedulingUrl = extractSchedulingUrl(rawBody);
+  // Extract interview scheduling link from the new text (an old quoted invite's link is not a new invite).
+  const detectedSchedulingUrl = extractSchedulingUrl(newText);
 
-  // Extract assessment platform name from subject and body content.
-  const detectedAssessmentPlatform = extractAssessmentPlatform(`${rawSubject} ${rawBody}`);
+  // Extract assessment platform name from subject and the new text.
+  const detectedAssessmentPlatform = extractAssessmentPlatform(`${rawSubject} ${newText}`);
 
   // Check whether the email is an automated application receipt or out-of-office note.
   const isAutoReplyOrConfirmation = detectAutoReplyOrConfirmation(cleanSubject, cleanBody);

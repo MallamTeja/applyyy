@@ -190,6 +190,15 @@ test("a client-rendered page: thin plain HTML falls back to ONE render, whose te
   assert.equal(renders, 1);
 });
 
+// The live backlog's shape (measured 2026-11-21 ~20:45): 111 Workday rows, description_raw NULL, created 11-05..11-10.
+// A null description must read as thin (a non-string is "no role text"), or the cron would skip exactly these rows.
+test("pickCandidate: a real Workday row with a NULL description is picked (the live backlog's shape)", () => {
+  // Workday, no ATS id, a myworkdayjobs apply link, description null.
+  const workday = candidate({ applicationId: "wd-null", atsProvider: "workday", atsJobId: null, applyUrl: "https://barclays.wd3.myworkdayjobs.com/External_Career_Site_Barclays/job/Pune/Software-Engineer_JR-0000", boardToken: null, job: { ...candidate().job, descriptionRaw: null } });
+  // Picked.
+  assert.equal(pickCandidate([workday], new Set())?.applicationId, "wd-null");
+});
+
 test("pickCandidate: skips tried ids, human-pasted rows and rows no longer thin", () => {
   // Four rows, oldest first.
   const rows = [

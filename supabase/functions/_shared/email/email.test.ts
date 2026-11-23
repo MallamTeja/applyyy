@@ -15,6 +15,7 @@ import {
   normalizeText,
   parseEmail,
   sanitizeHtml,
+  stripQuotedHistory,
 } from "./parser.ts";
 import { classifyRawEmail, EMAIL_OUTCOMES } from "./classifier.ts";
 
@@ -257,4 +258,70 @@ test("classifyRawEmail reads Canonical's receipt (panel interview described, not
   const invite = classifyRawEmail({ subject: "Thank you for applying", body: "Thank you for applying. We would like to invite you to an interview next week.", sender: "no-reply@us.greenhouse-mail.io" });
   // The invitation wins over the receipt.
   assert.equal(invite.outcome, "interviewing");
+});
+
+// --- Quoted reply history (bug 16, 2026-11-21) ------------------------------------
+// WHY: an employer's reply that QUOTES an older rejection read as a rejection, because the parser classified the
+// whole body, quote included. parseEmail now cuts quoted history before classifying. RED-ON-REVERT: without
+// stripQuotedHistory in parseEmail, both "reply quoting a rejection" tests read `rejected`.
+
+// A real-shaped Gmail reply: new text on top, the "On … wrote:" header, then ">" lines of the old rejection.
+const QUOTED_REJECTION_REPLY = [
+  "Hi Teja,",
+  "",
+  "Thanks for following up. A new role opened on our team, and we would like to invite you to an interview next week.",
+  "",
+  "On Mon, Nov 10, 2025 at 3:02 PM Acme Recruiting <jobs@acme.com> wrote:",
+  "> Hi Teja,",
+  "> Unfortunately, we have decided not to move forward with your application at this time.",
+  "> We wish you the best in your job search.",
+].join("\n");
+
+// Test the multi-line reply, as getPlainBody() returns it.
+test("bug 16: a reply quoting an old rejection is NOT a rejection (multi-line Gmail quote)", () => {
+  // The reply as a raw multi-line body.
+  const result = classifyRawEmail({ subject: "Re: Your application", body: QUOTED_REJECTION_REPLY, sender: "Acme Recruiting <jobs@acme.com>" });
+  // The new text invites; the quote must not decide.
+  assert.notEqual(result.outcome, "rejected");
+  assert.equal(result.outcome, "interviewing");
+});
+
+// Test the SAME reply after Apps Script collapses whitespace (email-tracker.gs applyyTruncate_): no line starts left.
+test("bug 16: the same reply whitespace-collapsed (what Apps Script sends) is NOT a rejection", () => {
+  // What the intake actually receives.
+  const collapsed = QUOTED_REJECTION_REPLY.replace(/\s+/g, " ").trim();
+  const result = classifyRawEmail({ subject: "Re: Your application", body: collapsed, sender: "Acme Recruiting <jobs@acme.com>" });
+  // Cut at "On … wrote:", so the quoted rejection is gone.
+  assert.equal(result.outcome, "interviewing");
+});
+
+// Test an Outlook-style quote header, collapsed.
+test("bug 16: an Outlook quote block (From/Sent/To) is cut too", () => {
+  // New text, then the Outlook header and the old rejection.
+  const body = "Hello Teja, please book a slot for your technical interview using the link below. From: Acme Talent <talent@acme.com> Sent: Monday, November 10, 2025 3:02 PM To: Teja Subject: Your application Unfortunately, we have decided not to move forward with your application.";
+  const result = classifyRawEmail({ subject: "RE: Your application", body, sender: "Acme Talent <talent@acme.com>" });
+  // The quoted rejection below the header does not count.
+  assert.notEqual(result.outcome, "rejected");
+});
+
+// Test that a REAL rejection still classifies, including one that quotes the candidate's own earlier message.
+test("bug 16: a real rejection still reads as rejected, even when it quotes the candidate", () => {
+  // The rejection is the new text; the quote is the candidate's question.
+  const body = "Hi Teja, thank you for your interest. Unfortunately, we have decided not to move forward with your application. On Sun, Nov 9, 2025 at 10:00 AM Teja <tejamallam00@gmail.com> wrote: > Could you share an update on my application?";
+  const result = classifyRawEmail({ subject: "Re: Application update", body, sender: "Acme Recruiting <jobs@acme.com>" });
+  // The rejection above the quote decides.
+  assert.equal(result.outcome, "rejected");
+  // And a plain rejection with no quote is unchanged.
+  const plain = classifyRawEmail({ subject: "Your application", body: "Unfortunately, we have decided not to move forward with your application.", sender: "jobs@acme.com" });
+  assert.equal(plain.outcome, "rejected");
+});
+
+// Test the helper's boundaries: "on" in ordinary prose is never a cut, and the raw body is kept as received.
+test("bug 16: stripQuotedHistory leaves prose alone and parseEmail keeps rawBody", () => {
+  // "On" plus a number in a sentence, with no "wrote:" header, is not a quote header.
+  assert.equal(stripQuotedHistory("On 12 Nov we start onboarding at 10 am."), "On 12 Nov we start onboarding at 10 am.");
+  // The parse keeps the untouched raw body (stored as received) and cleans only the classified copy.
+  const parsed = parseEmail({ subject: "Re: x", body: QUOTED_REJECTION_REPLY });
+  assert.equal(parsed.rawBody, QUOTED_REJECTION_REPLY);
+  assert.ok(!parsed.cleanBody.includes("not to move forward"), parsed.cleanBody);
 });

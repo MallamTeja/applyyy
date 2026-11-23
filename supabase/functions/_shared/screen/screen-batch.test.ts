@@ -676,3 +676,16 @@ test("the plan carries exactly inserts, dropped, warnings and the two counters",
   // The positive shape, sorted so key order is not the assertion.
   assert.deepEqual(Object.keys(planned).sort(), ["droppedCount", "dropped", "inserts", "passedCount", "warnings"].sort());
 });
+
+// 2026-11-21, Teja 20:12 IST: "Drop AVP/VP/Director". The screener reaches the grade rule through screenTechRole, so a
+// Barclays-shaped row (plain title, grade as a heading line in the body: Data Analyst 9ae9a866) is born dropped.
+test("seniority 11-21: a grade line in the body is born dropped as title_seniority; prose about a VP is not", () => {
+  // The live heading shape.
+  const graded = planScreenedApplications([{ jobId: "bv-1", row: { ...BASE_ROW, title: "Software Engineer", description_raw: "Purpose of the role\n\nVice President Expectations\n\nTo contribute to strategy." } }], [], BASE_CONTEXT, TECH_PREFS);
+  // Dropped under the rule's one code.
+  assert.deepEqual(graded.inserts, [{ job_id: "bv-1", status: "dropped_filter", drop_reason: "title_seniority" }]);
+  // Prose naming a VP is not the role's grade.
+  const prose = planScreenedApplications([{ jobId: "bv-2", row: { ...BASE_ROW, title: "Software Engineer", description_raw: "You will report to the VP of Engineering and build React apps." } }], [], BASE_CONTEXT, TECH_PREFS);
+  // Passed.
+  assert.equal(prose.inserts[0]!.status, "passed_filters");
+});

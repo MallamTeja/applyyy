@@ -289,7 +289,10 @@ test("an excluded word found only in the description does not drop the row", () 
 
 test("an excluded word in the title still drops", () => {
   // The positive half: a seniority word in the title is exactly what exclusions are for.
-  const verdict = screenTechRole("Head of Cloud Operations Engineering", null, HEAD);
+  // The title was "Head of Cloud Operations Engineering" until 2026-11-21, when "head of" became a built-in
+  // seniority rule (Teja 20:12, "Drop AVP/VP/Director") that runs first and names its own code. A bare "Head"
+  // keeps this test on the EXCLUSION path it exists to guard.
+  const verdict = screenTechRole("Cloud Operations Engineering Head", null, HEAD);
   // Dropped by the exclusion, naming the term.
   assert.deepEqual(verdict, { drop: true, code: "tech_gate", reason: 'title matches excluded term "Head"' });
 });
@@ -448,6 +451,76 @@ test("title rule 1, seniority: words that merely contain the letters are untouch
   for (const title of ["VPN Software Engineer", "Software Engineer, Interview Platform", "Intermediary Services Developer"]) {
     // Whole-word matching only.
     assert.equal(titleVerdict(title), "pass", title);
+  }
+});
+
+// 2026-11-21, Teja 20:12 IST: "Drop AVP/VP/Director". Director and "Head of" join the title list, and an
+// explicit grade LINE in the description drops too (Barclays files the grade as a heading, not in the title).
+test("seniority 11-21: Director, Senior Director and Head of titles drop as title_seniority", () => {
+  // Each new title word, with its usual neighbours.
+  for (const title of ["Director, Software Engineering", "Senior Director - Data Platform", "Managing Director, Technology", "Head of AI Engineering"]) {
+    // The one family code.
+    assert.equal(titleVerdict(title), "title_seniority", title);
+  }
+});
+
+test("seniority 11-21: Barclays' grade headings drop (live AI Engineer afe8985b = AVP, Data Analyst 9ae9a866 = VP)", () => {
+  // The live shape: the title says nothing, the body carries the grade as its own heading line.
+  const avp = "To design and build AI systems.\n\nAssistant Vice President Expectations\n\nTo advise and influence decision making, lead a team performing complex tasks.";
+  // The full verdict, so both the code and the reason can be read.
+  const verdict = screenTechRole("AI Engineer", avp, TITLE_RULE_PREFS);
+  // Dropped under the one seniority family code, countable with the title form.
+  assert.equal(verdict.drop && verdict.code, "title_seniority");
+  // The reason quotes the line, so a wrong drop is diagnosable from the row alone.
+  assert.match(verdict.drop ? verdict.reason : "", /Assistant Vice President Expectations/);
+  // The VP heading.
+  assert.equal(titleVerdict("Data Analyst", "Purpose of the role\n\nVice President Expectations\n\nTo contribute to strategy."), "title_seniority");
+});
+
+test("seniority 11-21: a labelled grade line drops (Corporate Title / Grade / Job Level / Seniority level)", () => {
+  // Each label shape, with dash, colon, en dash and a bracketed abbreviation.
+  for (const line of ["Corporate Title: Vice President", "Grade - AVP", "Job Level: Director", "Seniority level: Director", "Corporate Title – Assistant Vice President (AVP)", "Band: VP."]) {
+    // A plain title, a body that carries the line.
+    assert.equal(titleVerdict("Software Engineer", `About us\n${line}\nWhat you will do`), "title_seniority", line);
+  }
+});
+
+test("seniority 11-21 KEEPS: prose that names a senior person, and words that only look like the grades", () => {
+  // A body mentioning a VP or Director in prose is not the role's grade.
+  for (const body of [
+    "You will report to the VP of Engineering.",
+    "Work with Directors and Vice Presidents across the bank.",
+    "Graduated on the Director's list.",
+    "Our Head of Engineering leads the platform team.",
+    "Analyst Expectations\n\nTo perform activities in a timely manner.",
+    "Grade: Analyst",
+  ]) {
+    // A plain software title stays.
+    assert.equal(titleVerdict("Software Engineer", body), "pass", body);
+  }
+  // Titles that only contain the letters.
+  for (const title of ["Directory Services Engineer", "Software Engineer, Director's Office Tools", "Headless CMS Developer"]) {
+    // Whole words only; "Director's" is a possessive, not a grade.
+    assert.equal(titleVerdict(title), "pass", title);
+  }
+});
+
+test("seniority 11-23: other encodings of the same shapes (curly possessive keeps; hyphen, em dash, NBSP drop)", () => {
+  // KEEP: the curly apostrophe U+2019 is a possessive too; before the fix this real-looking title dropped.
+  assert.equal(titleVerdict("Software Engineer, Director’s Office Tools"), "pass");
+  // DROP: the hyphenated grade is the same grade, in the title.
+  assert.equal(titleVerdict("Vice-President, Software Engineering"), "title_seniority");
+  // DROP: each line below is a shape the rule already covers, written with another character.
+  for (const line of [
+    // Hyphenated grade in a labelled line.
+    "Corporate Title: Vice-President",
+    // Em dash U+2014 separator (what stripHtml makes of Greenhouse's "&mdash;").
+    "Corporate Title — AVP",
+    // Non-breaking spaces U+00A0 around the separator.
+    "Corporate Title: VP",
+  ]) {
+    // A plain title, a body that carries the line.
+    assert.equal(titleVerdict("Software Engineer", `About us\n${line}\nWhat you will do`), "title_seniority", line);
   }
 });
 

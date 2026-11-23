@@ -289,7 +289,55 @@ const NAMED_INSTITUTE = /\b(IIT|IIIT|NIT|BITS|IIM|IISc)\b/;
 // Rule 1, SENIORITY: bank grades and GitLab's mid-level grade. "Intermediate" is GitLab's title for a
 // mid-level role ("not a beginner-level job", Teja 23:28). SVP/EVP are the same family as VP. Whole words
 // only, so "VPN", "Interview" and "Intermediary" never match.
-const SENIORITY_TITLE = /\b(avp|svp|evp|vp|vice president|intermediate)\b/i;
+// WIDENED 2026-11-21 (Teja, 20:12 IST, choosing one of three proposed rules: "Drop AVP/VP/Director"):
+// "director" (Senior/Executive/Managing Director too) and "head of" join the title list. Principal and Staff
+// are NOT in it (out of scope per the orch's brief; no live leak shows them). "Directory" and "Director's"
+// never match: `\b` after "director" needs a non-word character, and the apostrophe case is a keep test.
+// 2026-11-23 (peer 2 review): the possessive guard also covers the curly apostrophe U+2019, which ATS pages
+// emit as often as the ASCII one ("Director’s Office Tools" dropped before); "Vice-President" is the same grade
+// hyphenated, so the space may be a hyphen.
+const SENIORITY_TITLE = /\b(avp|svp|evp|vp|vice[ -]president|intermediate|director|head of)\b(?!['’]s)/i;
+
+// The same grades, as a description states them. Only the bank-grade family and Director: "Intermediate"
+// and "Head of" are not grade NAMES a JD files a role under.
+// "vice[ -]president": the hyphenated spelling is the same grade (2026-11-23), so it must not slip past.
+const GRADE_NAME = "(?:assistant vice[ -]president|senior vice[ -]president|executive vice[ -]president|vice[ -]president|avp|svp|evp|vp|senior director|executive director|managing director|director)";
+// AN EXPLICIT GRADE LINE in the description (2026-11-21, same ruling). The evidence: Barclays files the grade
+// as a section heading, not in the title. Live: "AI Engineer" afe8985b has the line "Assistant Vice President
+// Expectations", "Data Analyst" 9ae9a866 has "Vice President Expectations"; Barclays' Analyst-grade rows have no
+// such line. Two shapes, each a WHOLE LINE (`^...$`, multiline), so prose never matches:
+//   (a) "<grade> Expectations" as its own heading (Barclays);
+//   (b) a labelled field, "Corporate Title: VP", "Grade - AVP", "Job Level: Director" (an optional "(AVP)" after).
+// "reports to the VP of Engineering", "work with Directors" and "Director's list" are prose or not a whole
+// line, and stay (named keep tests in tech-gate.test.ts).
+// 2026-11-23 (peer 2 review): the em dash U+2014 joins the separators (stripHtml decodes Greenhouse's
+// "&mdash;" to it, so "Corporate Title &mdash; AVP" slipped through), and the non-breaking space U+00A0 counts
+// as a space (an "&nbsp;" left as U+00A0 in plain text broke the match). Same shapes, other encodings: NOT
+// widened to bullets, bold or trailing text after the grade (no live evidence; each one adds prose risk).
+// The horizontal-space class, built once so all six sites agree.
+const HS = "[ \\t\\u00a0]";
+// The line itself: shape (a) or (b), whole-line anchored.
+const GRADE_LINE = new RegExp(
+  `^${HS}*(?:${GRADE_NAME}${HS}+expectations${HS}*:?|(?:corporate title|job grade|grade|job level|career level|seniority level|band|level)${HS}*[:\\-\\u2013\\u2014]${HS}*${GRADE_NAME}(?:${HS}*\\([^)\\n]*\\))?)${HS}*\\.?${HS}*$`,
+  "im",
+);
+
+// The seniority verdict alone: the title rule, then the description's grade line. Exported because the
+// auditor's queue re-gate asks it directly (auditor/pregate.ts auditorRegateGates), like work-auth.
+// ONE CODE, `title_seniority`, for both: they are one rule family (Teja's grade rules), countable and
+// recoverable as one set. The prose `reason` says which one fired.
+export function seniorityGradeDrop(title: string, description: string | null): { readonly code: "title_seniority"; readonly reason: string } | null {
+  // The title, normalised as every match in this file is.
+  const grade = SENIORITY_TITLE.exec(collapseWhitespace(title))?.[1];
+  // A grade word in the title.
+  if (grade !== undefined) return { code: "title_seniority", reason: `"${title}" carries the seniority word "${grade}"` };
+  // An explicit grade line anywhere in the description (text, not markup: callers pass stripped text).
+  const line = description === null ? null : GRADE_LINE.exec(description);
+  // Named with the line, so a wrong drop is diagnosable.
+  if (line !== null) return { code: "title_seniority", reason: `the description files the role at a senior grade: "${line[0].trim()}"` };
+  // No grade objection.
+  return null;
+}
 
 // Rule 2, PHD: a PhD in the title means a doctoral-only programme (Marvell, NVIDIA research internships).
 // Spellings seen or likely: PhD, Ph.D., Ph.D, "Ph D".
@@ -324,10 +372,10 @@ const FUNCTION_HEAD_LIMIT = 500;
 function titleRuleDrop(title: string, descriptionRaw: string | null): TechGateVerdict | undefined {
   // Normalised once, like every other match in this file.
   const text = collapseWhitespace(title);
-  // Rule 1.
-  const grade = SENIORITY_TITLE.exec(text)?.[1];
-  // A grade word: dropped, naming it so a wrong drop is diagnosable.
-  if (grade !== undefined) return { drop: true, code: "title_seniority", reason: `"${title}" carries the seniority word "${grade}"` };
+  // Rule 1: a grade in the title, or an explicit grade line in the description (2026-11-21).
+  const senior = seniorityGradeDrop(title, descriptionRaw);
+  // Dropped under the rule's one code, naming the word or line so a wrong drop is diagnosable.
+  if (senior !== null) return { drop: true, code: senior.code, reason: senior.reason };
   // Rule 2.
   if (PHD_TITLE.test(text)) return { drop: true, code: "title_phd", reason: `"${title}" is a PhD-only role` };
   // Rule 3 (a): never rescued.

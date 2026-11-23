@@ -54,7 +54,8 @@ export interface QueueRow {
 }
 
 // The only drop_reasons this sweep may write; the DB trigger accepts exactly these from the auditor on this edge.
-export type RegateDropCode = "work_auth" | "already_applied";
+// title_seniority since 2026-11-21 (Teja 20:12, "Drop AVP/VP/Director"): migration 20261121203000 opens the trigger to it.
+export type RegateDropCode = "work_auth" | "already_applied" | "title_seniority";
 
 // What the sweep decided for one row; pure, so a test can pin it without a database.
 export type RegateVerdict =
@@ -108,6 +109,16 @@ export function regateVerdict(row: QueueRow, preferences: PreGatePreferences, co
     // Still waiting for him: drop it.
     if (row.status === "awaiting_approval") return { kind: "drop", code: "work_auth", reason: gates.workAuth.reason };
     // Any other status was never asked for: refuse loudly rather than guess (CLAUDE.md §6).
+    throw new Error(`regate: unexpected status ${row.status}`);
+  }
+  // A senior grade (title word, or a grade line in the JD): Teja ruled these drop (2026-11-21 20:12). Same shape as
+  // work-auth: his yes on an approved row stands and is reported; a waiting row drops.
+  if (gates.seniority !== null) {
+    // Approved: report only.
+    if (row.status === "approved") return { kind: "flag_approved", reason: gates.seniority.reason };
+    // Still waiting for him: drop it under the rule's one code.
+    if (row.status === "awaiting_approval") return { kind: "drop", code: "title_seniority", reason: gates.seniority.reason };
+    // Any other status was never asked for.
     throw new Error(`regate: unexpected status ${row.status}`);
   }
   // Already applied or already queued: awaiting rows only (an approved row would match its own committed key).

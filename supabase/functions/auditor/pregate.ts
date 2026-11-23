@@ -21,6 +21,10 @@ import { firstPreGateDrop, type PreGateDropCode, type PreGatePreferences } from 
 import { boardHintsFromSelect, screenWorkAuth, type BoardHintColumns, type WorkAuthDropCode } from "../_shared/screen/work-auth-gate.ts";
 // The experience gate, asked directly by the queue re-gate (r4, 2026-11-21).
 import { screenRequiredExperience, type ExperienceDropCode } from "../_shared/screen/required-experience.ts";
+// The seniority-grade rule alone (Teja 2026-11-21 20:12, "Drop AVP/VP/Director"), asked directly like work-auth.
+import { seniorityGradeDrop } from "../_shared/screen/tech-gate.ts";
+// The grade-line check reads text, never markup, as screenTechRole does.
+import { stripHtml } from "../_shared/ats/types.ts";
 // The screener's same-ATS-posting key, so the auditor and the screener build it identically (W2, 2026-11-20).
 import { atsJobKeyOf } from "../_shared/filter/cascade.ts";
 // "Teja pasted this himself": such rows skip every automatic gate (the matcher's rule).
@@ -82,6 +86,8 @@ export interface AuditorRegateGates {
   readonly workAuth: { readonly code: WorkAuthDropCode; readonly reason: string } | null;
   // The experience-ceiling objection, or null; independent of both other gates.
   readonly experience: { readonly code: ExperienceDropCode; readonly reason: string } | null;
+  // The seniority-grade objection (title word or an explicit grade line), or null (2026-11-21).
+  readonly seniority: { readonly code: "title_seniority"; readonly reason: string } | null;
 }
 
 // Both verdicts for one queue row's job. Same refusals as auditorPreGateDrop: a missing job throws, a pasted job passes.
@@ -89,7 +95,7 @@ export function auditorRegateGates(job: AuditorJobEmbed | null, preferences: Pre
   // No job: the gates cannot judge, and a pass would be the fail-open (CLAUDE.md section 6).
   if (job === null) throw new Error("auditor re-gate: no job embed for this row");
   // Teja pasted it himself: no automatic gate applies.
-  if (isHumanPicked(job.discovered_via)) return { workAuth: null, experience: null };
+  if (isHumanPicked(job.discovered_via)) return { workAuth: null, experience: null, seniority: null };
   // The work-auth gate, fed exactly what firstPreGateDrop feeds it (matcher/tech-pregate.ts:83-90).
   const auth = screenWorkAuth(
     // Title, place, body and the Ashby hints.
@@ -112,6 +118,8 @@ export function auditorRegateGates(job: AuditorJobEmbed | null, preferences: Pre
     workAuth: auth.drop ? { code: auth.code, reason: auth.reason } : null,
     // Over the ceiling, or not.
     experience: experience.drop ? { code: experience.code, reason: experience.reason } : null,
+    // The grade rule, on the same title and the body as text (the tech gate strips it the same way).
+    seniority: seniorityGradeDrop(job.title ?? "", stripHtml(job.description_raw)),
   };
 }
 

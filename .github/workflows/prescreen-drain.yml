@@ -3,7 +3,7 @@
 # Exists because nothing else ever calls these two functions at scale: the scouts screen at
 # insert time (planScreenedApplications in supabase/functions/_shared/screen/screen-batch.ts,
 # called by both scouts; a line number here went stale, D15 2026-11-21), the web batch modal moves 10 rows per click
-# (apps/web/src/data/pipelineRunner.ts:57), and rows inserted BEFORE insert-time screening
+# (BATCH_LIMIT in apps/web/src/data/pipelineRunner.ts; was cited as :57, stale by 2026-11-23), and rows inserted BEFORE insert-time screening
 # sit at discovered/deduped forever. Same credential story as pregate-sweep.yml: the
 # app-user secrets live only in this repo's Actions secrets.
 # The screener DROPS rows (dropped_filter) and drops are one-way, so every abort below

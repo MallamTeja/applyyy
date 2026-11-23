@@ -248,3 +248,43 @@ describe("r4 wiring", () => {
     assert.equal(queuedTwinOwners([{ ...undated, jobs: { ...undated.jobs!, ...key } }, { ...dated, jobs: { ...dated.jobs!, ...key } }]).get(atsJobKeyOf("greenhouse", "888")!), "dated");
   });
 });
+
+// 2026-11-21, Teja 20:12 IST: "Drop AVP/VP/Director". The sweep asks the seniority rule directly (like work-auth),
+// so rows queued before the rule existed leave the queue. Migration 20261121203000 lets the trigger accept the code.
+describe("seniority 11-21: the queue re-gate drops a senior grade", () => {
+  // The live Barclays shape: a plain title, the grade as a heading line in the body (AI Engineer afe8985b).
+  function gradedRow(id: string, status: string, body = "Build AI systems.\n\nAssistant Vice President Expectations\n\nTo advise and influence decision making."): QueueRow {
+    // An Indian row, so work-auth passes and only the grade can object.
+    const base = row(id, status, "Pune, India", "AI Engineer");
+    // The body carries the grade.
+    return { ...base, jobs: { ...base.jobs!, description_raw: body } };
+  }
+
+  test("an awaiting row with a grade line drops as title_seniority; an approved one is only flagged", () => {
+    // Waiting for Teja: dropped under the rule's one code, naming the line.
+    const waiting = regateVerdict(gradedRow("g1", "awaiting_approval"), LIVE, NO_HISTORY, NO_TWINS);
+    assert.equal(waiting.kind === "drop" && waiting.code, "title_seniority");
+    assert.match(waiting.kind === "drop" ? waiting.reason : "", /Assistant Vice President Expectations/);
+    // His yes stands: reported only.
+    assert.equal(regateVerdict(gradedRow("g2", "approved"), LIVE, NO_HISTORY, NO_TWINS).kind, "flag_approved");
+    // A VP / Director title, no grade line, also drops.
+    assert.equal(regateVerdict(row("g3", "awaiting_approval", "Pune, India", "Director, Platform Engineering"), LIVE, NO_HISTORY, NO_TWINS).kind, "drop");
+  });
+
+  test("KEEPS: prose naming a VP, and a row Teja pasted himself", () => {
+    // "reports to the VP" is not the role's grade.
+    assert.equal(regateVerdict(gradedRow("k1", "awaiting_approval", "Build AI systems. You will report to the VP of Engineering."), LIVE, NO_HISTORY, NO_TWINS).kind, "keep");
+    // A pasted row skips every automatic gate, this one included.
+    const pasted = gradedRow("k2", "awaiting_approval");
+    assert.equal(regateVerdict({ ...pasted, jobs: { ...pasted.jobs!, discovered_via: ["manual"] } }, LIVE, NO_HISTORY, NO_TWINS).kind, "keep");
+  });
+
+  test("regateQueue stamps drop_reason title_seniority, the value migration 20261121203000 lets through", async () => {
+    // A fresh double.
+    const db = fakeDb();
+    // One graded row.
+    const report = await regateQueue([gradedRow("g4", "awaiting_approval")], LIVE, NO_HISTORY, db);
+    // Moved, with the code the trigger reads.
+    assert.deepEqual({ moves: db.moves, codes: db.codes, dropped: report.dropped.map((d) => [d.id, d.code]) }, { moves: ["g4"], codes: ["title_seniority"], dropped: [["g4", "title_seniority"]] });
+  });
+});
