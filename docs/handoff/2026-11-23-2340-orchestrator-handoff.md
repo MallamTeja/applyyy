@@ -24,9 +24,10 @@ Gemini pool = keys 1–11 + 21–26).
 
 ## 2. Gated / ready but NOT shipped
 - **S9k resume-chat fixes** (Teja's ElevenLabs chat: fit_group "rm some ai skills to fit one line", stale "Proposed
-  N" text, move_skill). Stage list: peer-1 bridge "ROUND 4". Orch gate was RUNNING at retire (export
-  `%TEMP%\applyyy-gate-s9k-*`, script `%TEMP%\gate-s9k.sh`, output `%TEMP%\gate-s9k.out`). Deploy: WEB FIRST
-  (strict op reader), then resume-assist.
+  N" text, move_skill). Stage list: peer-1 bridge "ROUND 4". **ORCH-GATED GREEN 23:46** on git archive
+  1b642b74 + the 15 files: web tsc 0, test tsc 0, vite 0, vite e2e 0, web 1684/1684, fn 2457/2457, deno 122/122
+  (script `%TEMP%\gate-s9k.sh`). Before staging, cmp the files against the export (`.files` inside it). Deploy:
+  WEB FIRST (strict op reader), then resume-assist.
 - **#2 apply Storage 544 retry** (blocks real submits): `worker/src/supabase-gateway.ts` + test. Peer-gated
   (worker tsc 0, vitest 954/1, the 1 = a Playwright timeout under load). Orch gate not run.
 - **Spoken languages are NOT set live**: the orch UPDATE was declined. Teja sets them on Settings (now live):
