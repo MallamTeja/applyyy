@@ -29,6 +29,8 @@
 import { screenTechRole, type TechGateDropCode } from "../_shared/screen/tech-gate.ts";
 // Stage 0b, the screener's work-auth gate, called with the same three inputs.
 import { screenWorkAuth, type BoardLocationHints, type WorkAuthDropCode } from "../_shared/screen/work-auth-gate.ts";
+// Stage 0c, the required-language gate (2026-11-23): a JD fetched after screening (jd-refetch) meets it only here.
+import { screenLanguage, type LanguageDropCode } from "../_shared/screen/language-gate.ts";
 // The matcher's twin of the cascade's experience_ceiling rule (same parser, same max_years).
 import { screenRequiredExperience, type ExperienceDropCode } from "../_shared/screen/required-experience.ts";
 // The screener's preference shape, extended below rather than redefined, so the fields match.
@@ -37,7 +39,7 @@ import type { ScreenPreferences } from "../_shared/screen/screen-batch.ts";
 import { advanceScoredRow, writeMatchScore, type MatchScoreClient } from "./write-score.ts";
 
 // Every code a pre-gate drop can carry: each gate's own, so drop_reason groups with the screener's.
-export type PreGateDropCode = TechGateDropCode | WorkAuthDropCode | ExperienceDropCode;
+export type PreGateDropCode = TechGateDropCode | WorkAuthDropCode | LanguageDropCode | ExperienceDropCode;
 
 // Everything the three gates read, loaded together by the matcher from the user's current rows.
 // ALL REQUIRED: a caller that leaves one out does not compile, so no gate can be skipped by
@@ -90,6 +92,10 @@ export function firstPreGateDrop(job: PreGateJob, preferences: PreGatePreference
   );
   // A work-auth rejection ends the check.
   if (auth.drop) return { code: auth.code, reason: auth.reason };
+  // Stage 0c, in the screener's order: a JD requiring a language not in spoken_languages (null list keeps).
+  const language = screenLanguage(job.descriptionRaw, preferences.spokenLanguages);
+  // A language rejection ends the check.
+  if (language.drop) return { code: language.code, reason: language.reason };
   // The experience ceiling, last, as the cascade runs after the two stage gates.
   const experience = screenRequiredExperience(
     // The JD and the stored column; the parser fills in when the column is null.

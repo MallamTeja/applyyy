@@ -689,3 +689,24 @@ test("seniority 11-21: a grade line in the body is born dropped as title_seniori
   // Passed.
   assert.equal(prose.inserts[0]!.status, "passed_filters");
 });
+
+// 2026-11-23 (BBHT 5e108a32): stage 0c in the screener. A row whose JD requires a language the user does not speak is
+// born dropped as language_required; an English requirement passes; an unset list passes and warns.
+test("language 11-23: a JD requiring fluent German is born dropped as language_required; English passes; unset list warns", () => {
+  // The seeded list.
+  const prefs: ScreenPreferences = { ...TECH_PREFS, spokenLanguages: ["English"] };
+  // The BBHT requirement line under a plain software title.
+  const german = planScreenedApplications([{ jobId: "lg-1", row: { ...BASE_ROW, title: "Software Engineer", description_raw: "Build React apps.\nÜber fließende Deutschkenntnisse (mind. C1) verfügst." } }], [], BASE_CONTEXT, prefs);
+  // Dropped under the gate's own code.
+  assert.deepEqual(german.inserts, [{ job_id: "lg-1", status: "dropped_filter", drop_reason: "language_required" }]);
+  // English required: passes.
+  const english = planScreenedApplications([{ jobId: "lg-2", row: { ...BASE_ROW, title: "Software Engineer", description_raw: "Build React apps. Fluent English required." } }], [], BASE_CONTEXT, prefs);
+  // Passed.
+  assert.equal(english.inserts[0]!.status, "passed_filters");
+  // Never set: open, and the run summary says so.
+  const unset = planScreenedApplications([{ jobId: "lg-3", row: { ...BASE_ROW, title: "Software Engineer", description_raw: "Build React apps.\nÜber fließende Deutschkenntnisse (mind. C1) verfügst." } }], [], BASE_CONTEXT, { ...TECH_PREFS, spokenLanguages: null });
+  // Passed, not dropped.
+  assert.equal(unset.inserts[0]!.status, "passed_filters");
+  // The open-gate warning is in the summary.
+  assert.ok(unset.warnings.some((warning) => warning.includes("language gate open")), JSON.stringify(unset.warnings));
+});

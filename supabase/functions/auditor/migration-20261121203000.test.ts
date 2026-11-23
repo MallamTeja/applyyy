@@ -32,8 +32,9 @@ test("the guard allows exactly work_auth, already_applied and title_seniority fo
 });
 
 test("every code the sweep can write is in the migration's allowed list", () => {
-  // The TypeScript union, spelled out; adding a code to RegateDropCode without the trigger fails to compile here.
-  const codes: Record<RegateDropCode, true> = { work_auth: true, already_applied: true, title_seniority: true };
+  // The three codes THIS migration allowed. CORRECTED 2026-11-23: a typed Record here never "fails to compile" (node strips
+  // types, deno check skips tests); the live union-vs-SQL check is migration-20261123210000.test.ts, read from source.
+  const codes: Partial<Record<RegateDropCode, true>> = { work_auth: true, already_applied: true, title_seniority: true };
   // Each one appears quoted inside the allowed list.
   for (const code of Object.keys(codes)) assert.match(CODE, new RegExp(`not in \\([^)]*'${code}'[^)]*\\) then`), code);
 });

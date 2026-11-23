@@ -288,3 +288,23 @@ describe("seniority 11-21: the queue re-gate drops a senior grade", () => {
     assert.deepEqual({ moves: db.moves, codes: db.codes, dropped: report.dropped.map((d) => [d.id, d.code]) }, { moves: ["g4"], codes: ["title_seniority"], dropped: [["g4", "title_seniority"]] });
   });
 });
+
+// 2026-11-23 (BBHT 5e108a32): the queue sweep reads the language gate like work-auth and seniority.
+test("language 11-23: an awaiting row requiring German drops as language_required; approved is flagged; pasted and unset keep", () => {
+  // The seeded list.
+  const prefs: PreGatePreferences = { ...LIVE, spokenLanguages: ["English"] };
+  // An Indian row (work-auth passes) whose JD requires fluent German.
+  const german = (id: string, status: string): QueueRow => { const base = row(id, status, "Bengaluru, India"); return { ...base, jobs: { ...base.jobs!, description_raw: "Build React apps. Fluent German (C1) is required." } }; };
+  // Waiting for Teja: dropped under the gate's code.
+  const waiting = regateVerdict(german("l1", "awaiting_approval"), prefs, NO_HISTORY, NO_TWINS);
+  // The kind and code, with the quoted requirement in the reason so a wrong drop is diagnosable.
+  assert.deepEqual(waiting.kind === "drop" && [waiting.code, /German/.test(waiting.reason)], ["language_required", true]);
+  // Approved by him: reported, never moved.
+  assert.equal(regateVerdict(german("l2", "approved"), prefs, NO_HISTORY, NO_TWINS).kind, "flag_approved");
+  // Pasted by him: no automatic gate.
+  const pasted = german("l3", "awaiting_approval");
+  // The manual marker, as job-link-intake writes it.
+  assert.equal(regateVerdict({ ...pasted, jobs: { ...pasted.jobs!, discovered_via: ["manual"] } }, prefs, NO_HISTORY, NO_TWINS).kind, "keep");
+  // List never set: open.
+  assert.equal(regateVerdict(german("l4", "awaiting_approval"), { ...LIVE, spokenLanguages: null }, NO_HISTORY, NO_TWINS).kind, "keep");
+});

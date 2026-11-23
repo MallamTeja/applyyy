@@ -28,6 +28,8 @@ import { screenTechRole, type TechGatePreferences } from "./tech-gate.ts";
 import { ashbyLocationFields, boardLocationHints, screenWorkAuth, type RemoteLocationPolicy } from "./work-auth-gate.ts";
 // The JD's required years, the producer the cascade's experience_ceiling rule never had (11-04).
 import { requiredExperienceYears } from "./required-experience.ts";
+// Stage 0c, the required-language gate (2026-11-23).
+import { screenLanguage } from "./language-gate.ts";
 // The one "is this JD thin?" rule (round 4, 2026-11-21), shared with the web's "No description" pill.
 import { isThinDescription } from "./jd-substance.ts";
 // Row shapes from the schema owner. Never redefined — a redefined type drifts.
@@ -131,6 +133,9 @@ export interface ScreenPreferences extends TechGatePreferences {
   // What a remote part means (Teja, 2026-11-04). REQUIRED like the list above, so no caller can
   // screen without stating it; 'any' is the explicit 10-24 reading.
   readonly remoteLocationPolicy: RemoteLocationPolicy;
+  // The languages the user can work in (2026-11-23). REQUIRED like the two above, so no caller screens without
+  // stating it; null = never set, which opens the language gate.
+  readonly spokenLanguages: readonly string[] | null;
 }
 
 // Everything one screened batch produced.
@@ -304,6 +309,21 @@ export function planScreenedApplications(
       inserts.push({ job_id: entry.jobId, status: "dropped_filter", drop_reason: authVerdict.code });
       // The prose names the signal that matched, so a wrong drop is diagnosable.
       dropped.push({ jobId: entry.jobId, title: entry.row.title, ruleType: authVerdict.code, reason: authVerdict.reason });
+      // Nothing after a drop runs.
+      continue;
+    }
+
+    // STAGE 0c: a JD that requires a language the user does not speak (Teja 2026-11-23, BBHT 5e108a32: a German-only
+    // Java job that no location rule could catch). A separate gate, not a stretch of work-auth (orch ruling ~20:05).
+    const langVerdict = screenLanguage(entry.row.description_raw ?? null, preferences.spokenLanguages);
+    // The open-gate warning is the only sign the list was never set.
+    if ("warning" in langVerdict) warnings.add(langVerdict.warning);
+    // A drop is recorded under the gate's own code.
+    if (langVerdict.drop) {
+      // drop_reason names the gate, never a cascade rule.
+      inserts.push({ job_id: entry.jobId, status: "dropped_filter", drop_reason: langVerdict.code });
+      // The prose quotes the sentence or the body counts, so a wrong drop is diagnosable.
+      dropped.push({ jobId: entry.jobId, title: entry.row.title, ruleType: langVerdict.code, reason: langVerdict.reason });
       // Nothing after a drop runs.
       continue;
     }

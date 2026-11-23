@@ -55,7 +55,8 @@ export interface QueueRow {
 
 // The only drop_reasons this sweep may write; the DB trigger accepts exactly these from the auditor on this edge.
 // title_seniority since 2026-11-21 (Teja 20:12, "Drop AVP/VP/Director"): migration 20261121203000 opens the trigger to it.
-export type RegateDropCode = "work_auth" | "already_applied" | "title_seniority";
+// language_required since 2026-11-23 (BBHT 5e108a32): migration 20261123210000 opens the trigger to it.
+export type RegateDropCode = "work_auth" | "already_applied" | "title_seniority" | "language_required";
 
 // What the sweep decided for one row; pure, so a test can pin it without a database.
 export type RegateVerdict =
@@ -118,6 +119,16 @@ export function regateVerdict(row: QueueRow, preferences: PreGatePreferences, co
     if (row.status === "approved") return { kind: "flag_approved", reason: gates.seniority.reason };
     // Still waiting for him: drop it under the rule's one code.
     if (row.status === "awaiting_approval") return { kind: "drop", code: "title_seniority", reason: gates.seniority.reason };
+    // Any other status was never asked for.
+    throw new Error(`regate: unexpected status ${row.status}`);
+  }
+  // A JD requiring a language the user does not speak (2026-11-23): same shape as work-auth and seniority, his yes on an
+  // approved row stands and is reported; a waiting row drops.
+  if (gates.language !== null) {
+    // Approved: report only.
+    if (row.status === "approved") return { kind: "flag_approved", reason: gates.language.reason };
+    // Still waiting for him: drop it under the gate's own code.
+    if (row.status === "awaiting_approval") return { kind: "drop", code: "language_required", reason: gates.language.reason };
     // Any other status was never asked for.
     throw new Error(`regate: unexpected status ${row.status}`);
   }

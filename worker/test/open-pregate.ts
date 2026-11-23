@@ -7,7 +7,7 @@ import type { LoadedPreGatePreferences } from '../../supabase/functions/_shared/
 import type { SubmitRecheck } from '../src/apply-one.ts';
 
 // No title list, no countries, any remote, no experience ceiling: nothing is dropped.
-export const OPEN_PREGATE_PREFERENCES: PreGatePreferences = { titles: [], keywords: [], excludedKeywords: [], workAuthorizedCountries: null, remoteLocationPolicy: 'any', experienceMaxYears: null };
+export const OPEN_PREGATE_PREFERENCES: PreGatePreferences = { titles: [], keywords: [], excludedKeywords: [], workAuthorizedCountries: null, spokenLanguages: null, remoteLocationPolicy: 'any', experienceMaxYears: null };
 
 // What applyToOne takes.
 export const OPEN_RECHECK: SubmitRecheck = { preferences: OPEN_PREGATE_PREFERENCES };

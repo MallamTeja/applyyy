@@ -953,6 +953,13 @@ export interface SearchPreferencesRow {
    * column's CHECK, never a boolean, so a third reading cannot be written.
    */
   remote_location_policy: 'unlocked_or_authorized' | 'any';
+  /**
+   * Languages the user can work in (migration 20261123210000, Teja 2026-11-23, BBHT 5e108a32): read by the
+   * screener's language gate, which drops a JD that REQUIRES fluency in a language not listed. NULL (and an
+   * empty or unrecognised list) means NEVER SET: the gate passes everything and warns, like
+   * work_authorized_countries above, so a missing answer never becomes "speaks nothing". Seeded {English}.
+   */
+  spoken_languages: string[] | null;
   created_at: string;
   updated_at: string;
 }

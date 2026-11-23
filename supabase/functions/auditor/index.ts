@@ -242,15 +242,15 @@ Deno.serve(withErrorBoundary("applyy-auditor", async (req: Request): Promise<Res
       // drop_reason first, only while the row is still awaiting approval at the stamp we read.
       async stampDropReason(id, expectedUpdatedAt, code) {
         // Zero rows back means someone moved or edited it since the read.
-        // The verdict's code: the DB trigger lets the auditor take this edge only for work_auth, already_applied or
-        // title_seniority (20261111220000, widened by 20261121110000 and 20261121203000).
+        // The verdict's code: the DB trigger lets the auditor take this edge only for work_auth, already_applied,
+        // title_seniority or language_required (20261111220000, widened by 20261121110000, 20261121203000, 20261123210000).
         const { data, error } = await db.from("applications").update({ drop_reason: code })
           // Still waiting, and untouched since our read: Teja's own action always wins over the sweep.
           .eq("id", id).eq("status", "awaiting_approval").eq("updated_at", expectedUpdatedAt).select("updated_at");
         // The new stamp, or null when nothing matched.
         return { updatedAt: (data?.[0]?.updated_at as string | undefined) ?? null, error: error?.message ?? null };
       },
-      // The move; the DB lets the auditor take this edge only with a work_auth, already_applied or title_seniority drop_reason.
+      // The move; the DB lets the auditor take this edge only with a work_auth, already_applied, title_seniority or language_required drop_reason.
       async dropRow(id, updatedAt, code, reason) {
         // The stamp guard refuses (PT409) if anything wrote the row after our reason write.
         const { error } = await db.rpc("advance_application_status", {

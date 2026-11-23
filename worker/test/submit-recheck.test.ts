@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs';
 import { CLOSED_POSTING } from '../src/playwright-page.ts';
 
 // Every gate open: no title list, no countries, any remote, no experience ceiling.
-const OPEN = { titles: [], keywords: [], excludedKeywords: [], workAuthorizedCountries: null, remoteLocationPolicy: 'any', experienceMaxYears: null } as const;
+const OPEN = { titles: [], keywords: [], excludedKeywords: [], workAuthorizedCountries: null, spokenLanguages: null, remoteLocationPolicy: 'any', experienceMaxYears: null } as const;
 // The same, with a two-year experience ceiling.
 const CEILING_2 = { ...OPEN, experienceMaxYears: 2 };
 // A job today's gates keep.

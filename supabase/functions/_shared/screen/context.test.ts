@@ -254,7 +254,21 @@ test("a missing preferences row yields an open gate rather than an error", async
   assert.equal(result.ok, true);
   // workAuthorizedCountries null = never set: the work-auth gate is open too, never "nowhere".
   // remoteLocationPolicy 'any' = no stored policy: the fail-open reading.
-  assert.deepEqual(result.ok && result.value.preferences, { titles: [], keywords: [], excludedKeywords: [], workAuthorizedCountries: null, remoteLocationPolicy: "any" });
+  // spokenLanguages null = never set (2026-11-23): the language gate is open, never "speaks nothing".
+  assert.deepEqual(result.ok && result.value.preferences, { titles: [], keywords: [], excludedKeywords: [], workAuthorizedCountries: null, remoteLocationPolicy: "any", spokenLanguages: null });
+});
+
+// The language list (2026-11-23) goes through the same shape check as the country list: a NULL element (Postgres
+// text[] allows one) and blanks are dropped, and a list with nothing usable is null, so the gate opens.
+test("spoken_languages: real entries survive, NULL and blank elements drop, nothing usable maps to null", async () => {
+  // A row as Postgres could return it.
+  const loaded = await loadScreenContext(queries({ searchPreferences: () => Promise.resolve({ rows: [{ titles: [], keywords: [], excluded_keywords: [], spoken_languages: ["English", null, " ", "Telugu"] as unknown as string[] }], error: null }) }), NOW);
+  // The two real languages, in order.
+  assert.deepEqual(loaded.ok && loaded.value.preferences.spokenLanguages, ["English", "Telugu"]);
+  // Only junk: null, the open gate.
+  const junk = await loadScreenContext(queries({ searchPreferences: () => Promise.resolve({ rows: [{ titles: [], keywords: [], excluded_keywords: [], spoken_languages: [null, ""] as unknown as string[] }], error: null }) }), NOW);
+  // Never an empty list that would mean "speaks nothing".
+  assert.equal(junk.ok && junk.value.preferences.spokenLanguages, null);
 });
 
 // An ERROR is still an error, even though an empty result is not. The same distinction

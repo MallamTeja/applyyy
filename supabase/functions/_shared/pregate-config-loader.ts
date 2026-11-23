@@ -53,8 +53,9 @@ export async function loadPreGatePreferences(db: ConfigReader): Promise<LoadedPr
   const prefs = await db
     // Where the screener's config lives.
     .from("search_preferences")
-    // The five columns the three gates read. The policy column needs migration 20261104193000.
-    .select("titles, keywords, excluded_keywords, work_authorized_countries, remote_location_policy")
+    // The six columns the gates read. The policy column needs migration 20261104193000; spoken_languages needs
+    // 20261123210000 (2026-11-23), or this read fails 42703 and the run stops as preferences_unreadable.
+    .select("titles, keywords, excluded_keywords, work_authorized_countries, remote_location_policy, spoken_languages")
     // One row per user; none is a normal (empty) config.
     .maybeSingle();
   // A failed read stops the run: read as "no config" it would pass everything.
@@ -87,6 +88,8 @@ export async function loadPreGatePreferences(db: ConfigReader): Promise<LoadedPr
       workAuthorizedCountries: countryList((prefs.data as { work_authorized_countries?: unknown } | null)?.work_authorized_countries),
       // One of the two literals, or 'any' (fail-open).
       remoteLocationPolicy: remoteLocationPolicy((prefs.data as { remote_location_policy?: unknown } | null)?.remote_location_policy),
+      // The same list shape check as the countries: anything but a non-empty list of strings is null = gate open.
+      spokenLanguages: countryList((prefs.data as { spoken_languages?: unknown } | null)?.spoken_languages),
       // null when no enabled ceiling: no row, or config {} without max_years, keeps every job.
       experienceMaxYears: experienceCeilingMaxYears((ceiling.data as { config?: unknown } | null)?.config),
     },

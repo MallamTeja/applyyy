@@ -287,8 +287,9 @@ export function supabaseScreenQueries(client: { from(table: string): unknown }, 
     // select fails, and the loader stops the run with a named error (never a silent pass).
     // remote_location_policy needs migration 20261104193000 FIRST, for the same reason: deploy
     // this only after `db push` lists that migration as applied.
+    // spoken_languages needs migration 20261123210000 FIRST (2026-11-23), or this select fails with 42703.
     searchPreferences(): Promise<ScreenQueryResult<SearchPreferencesRow>> {
-      return Promise.resolve(db.from("search_preferences").select("titles, keywords, excluded_keywords, work_authorized_countries, remote_location_policy")).then(
+      return Promise.resolve(db.from("search_preferences").select("titles, keywords, excluded_keywords, work_authorized_countries, remote_location_policy, spoken_languages")).then(
         (response) => toResult(response, (rows) => rows as SearchPreferencesRow[]),
       );
     },

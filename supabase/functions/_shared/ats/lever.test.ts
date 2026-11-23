@@ -114,3 +114,57 @@ test("lever: no description, lists or additional is null", () => {
   // Null, never "".
   assert.equal(descriptionOf(empty), null);
 });
+
+// THE OTHER TWO LEAKS NAMED IN THE HEADER (parcel 2 done-criterion, pinned 2026-11-23 by peer 5): Keyloop "Cloud
+// Engineer" and Egen "ML Platform Engineer, Distributed Training". Both requirement bullets are the live text of
+// jobs 7d4c63b9 and 2d545b1f (read 2026-11-23), and both sit in lists[] only, so each test goes red when the lists[]
+// loop in lever.ts (readFullDescription) is reverted to the intro-only read.
+const LIST_ONLY_LEAKS = [
+  // Keyloop 7d4c63b9: 6+ years, intro says nothing about years.
+  {
+    // The test name's label.
+    label: "Keyloop 'Cloud Engineer' 6+ years",
+    // The title the experience screen reads.
+    title: "Cloud Engineer",
+    // The Lever posting id of the live job.
+    id: "5c55d646-7f28-4fde-ac9d-72ff3e6d49ad",
+    // The live opening line, no years in it.
+    intro: "Keyloop bridges the gap between dealers, manufacturers, technology suppliers and car buyers.",
+    // The live requirement bullet, verbatim.
+    bullet: "6+ years in cloud/DevOps/infrastructure engineering, with 4+ years of hands-on AWS and 2+ years of Azure experience.",
+  },
+  // Egen 2d545b1f: 5+ years, intro is company boilerplate.
+  {
+    // The test name's label.
+    label: "Egen 'ML Platform Engineer' 5+ years",
+    // The title the experience screen reads.
+    title: "ML Platform Engineer, Distributed Training",
+    // The Lever posting id of the live job.
+    id: "d1ed13ca-ebb1-4cbc-8277-8e849d69b522",
+    // The live opening line, no years in it.
+    intro: "About Egen: Egen is a fast-growing and entrepreneurial company with a data-first mindset.",
+    // The live requirement bullet, verbatim.
+    bullet: "5+ years of engineering experience, with recent hands-on work on GPU training infrastructure and large-scale training.",
+  },
+];
+
+// One test per leak, each through the real adapter and the real experience screen.
+for (const leak of LIST_ONLY_LEAKS) {
+  // Named after the company, so a red run says which leak came back.
+  test(`lever: ${leak.label} bullet in lists[] reaches the screen and drops at ceiling 1`, () => {
+    // The Netomi shape with this posting's id, title, intro and one Requirements section.
+    const posting = { ...NETOMI_DE1, id: leak.id, text: leak.title, descriptionPlain: leak.intro, description: `<div>${leak.intro}</div>`, lists: [{ text: "Requirements", content: `<li>${leak.bullet}</li>` }], additional: undefined, additionalPlain: undefined };
+    // The description the scout would store.
+    const description = descriptionOf(posting);
+    // The bullet is in it, markup gone.
+    assert.ok((description ?? "").includes(leak.bullet), description ?? "null");
+    // The screen the cascade and the matcher both run, at Teja's ceiling of 1 year.
+    const verdict = screenRequiredExperience({ title: leak.title, description, minExperienceYears: null }, 1);
+    // Dropped by the experience rule, which is what kept these rows out of the queue once lists[] was read.
+    assert.equal(verdict.drop, true);
+    // Narrowed for the code read.
+    if (!verdict.drop) return;
+    // The rule's own code.
+    assert.equal(verdict.code, "experience_ceiling");
+  });
+}

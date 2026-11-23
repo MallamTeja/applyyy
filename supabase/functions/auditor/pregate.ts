@@ -23,6 +23,14 @@ import { boardHintsFromSelect, screenWorkAuth, type BoardHintColumns, type WorkA
 import { screenRequiredExperience, type ExperienceDropCode } from "../_shared/screen/required-experience.ts";
 // The seniority-grade rule alone (Teja 2026-11-21 20:12, "Drop AVP/VP/Director"), asked directly like work-auth.
 import { seniorityGradeDrop } from "../_shared/screen/tech-gate.ts";
+// The required-language gate (2026-11-23), asked directly like the two above.
+import { screenLanguage, type LanguageDropCode, type LanguageVerdict } from "../_shared/screen/language-gate.ts";
+
+// A language verdict narrowed to the objection the sweep reads, or null on a keep (the warning is the screener's to report).
+function languageObjection(verdict: LanguageVerdict): { readonly code: LanguageDropCode; readonly reason: string } | null {
+  // Only a drop is an objection.
+  return verdict.drop ? { code: verdict.code, reason: verdict.reason } : null;
+}
 // The grade-line check reads text, never markup, as screenTechRole does.
 import { stripHtml } from "../_shared/ats/types.ts";
 // The screener's same-ATS-posting key, so the auditor and the screener build it identically (W2, 2026-11-20).
@@ -88,6 +96,8 @@ export interface AuditorRegateGates {
   readonly experience: { readonly code: ExperienceDropCode; readonly reason: string } | null;
   // The seniority-grade objection (title word or an explicit grade line), or null (2026-11-21).
   readonly seniority: { readonly code: "title_seniority"; readonly reason: string } | null;
+  // The required-language objection (a JD requiring a language not in spoken_languages), or null (2026-11-23).
+  readonly language: { readonly code: LanguageDropCode; readonly reason: string } | null;
 }
 
 // Both verdicts for one queue row's job. Same refusals as auditorPreGateDrop: a missing job throws, a pasted job passes.
@@ -95,7 +105,7 @@ export function auditorRegateGates(job: AuditorJobEmbed | null, preferences: Pre
   // No job: the gates cannot judge, and a pass would be the fail-open (CLAUDE.md section 6).
   if (job === null) throw new Error("auditor re-gate: no job embed for this row");
   // Teja pasted it himself: no automatic gate applies.
-  if (isHumanPicked(job.discovered_via)) return { workAuth: null, experience: null, seniority: null };
+  if (isHumanPicked(job.discovered_via)) return { workAuth: null, experience: null, seniority: null, language: null };
   // The work-auth gate, fed exactly what firstPreGateDrop feeds it (matcher/tech-pregate.ts:83-90).
   const auth = screenWorkAuth(
     // Title, place, body and the Ashby hints.
@@ -120,6 +130,8 @@ export function auditorRegateGates(job: AuditorJobEmbed | null, preferences: Pre
     experience: experience.drop ? { code: experience.code, reason: experience.reason } : null,
     // The grade rule, on the same title and the body as text (the tech gate strips it the same way).
     seniority: seniorityGradeDrop(job.title ?? "", stripHtml(job.description_raw)),
+    // The language gate on the raw body (it strips HTML itself) and the user's list; null list keeps.
+    language: languageObjection(screenLanguage(job.description_raw ?? null, preferences.spokenLanguages)),
   };
 }
 

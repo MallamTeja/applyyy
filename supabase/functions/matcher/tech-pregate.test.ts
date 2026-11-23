@@ -560,3 +560,18 @@ test("matcher pre-gate: a human-picked row skips the gate and reaches the scorer
   // Exactly one drop event: the scouted row's, none for the picked one.
   assert.equal(events.length, 1);
 });
+
+// 2026-11-23 (BBHT 5e108a32): stage 0c, the required-language gate, in the screener's order. A row whose JD arrives
+// AFTER screening (jd-refetch) meets the gate only here, so this is the path that catches a late German-only JD.
+test("language 11-23: a JD requiring German drops as language_required after work-auth passes; English keeps; unset list keeps", () => {
+  // Teja's config with the seeded list.
+  const withEnglish: PreGatePreferences = { ...TEJA, spokenLanguages: ["English"] };
+  // An Indian row (work-auth passes) whose JD requires fluent German.
+  assert.equal(firstPreGateDrop(swe({ descriptionRaw: "React frontend. Fluent German (C1) is required." }), withEnglish)?.code, "language_required");
+  // The same requirement in English only: no objection.
+  assert.equal(firstPreGateDrop(swe({ descriptionRaw: "React frontend. Fluent English is required." }), withEnglish), null);
+  // List never set: the gate is open, never "speaks nothing".
+  assert.equal(firstPreGateDrop(swe({ descriptionRaw: "React frontend. Fluent German (C1) is required." }), { ...TEJA, spokenLanguages: null }), null);
+  // Work-auth still answers first: a US-locked row is work_auth, not language_required.
+  assert.equal(firstPreGateDrop(swe({ locationRaw: "Remote - US", descriptionRaw: "React frontend. Fluent German (C1) is required." }), withEnglish)?.code, "work_auth");
+});

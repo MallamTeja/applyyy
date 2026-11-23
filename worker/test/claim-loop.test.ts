@@ -1348,7 +1348,7 @@ describe('B2: pre-submit re-check config', () => {
   // A row whose job today's experience ceiling (2 years) drops.
   const seniorRow = (id: string) => ({ id, status: 'approved' as const, applyUrl: 'http://127.0.0.1:1/a.html', tailoredProfile: syntheticResume, employerName: null, atsProvider: null, preGateJob: { title: 'Software Engineer', description_raw: 'Requires 8+ years.', location_raw: null, min_experience_years: 8, discovered_via: null } });
   // Every gate open except the ceiling.
-  const CEILING_2 = { titles: [], keywords: [], excludedKeywords: [], workAuthorizedCountries: null, remoteLocationPolicy: 'any' as const, experienceMaxYears: 2 };
+  const CEILING_2 = { titles: [], keywords: [], excludedKeywords: [], workAuthorizedCountries: null, spokenLanguages: null, remoteLocationPolicy: 'any' as const, experienceMaxYears: 2 };
 
   it('an unreadable config fails CLOSED: nothing claimed, run closed failed naming the cause', async () => {
     // The gateway's config read failed.

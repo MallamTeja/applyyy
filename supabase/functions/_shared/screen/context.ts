@@ -111,6 +111,9 @@ export interface SearchPreferencesRow {
   // What a remote location part means (migration 20261104193000, Teja 2026-11-04). Optional in
   // the TYPE for the same reason as the list above: a row read before the migration has no key.
   readonly remote_location_policy?: string | null;
+  // The languages the user can work in (migration 20261123210000, 2026-11-23). Optional in the TYPE for the same
+  // reason: a row read before the migration has no key; absent and null both mean "never set", gate open.
+  readonly spoken_languages?: readonly string[] | null;
 }
 
 // What a successful load hands the caller: the rules and the context, together, because
@@ -254,6 +257,9 @@ export async function loadScreenContext(queries: ScreenQueries, now: Date): Prom
         workAuthorizedCountries: countryList(preferencesRow?.work_authorized_countries),
         // One of the two literals; anything else reads as 'any', the fail-open policy.
         remoteLocationPolicy: remoteLocationPolicy(preferencesRow?.remote_location_policy),
+        // The same non-blank-string-list shape check as the country list (countryList is generic despite its
+        // name): anything else collapses to null = never set, which opens the language gate.
+        spokenLanguages: countryList(preferencesRow?.spoken_languages),
       },
       // Passed through untouched, `sort_order` included — the cascade sorts on it, so
       // re-deriving or reordering here would silently reshape the whole cascade.

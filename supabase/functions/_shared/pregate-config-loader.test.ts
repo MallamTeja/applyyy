@@ -61,7 +61,7 @@ describe("loadPreGatePreferences", () => {
     // The live rows' shapes, column names as stored (SELECTed 2026-11-05).
     const { db, calls } = fakeDb({
       // search_preferences.
-      prefs: { data: { titles: ["Software Engineer"], keywords: ["React"], excluded_keywords: ["Senior"], work_authorized_countries: ["India", "Nepal", "Bhutan"], remote_location_policy: "unlocked_or_authorized" }, error: null },
+      prefs: { data: { titles: ["Software Engineer"], keywords: ["React"], excluded_keywords: ["Senior"], work_authorized_countries: ["India", "Nepal", "Bhutan"], remote_location_policy: "unlocked_or_authorized", spoken_languages: ["English"] }, error: null },
       // filter_rules experience_ceiling.
       ceiling: { data: { config: { max_years: 1 } }, error: null },
     });
@@ -71,12 +71,14 @@ describe("loadPreGatePreferences", () => {
     assert.equal(result.kind, "ok");
     // The work-auth inputs and the ceiling arrive.
     assert.deepEqual(result.kind === "ok" && [result.preferences.workAuthorizedCountries, result.preferences.remoteLocationPolicy, result.preferences.experienceMaxYears], [["India", "Nepal", "Bhutan"], "unlocked_or_authorized", 1]);
-    // The reads, in order: the five gate columns, then only the ENABLED experience_ceiling rule.
+    // The language list arrives too (2026-11-23), through the same list shape check.
+    assert.deepEqual(result.kind === "ok" && result.preferences.spokenLanguages, ["English"]);
+    // The reads, in order: the six gate columns, then only the ENABLED experience_ceiling rule.
     assert.deepEqual(calls, [
       // Preferences table.
       "from:search_preferences",
-      // The five columns the three gates read.
-      "select:titles, keywords, excluded_keywords, work_authorized_countries, remote_location_policy",
+      // The six columns the gates read (spoken_languages since 2026-11-23, migration 20261123210000).
+      "select:titles, keywords, excluded_keywords, work_authorized_countries, remote_location_policy, spoken_languages",
       // Rules table.
       "from:filter_rules",
       // Only the config.
@@ -95,6 +97,8 @@ describe("loadPreGatePreferences", () => {
     const result = await loadPreGatePreferences(db);
     // Loaded, with every gate stated open: null work-auth list, 'any' policy, null ceiling.
     assert.deepEqual(result.kind === "ok" && [result.preferences.workAuthorizedCountries, result.preferences.remoteLocationPolicy, result.preferences.experienceMaxYears], [null, "any", null]);
+    // And the language list unset: null opens the language gate, never "speaks nothing" (2026-11-23).
+    assert.equal(result.kind === "ok" && result.preferences.spokenLanguages, null);
   });
 
   test("a failed preferences read is an error, never an empty (pass-everything) config", async () => {
