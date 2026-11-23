@@ -93,6 +93,14 @@ export function SearchPreferencesPage(): ReactElement {
   // as the comma list the box shows. Starts empty, which saves as null = never set: the
   // screener then drops nothing, so an unread row can never become "authorised nowhere".
   const [workAuthCountries, setWorkAuthCountries] = useState<string>('');
+  // Languages Teja can work in (search_preferences.spoken_languages, 2026-11-23), as the comma list the box shows.
+  // Same contract as the countries: starts empty and an empty box saves null = never set, so the language gate
+  // drops nothing; an unread row can never become "speaks nothing".
+  const [spokenLanguages, setSpokenLanguages] = useState<string>('');
+  // Whether the loaded row HAS the spoken_languages column (migration 20261123210000). Until a read proves it, the
+  // save leaves the key out: an upsert naming a column the DB lacks fails whole (PostgREST PGRST204), which would
+  // break every Settings save if the web reached prod before the migration. False also covers "no row yet".
+  const [spokenLanguagesColumn, setSpokenLanguagesColumn] = useState<boolean>(false);
   // How the screener reads a remote job (search_preferences.remote_location_policy, Teja
   // 2026-11-04). Starts at the column default, so an unsaved page shows what the DB holds for a
   // new row; a loaded row replaces it below.
@@ -208,6 +216,11 @@ export function SearchPreferencesPage(): ReactElement {
         if (Array.isArray(data.locations) && data.locations.length > 0) setLocations(data.locations.join(', '));
         // Only a real list is an answer; anything else leaves the box empty (never set).
         if (Array.isArray(data.work_authorized_countries)) setWorkAuthCountries(data.work_authorized_countries.join(', '));
+        // The same rule for the languages: only a real list is an answer (a row read before migration 20261123210000
+        // has no key, and stays empty = never set).
+        if (Array.isArray(data.spoken_languages)) setSpokenLanguages(data.spoken_languages.join(', '));
+        // select('*') returns the key (even as null) only when the column exists, so its presence is the proof.
+        setSpokenLanguagesColumn('spoken_languages' in data);
         // Only one of the two literals is an answer (the column's CHECK); anything else, including
         // a row read before migration 20261104193000, leaves the default showing.
         if (data.remote_location_policy === 'unlocked_or_authorized' || data.remote_location_policy === 'any') {
@@ -348,6 +361,13 @@ export function SearchPreferencesPage(): ReactElement {
       salary_currency: currency,
       // An empty box saves null (never set, gate open), never an empty list meaning "nowhere".
       work_authorized_countries: parseList(workAuthCountries).length > 0 ? parseList(workAuthCountries) : null,
+      // The same for the languages: an empty box saves null (gate off), never [] that could read as "speaks nothing".
+      // Sent only when the column is proven to exist: a missing column would fail the whole upsert (PGRST204).
+      ...(spokenLanguagesColumn
+        ? // The list, or null for an empty box.
+          { spoken_languages: parseList(spokenLanguages).length > 0 ? parseList(spokenLanguages) : null }
+        : // Key left out, so the other preferences still save.
+          {}),
       // Always one of the two literals: the select below offers nothing else.
       remote_location_policy: remotePolicy,
     };
@@ -616,6 +636,38 @@ export function SearchPreferencesPage(): ReactElement {
                 onChange={(e) => setWorkAuthCountries(e.target.value)}
                 /* Says "not set" first: a bare country list in grey read as a SAVED value (browser proof, 2026-10-25). */
                 placeholder="Not set: filter off. e.g. India, Nepal, Bhutan"
+              />
+            </label>
+
+            {/* Spoken languages (2026-11-23, BBHT 5e108a32): the screener drops a job whose description requires fluency
+                in a language not listed here. The same comma-list control as the countries above, by request. */}
+            <label className="field field--wide">
+              {/* The setting in plain words. */}
+              <span className="field__label">Languages I can work in</span>
+              {/* What the list does, and the one line that makes an empty box safe: empty means the rule is off. */}
+              <span className="field__help">
+                Comma-separated, e.g. English, Hindi, Telugu. Jobs whose description requires fluency in a language not
+                listed here (e.g. &quot;fluent German, C1&quot;) are dropped before matching. Leave empty to turn this rule off: nothing is dropped.
+              </span>
+              {/* Shown only while the column is unproven, so a locked box is not mistaken for a broken one. */}
+              {!spokenLanguagesColumn && (
+                // One line: why it is locked and that nothing is lost.
+                <span className="field__help">Not available yet: the database update for this setting has not run. Your other preferences still save.</span>
+              )}
+              {/* Same comma-list control as the countries box above. */}
+              <input
+                /* Plain text: the list is short and edited rarely. */
+                type="text"
+                /* Same control styling as the other text fields. */
+                className="field__control"
+                /* The draft; nothing is written until Save. */
+                value={spokenLanguages}
+                /* Draft only. */
+                onChange={(e) => setSpokenLanguages(e.target.value)}
+                /* Locked until the column is proven: an edit here could not be saved. */
+                disabled={!spokenLanguagesColumn}
+                /* Says "not set" first, like the countries box, so grey example text never reads as a saved value. */
+                placeholder="Not set: rule off. e.g. English, Hindi, Telugu"
               />
             </label>
 

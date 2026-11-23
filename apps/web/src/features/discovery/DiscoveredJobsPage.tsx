@@ -118,6 +118,34 @@ interface EvaluatedDiscoveredItem extends DiscoveredItem {
   readonly dropReason?: string | undefined;
 }
 
+/* The list rows as cards, plus how many had no job (bug 24, 2026-11-21). A card needs its job, so a row whose embed
+   came back null cannot be drawn, but it must not disappear silently: the count is shown above the grid. Live on
+   2026-11-21 no row hit this (job_id is NOT NULL with an ON DELETE CASCADE foreign key, and no application points at
+   another owner's job), so it guards an RLS or embed failure, not a known data gap. */
+export function mapDiscoveredRows(rows: readonly DiscoveredListRow[]): { readonly items: DiscoveredItem[]; readonly missingJob: number } {
+  // The drawable rows.
+  const items: DiscoveredItem[] = [];
+  // The rows that could not be drawn.
+  let missingJob = 0;
+  for (const app of rows) {
+    // No job record readable: counted, never silently skipped.
+    if (!app.job) {
+      missingJob += 1;
+      continue;
+    }
+    items.push({
+      // Real application id, so downstream actions address the real row.
+      applicationId: app.id,
+      // The row's own sort key, kept for the next page's cursor.
+      createdAt: app.created_at,
+      // The joined job row, typed as DISCOVERED_LIST_SELECT's columns by the select generic.
+      job: app.job,
+    });
+  }
+  // An empty input is a real "nothing discovered": no items, nothing missing.
+  return { items, missingJob };
+}
+
 export function DiscoveredJobsPage(): ReactElement {
   const [items, setItems] = useState<readonly DiscoveredItem[]>([]);
   const [filterRules, setFilterRules] = useState<readonly FilterRuleConfig[]>([]);
@@ -193,6 +221,12 @@ export function DiscoveredJobsPage(): ReactElement {
   /* Why the last load failed, or null. A THIRD state beside "loading" and "rows":
      an outage must not render as an empty list or as somebody else's rows. */
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Loaded rows whose job record could not be read: said above the grid, never silently dropped (bug 24).
+  const [missingJobs, setMissingJobs] = useState<number>(0);
+  /* A failed filter-rules read, or null. Its OWN state, not loadError (2026-11-23): loadError means "the list
+     failed", and the grid, counter and Load more all hide on it, so a rules failure stored there hid rows that had
+     loaded fine. Here it is a warning shown BESIDE the rows: the split is unfiltered, the rows are still real. */
+  const [rulesWarning, setRulesWarning] = useState<string | null>(null);
   // laneTotal is derived from the counts RPC beside laneSpec above; it is no longer state set by loadData.
   /* Outcomes of "Send through pipeline", newest first. Held HERE, not on the card: a settled
      row has left its lane, so the reload removes its card and the card's own note with it.
@@ -323,34 +357,24 @@ export function DiscoveredJobsPage(): ReactElement {
         setLoadError(`Could not load ${laneSpec.label} jobs: ${listResult.error.message}`);
         // Never show the previous load's rows under an error.
         setItems([]);
+        // Nor the previous load's missing-job count.
+        setMissingJobs(0);
+        // Nor a rules warning about rows that are no longer shown; the list error is the whole answer.
+        setRulesWarning(null);
         return;
       }
 
-      // Keep only rows whose job join resolved; a card needs a job to render.
-      const mapped: DiscoveredItem[] = [];
-      // An empty array is a real "nothing discovered", rendered as empty.
-      for (const app of listResult.data ?? []) {
-        // A missing job row cannot be rendered as a card.
-        if (app.job) {
-          mapped.push({
-            // Real application id, so downstream actions address the real row.
-            applicationId: app.id,
-            // The row's own sort key, kept for the next page's cursor.
-            createdAt: app.created_at,
-            // The joined job row, typed as DISCOVERED_LIST_SELECT's columns by the select generic.
-            job: app.job,
-          });
-        }
-      }
+      // Cards for rows whose job join resolved, and a COUNT of the ones that did not (bug 24: they used to vanish).
+      const { items: mapped, missingJob } = mapDiscoveredRows(listResult.data ?? []);
+      // Shown above the grid; Load more adds its page's count to the loaded window's.
+      setMissingJobs((prev) => (mode === 'more' ? prev + missingJob : missingJob));
       // Cleared here too, because a silent refresh did not clear it at the start.
       setLoadError(null);
       // Load more appends (appendUnique is a belt-and-braces check; the cursor already excludes loaded rows); every other mode replaces.
       setItems(mode === 'more' ? appendUnique(itemsRef.current, mapped) : mapped);
-      // Surface the rules failure after the list loaded, so the reason is visible beside the rows.
-      if (rulesError !== null) {
-        // States the consequence: the Matched/Filtered split is not trustworthy.
-        setLoadError(`Filter rules failed to load (${rulesError}); the Matched / Filtered Out split below ignores your rules.`);
-      }
+      /* Surface the rules failure beside the rows, never as loadError (that hides the grid). Set on every successful
+         list load, so a recovered rules read clears a stale warning. States the consequence: the split ignores the rules. */
+      setRulesWarning(rulesError === null ? null : `Filter rules failed to load (${rulesError}); the Matched / Filtered Out split below ignores your rules.`);
     } catch (e) {
       // A superseded call's failure is not the page's state any more.
       if (stale()) return;
@@ -958,6 +982,20 @@ export function DiscoveredJobsPage(): ReactElement {
       {loadError !== null && (
         <p className="discovery__error" role="alert">
           {loadError}
+        </p>
+      )}
+
+      {/* A failed rules read: a warning ABOVE the rows, which stay drawn (role status, not alert: nothing failed to show). */}
+      {rulesWarning !== null && (
+        <p className="discovery__error" role="status" data-testid="discovery-rules-warning">
+          {rulesWarning}
+        </p>
+      )}
+
+      {/* Rows the list read returned without a job record (bug 24): counted here, since they cannot be cards. */}
+      {missingJobs > 0 && (
+        <p className="discovery__error" role="status">
+          {missingJobs === 1 ? '1 loaded row has' : `${missingJobs} loaded rows have`} no readable job record (job record missing), so {missingJobs === 1 ? 'it is' : 'they are'} not shown as {missingJobs === 1 ? 'a card' : 'cards'}.
         </p>
       )}
 
