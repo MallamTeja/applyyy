@@ -14,8 +14,8 @@ import { chromium } from 'playwright';
 import { createPlaywrightPage } from '../playwright-page.ts';
 // Owns the separate page that renders the resume PDF.
 import { createResumeRenderer } from '../resume-renderer.ts';
-// Type only: the SDK itself is loaded dynamically below.
-import type { SupabaseLike } from '../supabase-gateway.ts';
+// Type only: the SDK itself is loaded dynamically below. createSupabaseGateway: S29, the shared sweep (below).
+import { createSupabaseGateway, type SupabaseLike } from '../supabase-gateway.ts';
 // The pure flow; this file is just the wiring around it.
 import { runAssisted } from '../assist/assisted-submit.ts';
 // G1: the same robots gate the applier and the kit use.
@@ -132,6 +132,22 @@ async function main(): Promise<void> {
   const gateway = createSupabaseAssistGateway(client, { userId, email, password });
   // Primes the cached expiry the gateway consults.
   await gateway.refreshSession();
+
+  // S29 (Teja 2026-11-21 22:58, Canonical 11f9a906): SWEEP STALE CLAIMS FIRST. The only other caller is the scheduled
+  // claim loop (claim-loop.ts:483), and Teja ruled out cron (20261009220000_reap_stale_agent_runs.sql), so a row an
+  // earlier assist left at `applying` (closed window, crash, Ctrl-C) stayed there; `applying -> applied|failed` is
+  // applier/tracker only, so the human could not record it. The sweep routes a stale `applying` row to
+  // needs_verification (a human edge to applied/failed) and frees lapsed leases. Through the worker gateway's own
+  // sweepStaleClaims, so it records its `sweeper` agent_runs row exactly like the loop's. Before the kill switch for
+  // the loop's reason (W31): cleanup is not new work. Same signed-in client, so the agent-key header is on it.
+  try {
+    // The shared sweep: one RPC, one agent_runs row.
+    await createSupabaseGateway(client, { userId, email, password }).sweepStaleClaims();
+  } catch (error) {
+    // Logged, not thrown: the sweep frees OTHER rows, and its failure is already a `failed` sweeper run on the Health
+    // page (supabase-gateway.ts), so it must not stop the human from filling this row's form.
+    console.warn(`[assist] stale-claim sweep failed, continuing: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   // Same kill switch the scheduled applier honours; "off" means off for humans too.
   // Fail closed: a missing or false setting reads as off.
