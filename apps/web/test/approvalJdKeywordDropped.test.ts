@@ -200,7 +200,7 @@ describe('jd_keyword_dropped on the approval page', () => {
     // The producer's reason, verbatim.
     assert.ok(html.includes(REASON), 'reason missing');
     // Not the fabrication alarm.
-    assert.ok(!html.includes('trace to\nnothing') && !html.includes('alarm-heading'), 'rendered as fabrication');
+    assert.ok(!html.includes('trace to\nnothing') && !html.includes('claim-notice-heading'), 'rendered as fabrication');
     // Not the edits-only notice with a zero count.
     assert.ok(!html.includes('You made 0 changes'), 'rendered a zero-change notice');
   });

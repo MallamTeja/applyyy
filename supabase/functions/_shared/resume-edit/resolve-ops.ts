@@ -14,7 +14,9 @@ import type { BulletSection, SectionKind } from './tailored-edits.ts';
 // The edit target union the engine's text edits take.
 import type { EditTarget } from './edit-target.ts';
 // The shared name matcher, so "harnes engineering" finds Harness Engineering with namedIn's own typo budget.
-import { sameName } from '../text/name-match.ts';
+// S45 (2026-11-24): its compaction and edit-distance checks too, for the remove_skill typo match below, so the server
+// keeps ONE definition of "one/two edits apart" instead of a second Levenshtein here.
+import { compactName, sameName, withinOneEdit, withinTwoEdits } from '../text/name-match.ts';
 
 // The id -> ref maps the browser sends with a server-applied ask (it minted the ids in buildAssistDraft).
 export interface ApplyMaps {
@@ -38,8 +40,9 @@ export type WireOp =
   | { readonly op: 'remove'; readonly id: string }
   // A skill on (attest: master first when new).
   | { readonly op: 'add_skill'; readonly name: string; readonly category: string }
-  // A skill off.
-  | { readonly op: 'remove_skill'; readonly name: string; readonly category?: string }
+  // A skill off. `typed` (S45): what the owner/AI asked for when the parser matched it to a printed name by a typo
+  // ("cgboost" -> XGBoost), so the reply can say "(you typed 'cgboost')"; absent when the name was exact.
+  | { readonly op: 'remove_skill'; readonly name: string; readonly category?: string; readonly typed?: string }
   // A bullet one step, or (S9j) to a place within its entry.
   | { readonly op: 'move'; readonly id: string; readonly direction?: 'up' | 'down'; readonly place?: number }
   // A section one step, or (S9j) to a place.
@@ -63,8 +66,9 @@ export type ServerAction =
   | { readonly kind: 'edit'; readonly target: EditTarget; readonly text: string }
   // removeBullet.
   | { readonly kind: 'remove'; readonly target: EditTarget }
-  // removeSkill.
-  | { readonly kind: 'remove_skill'; readonly ref: string }
+  // removeSkill. `name` (S45): the PRINTED name, so the label and the reply name the skill ("Remove skill" alone was
+  // Teja's 13:42 "very shit reply"); `typed` only when the request spelled it differently beyond case and spaces.
+  | { readonly kind: 'remove_skill'; readonly ref: string; readonly name: string; readonly typed?: string }
   // attestSkill (at the pin, or master insert + repin).
   | { readonly kind: 'attest_skill'; readonly keyword: string; readonly category: string }
   // moveBullet.
@@ -102,6 +106,61 @@ const placeWord = (place: number): string => `place ${place}`;
 // True for a whole number from 1: a place. Anything else is not one (CLAUDE.md §6: never coerce).
 const isPlace = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value >= 1;
 
+/* S45 (Teja 2026-11-24 13:42, "remove lightgbm, cgboost, …"): which printed skill a remove names when no printed name
+   matches exactly. A UNIQUE close match is taken; two equally close ones are a tie the caller refuses with both names.
+   Budget by the SHORTER compacted name: never on 1-2 characters (one edit from "C#" or "Go" is another language), one
+   edit on 3-4, two on 5+ (an adjacent swap counts as two here, since withinOneEdit has no swap: stricter, never looser).
+   Fail-closed (CLAUDE.md §6): an empty or pure-punctuation name matches nothing. Shared by the parser (assist.ts) and
+   resolveWireOp below, so the name the parser accepts is the name the server applies. */
+export type CloseName =
+  // Exactly one printed name is closest, within budget.
+  | { readonly kind: 'match'; readonly name: string }
+  // Two or more printed names are equally close: never guessed.
+  | { readonly kind: 'tie'; readonly names: readonly string[] }
+  // Nothing within budget.
+  | { readonly kind: 'none' };
+
+// The closest printed name to `typed`, by the budget above.
+export function closestPrinted(typed: string, names: readonly string[]): CloseName {
+  // The typed name as the distance checks compare it.
+  const want = compactName(typed);
+  // Nothing to compare: no match, never "the first name".
+  if (want === '') return { kind: 'none' };
+  // Each distinct printed name with its distance, or none when outside the budget.
+  const scored = [...new Set(names)].flatMap((name) => {
+    // The printed name compacted the same way.
+    const have = compactName(name);
+    // Pure punctuation is not a name.
+    if (have === '') return [];
+    // The budget, set by the shorter of the two.
+    const budget = Math.min(want.length, have.length) <= 2 ? 0 : Math.min(want.length, have.length) <= 4 ? 1 : 2;
+    // 0, 1 or 2 edits, or out of range.
+    const distance = want === have ? 0 : withinOneEdit(want, have) ? 1 : withinTwoEdits(want, have) ? 2 : 3;
+    // Kept only within its budget.
+    return distance <= budget ? [{ name, distance }] : [];
+  });
+  // Nothing close.
+  if (scored.length === 0) return { kind: 'none' };
+  // The best distance found.
+  const best = Math.min(...scored.map((s) => s.distance));
+  // Every name at that distance.
+  const top = scored.filter((s) => s.distance === best).map((s) => s.name);
+  // One: the match; more: a tie to refuse.
+  return top.length === 1 ? { kind: 'match', name: top[0]! } : { kind: 'tie', names: top };
+}
+
+// True when `typed` differs from the printed name by more than case and spaces: only then does the reply echo it.
+export function typedDiffers(typed: string, name: string): boolean {
+  // Case and every space ignored.
+  return typed.toLowerCase().replace(/\s+/g, '') !== name.toLowerCase().replace(/\s+/g, '');
+}
+
+// The refusal for a tie: both names, so the owner can say which one.
+export function tieWhy(typed: string, names: readonly string[]): string {
+  // The names quoted, joined in plain words.
+  return `"${typed}" is close to ${names.map((n) => `"${n}"`).join(' and ')}; say which one.`;
+}
+
 /* One wire op to its engine action. Order-dependent effects (an earlier remove_entry in the same answer) are left to
    the engine: the server applies the actions one by one on the resume as it stands, so a later op on a removed entry
    is refused there with the engine's own reason, never guessed here. */
@@ -112,12 +171,24 @@ export function resolveWireOp(op: WireOp, maps: ApplyMaps, sections: readonly Se
   if (op.op === 'add_skill') return { ok: true, action: { kind: 'attest_skill', keyword: op.name.trim(), category: op.category.trim() } };
   // A skill off: by name, in the named group when it prints twice, else the first copy.
   if (op.op === 'remove_skill') {
+    // The card wording for every refusal below.
+    const what = `Remove skill "${op.name}"`;
     // Every printed copy of that name.
-    const copies = maps.skills.filter((skill) => skill.name.trim().toLowerCase() === op.name.trim().toLowerCase());
+    const exact = maps.skills.filter((skill) => skill.name.trim().toLowerCase() === op.name.trim().toLowerCase());
+    // S45: no exact copy, so the one close printed name, if unique ("cgboost" -> XGBoost).
+    const close = exact.length > 0 ? null : closestPrinted(op.name, maps.skills.map((skill) => skill.name));
+    // Two equally close: refused with both names, never a guess.
+    if (close?.kind === 'tie') return no(what, tieWhy(op.name, close.names));
+    // The exact copies, else the close name's copies, else none.
+    const copies = close === null ? exact : close.kind === 'match' ? maps.skills.filter((skill) => skill.name === close.name) : [];
     // The named group's copy, else the first.
     const skill = copies.find((copy) => op.category !== undefined && copy.category.trim().toLowerCase() === op.category.trim().toLowerCase()) ?? copies[0];
     // Not printed.
-    return skill === undefined ? no(`Remove skill "${op.name}"`, `"${op.name}" is not on the resume.`) : { ok: true, action: { kind: 'remove_skill', ref: skill.ref } };
+    if (skill === undefined) return no(what, `"${op.name}" is not on the resume.`);
+    // What was asked for: the parser's carried spelling when it is a real string (§6: never coerced), else this op's name.
+    const typed = typeof op.typed === 'string' && op.typed.trim() !== '' ? op.typed.trim() : op.name.trim();
+    // The printed name always; the typed one only when it differs beyond case and spaces.
+    return { ok: true, action: { kind: 'remove_skill', ref: skill.ref, name: skill.name, ...(typedDiffers(typed, skill.name) ? { typed } : {}) } };
   }
   // A whole entry off.
   if (op.op === 'remove_entry') {
@@ -214,8 +285,8 @@ export function actionLabel(action: ServerAction): string {
     case 'edit': return action.target.kind === 'summary' ? 'Edit summary' : 'Edit bullet';
     // Bullet off.
     case 'remove': return 'Remove bullet';
-    // Skill off.
-    case 'remove_skill': return 'Remove skill';
+    // Skill off, named (S45: a bare "Remove skill" told the owner nothing in history or the reply).
+    case 'remove_skill': return `Remove skill "${action.name}"`;
     // Skill on.
     case 'attest_skill': return `Add skill "${action.keyword}" under ${action.category}`;
     // Bullet step.

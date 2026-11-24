@@ -384,6 +384,41 @@ export function collectFlaggedClaims(diff: ResumeDiff): FlaggedClaim[] {
   return [...inLines, ...diff.unlocatedClaims];
 }
 
+/* The words of the claim notice (S24, 2026-11-24: Teja, "rip empathy ux").
+ *
+ * The notice replaced a dark red band headed "N claims trace to nothing in your profile" whose
+ * consequence sentence spliced the first claim into "...about your {claim} work." A rule-5 claim is
+ * a whole bullet ending in a full stop, so it printed "...customer engagement and social media.
+ * work." This function takes the COUNT only, never a claim's text, so no claim can be spliced into a
+ * sentence again: the claims are listed on their own lines, verbatim, below this copy.
+ * The tone is a check, not an accusation: most of these words are honest rewording the auditor could
+ * not match, and only the operator knows which. */
+export function claimNoticeCopy(count: number): { heading: string; lead: string; instruction: string } {
+  // "1 phrase", "3 phrases": a numeral, because the heading is scanned.
+  const noun = count === 1 ? 'phrase' : 'phrases';
+  // Plain words, one sentence each.
+  return {
+    // What to do, and how much of it.
+    heading: `Check ${count} ${noun} before approving`,
+    // Why, without assuming the worst: a rewording the auditor could not match reads the same.
+    lead:
+      count === 1
+        ? 'This wording is not in your master profile. It may be a fair rewording, or something you never did. Only you can tell.'
+        : 'These words are not in your master profile. Each may be a fair rewording, or something you never did. Only you can tell.',
+    // What unblocks approval, and where the other route is.
+    instruction: 'Keep each one that is true to unlock approval. To change or drop one, ask the AI chat.',
+  };
+}
+
+/* The note under a line carrying flagged words: names them in quotes, so the finding survives a
+ * screenshot and colour-blind vision. Replaces "X traces to nothing" (S24), which printed a whole
+ * bullet followed by "traces to nothing". Each text is quoted on its own, so a text ending in a full
+ * stop still reads as a quotation, never as a broken sentence. */
+export function lineCheckNote(texts: readonly string[]): string {
+  // Curly quotes around each, comma-separated.
+  return 'Not in your master profile: ' + texts.map((text) => `“${text}”`).join(', ');
+}
+
 /* Bucket B if ANY line carries an untraceable claim, Bucket A otherwise
  * (section 11). One function, called everywhere the bucket is displayed or
  * acted on, so the badge and the approve button can never disagree.

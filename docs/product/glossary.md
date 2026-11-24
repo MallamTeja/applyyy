@@ -120,7 +120,7 @@ Note: the DB name uses `_` (`scout_ats`), the function folder uses `-` (`scout-a
 | Typography ladder / rungs | Steps of smaller font and spacing tried before cutting content. The "dense rungs" shipped in `dc8ac5c`. | `packages/resume-template/src/render-resume-html.ts`, `packages/resume-template/src/page-fit.ts` |
 | `fitToOnePage` / trim order | Pure trim after the ladder, bullets only: project bullets over the cap, then the weakest bullet, then project bullets down to the floor. Skills, summary, education, certifications and achievements are never removed (Teja 2026-11-09 20:41). | `supabase/functions/_shared/tailor/page-trim.ts` |
 | `page_overflow` | The tailor fails closed when the resume still overflows after trimming. | `supabase/functions/_shared/tailor/tailorer.ts` |
-| ATS panel / ATS score | The approval-page chip "ATS N% verified". Simulates an applicant-tracking keyword scan. | `supabase/functions/_shared/tailor/ats-simulator.ts`, `apps/web/src/features/approval/` |
+| ATS panel / ATS score | The approval-page chip "ATS N% verified". Simulates an applicant-tracking keyword scan. | `supabase/functions/_shared/tailor/jd-keywords.ts`, `apps/web/src/features/approval/diffAdapter.ts` |
 | Resume assist / AI edit | The AI edit panel on the approval page. The browser refuses an answer with an unknown op kind. | `supabase/functions/resume-assist/`, `apps/web/src/features/approval/aiEdit.ts` |
 | Attest (bullet / skill) | Teja confirms a new claim is true, so the auditor accepts it. | `apps/web/src/features/approval/attestBullet.ts`, `attestSkill.ts` |
 
@@ -167,7 +167,7 @@ Note: the DB name uses `_` (`scout_ats`), the function folder uses `-` (`scout-a
 | Batch cap | Max submits per run: `APPLY_MAX_SUBMITS`, default 3; 25 when dispatched by apply-on-approve. | `worker/src/claim-loop.ts` (`DEFAULT_MAX_SUBMITS`), `.github/workflows/apply.yml` |
 | Daily cap | Settings value `max_applications_per_day`. Fails closed if it cannot be read. | `worker/src/claim-loop.ts` |
 | Circuit breaker | Stops a live run after the first submit with an unknown outcome or a captcha. Without it, one bad IP score would park the whole queue at `needs_verification`. | `worker/src/claim-loop.ts` (`breakerReason`) |
-| Kill switch | `system_settings.system_enabled`. When false, agents and the worker stop between applications. | `supabase/functions/_shared/agent/kill-switch.ts`, `supabase/migrations/20260909234700_core_tables.sql` |
+| Kill switch | `system_settings.system_enabled`. When false, agents and the worker stop between applications. | `supabase/functions/_shared/db/gates.ts`, `supabase/migrations/20260909234700_core_tables.sql` |
 | Run window / run budget | The worker checks time and auth BEFORE each `approved -> applying`, never inside it. Budget is about 3000 s per run. | `worker/src/run-window.ts` |
 | Claim and lease | An agent claims rows with a lease (`claimed_by`, default 900 s) instead of a status change. A stale lease is swept. | `claim_applications()` in `supabase/migrations/20260909235100_queue_and_pool_functions.sql` |
 | `advance_application_status()` | The only way to change a status. Checks the transition graph and the agent key. | `supabase/migrations/20260909235100_queue_and_pool_functions.sql` and later fix migrations |

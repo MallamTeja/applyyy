@@ -45,6 +45,16 @@ import { postingText } from "../tailor/posting-text.ts";
 export type AuditFindingKind = AuditFinding['kind'];
 
 /**
+ * Rule 5's ungrounded-term finding: an ordinary finding plus the unmatched tokens as data (2026-11-23).
+ * `claim` stays the whole bullet for the readers that already use it; `words` names what to fix.
+ * Local to this module until the shared AuditFinding union gains the field (packages/shared-types).
+ */
+export type UngroundedTermsFinding = AuditFinding & {
+  // The unmatched tokens, in the order the reason prints them; never empty when written.
+  readonly words: readonly string[];
+};
+
+/**
  * Rhetorical and structural words permitted in bullet rewordings.
  * These carry no factual weight and can be safely introduced by tailoring.
  *
@@ -76,7 +86,123 @@ export const ALLOWED_RHETORICAL_WORDS: ReadonlySet<string> = new Set([
   "site", "api", "apis", "endpoint", "endpoints", "feature", "features",
   // User and traffic domain nouns
   "users", "user", "requests", "students", "services",
+  // Neutral verbs the tailor uses in place of the master's own verb (live row 957991ec, 2026-11-23):
+  // "implementing" is the -ing form of the allowed "implemented", "utilizing" says what "using" says,
+  // "covering" frames scope like "across". Each only carries the object that follows it, and that
+  // object is checked on its own, so none can smuggle a fact in. Never add a tech noun here.
+  "implementing", "utilizing", "covering",
 ]);
+
+/**
+ * Words a SUMMARY may add on top of ALLOWED_RHETORICAL_WORDS (S34, 2026-11-24). A summary is sentences about a
+ * person ("an intern WHO built ..."), so it needs relative pronouns and a few framing words a bullet never uses.
+ * Measured on the 32 live v52 summaries: "who" alone flagged 12 of them. Kept OUT of the bullet allowlist on purpose,
+ * because that list is also handed to the review page's AI box. Closed and matched exactly. Never add a tech noun, a
+ * role noun ("researcher", "software") or a quality adjective ("robust", "scalable"): those are claims, and the
+ * tailor prompt already forbids adjectives its sources do not make.
+ */
+export const SUMMARY_FRAMING_WORDS: ReadonlySet<string> = new Set([
+  // Relative and interrogative pronouns that join a clause to the person
+  "who", "whose", "where", "when",
+  // Copulas and auxiliaries a sentence about a person needs
+  "is", "are", "has", "have",
+  // Additive connectives
+  "also", "both",
+  // "hands-on" tokenizes to "hands" + "on": framing, not a fact
+  "hands",
+  // Neutral verbs the tailor puts in place of the master's own verb (r5, 2026-11-24, live rows 83078b88, 2dd68caa,
+  // a323b808): "cutting" says what master "Reduced" says, "troubleshoots" what "debugged" says, "applies" what "used"
+  // says. Same reasoning as the bullet list's "implementing"/"utilizing": each only carries the object after it, and
+  // that object (and any number, via D4) is checked on its own. Present and -ing forms only, the tenses a summary uses.
+  "cuts", "cutting", "troubleshoots", "troubleshooting", "applies", "applying",
+  // "product-facing"/"user-facing" tokenize to "product" + "facing" (live row f241448f). "facing" is framing like
+  // "hands"; "product" is the same generic entity noun as the bullet list's "platform"/"application"/"feature".
+  "facing", "product",
+]);
+
+/**
+ * Irregular past forms a resume uses, mapped to their base (r5, 2026-11-24). The suffix rules below cannot join
+ * "wrote" to "writes", so live row a06fd6b8 flagged an honest "Writes" against master "Wrote 92 pytest tests".
+ * Closed and exact: only verbs plausible on a resume, each a past tense or participle of ONE base, so no entry can
+ * merge two different words. Applied to both sides inside stemToken, like every other stem rule. Never add a
+ * synonym here ("cut" for "reduced"): that is a different word, and synonyms stay flagged on purpose.
+ */
+const IRREGULAR_VERB_BASE: ReadonlyMap<string, string> = new Map([
+  // Writing and building
+  ["wrote", "write"], ["written", "write"], ["rewrote", "rewrite"], ["rewritten", "rewrite"], ["built", "build"], ["rebuilt", "rebuild"], ["made", "make"],
+  // Leading and teaching
+  ["led", "lead"], ["taught", "teach"], ["drove", "drive"], ["driven", "drive"], ["ran", "run"],
+  // Results and ownership
+  ["grew", "grow"], ["grown", "grow"], ["won", "win"], ["held", "hold"], ["kept", "keep"], ["brought", "bring"],
+  // Process verbs
+  ["sent", "send"], ["spent", "spend"], ["began", "begin"], ["begun", "begin"], ["chose", "choose"], ["chosen", "choose"],
+  // Taking on and giving
+  ["took", "take"], ["taken", "take"], ["undertook", "undertake"], ["gave", "give"], ["given", "give"], ["understood", "understand"],
+]);
+
+/**
+ * A light stem of one lowercase token, so an inflection of a master word grounds the same as the
+ * word itself (live row 957991ec, 2026-11-23: "automating" vs master "automate", "gate" vs
+ * "gating", 8 of its 10 grounding findings were inflections or neutral verbs).
+ *
+ * Deliberately NOT Porter: only plural, -ing and -ed endings come off, then a doubled final
+ * consonant and a final "e", so two forms of one word meet ("gate"/"gating" -> "gat"). Rule 5
+ * compares stems from BOTH sides, so the stem need not be a real word, only the same for both.
+ * Looser matching (a synonym table, a real lemmatizer) would widen what an invention can hide
+ * behind, so synonyms ("queries" vs "questions") stay flagged on purpose.
+ *
+ * @param token One lowercase token from tokenizeText.
+ * @returns Its stem; an irregular past (IRREGULAR_VERB_BASE) is stemmed from its base; tokens of 3 letters or
+ *   fewer and tokens with a digit come back unchanged.
+ */
+export function stemToken(token: string): string {
+  // An irregular past goes to its base first, so "wrote" then stems exactly like "writes" (r5, live row a06fd6b8).
+  const base = IRREGULAR_VERB_BASE.get(token) ?? token;
+  // Short tokens ("api", "aws", "go") and versions/metrics ("es2020") have no suffix worth removing.
+  if (base.length <= 3 || /\d/.test(base)) return base;
+  // Working copy, trimmed step by step.
+  let stem = base;
+  // "queries"/"bodies": the plural of a -y word goes back to its -y form.
+  if (stem.endsWith("ies") && stem.length > 4) stem = stem.slice(0, -3) + "y";
+  // "pushes"/"indexes"/"processes": the -es plural after a sibilant drops both letters.
+  else if (/(?:s|x|z|ch|sh)es$/.test(stem)) stem = stem.slice(0, -2);
+  // "layers"/"tracks": a plain plural drops its s; "ss"/"us"/"is" are not plurals ("express", "status", "redis").
+  else if (stem.endsWith("s") && !/(?:ss|us|is)$/.test(stem)) stem = stem.slice(0, -1);
+  /* Derivation (orch re-gate 2026-11-24, approveCheck fixture): the summary check read a tailored "integration",
+     "automated" and "scaling" as inventions against master "Integrated", "automation" and "scalable": the same
+     word, a different part of speech. "-tion" drops "ion" so "integration"/"automation" meet "integrat"/"automat"
+     from "-ed"; "-able" drops whole so "scalable" meets "scal" from "scaling". The base-length floors stop short
+     words collapsing ("action", "table", "capable" stay whole). Nouns that only share a root still differ. */
+  const derived = stem.endsWith("tion") && stem.length - 3 >= 5 ? stem.slice(0, -3)
+    // "-able" only with a 4-letter base left, so "capable"/"table" are untouched.
+    : stem.endsWith("able") && stem.length - 4 >= 4 ? stem.slice(0, -4)
+    // Neither suffix: no derivation step.
+    : null;
+  // A derived stem is final: no -ing/-ed or final-e step may trim it further.
+  if (derived !== null) return derived;
+  // "queried": a -y verb's past goes back to its -y form, as long as a 2-letter base remains.
+  if (stem.endsWith("ied") && stem.length >= 5) stem = stem.slice(0, -3) + "y";
+  /* Otherwise -ing or -ed, only when 3 letters stay, so "used" is not gutted. NO -er (peer 1 review, 2026-11-23): it let master
+     "contains" ground a tailored "container", a tech noun, which is exactly the invention rule 5 exists to catch. */
+  else {
+    // The first suffix that fits wins; at most one comes off.
+    for (const suffix of ["ing", "ed"]) {
+      // Too short a base would merge unrelated words, so the guard is a 3-letter minimum.
+      if (stem.endsWith(suffix) && stem.length - suffix.length >= 3) {
+        // Drop the suffix.
+        stem = stem.slice(0, -suffix.length);
+        // "running" -> "runn" -> "run"; ll/ss/zz are kept because "fill"/"pass" end that way.
+        if (/([b-df-hj-np-tv-z])\1$/.test(stem) && !/(?:ll|ss|zz)$/.test(stem)) stem = stem.slice(0, -1);
+        // One suffix only.
+        break;
+      }
+    }
+  }
+  // "gate"/"automate" lose the final e so they meet "gat"/"automat" from "gating"/"automating".
+  if (stem.length > 3 && stem.endsWith("e")) stem = stem.slice(0, -1);
+  // The comparable stem.
+  return stem;
+}
 
 /**
  * Tokenize a given string into lowercase word tokens, stripping punctuation.
@@ -142,10 +268,13 @@ export function bulletGroundingGaps(
   const allowedTokens = new Set(tokenizeText(masterText));
   // So is any word of any master skill name.
   for (const token of skillTokens) allowedTokens.add(token);
+  // Stems of the master's words and skill tokens, so an inflection grounds (2026-11-23). Built
+  // before the allowlist is added: the allowlist is a closed list matched exactly, never by stem.
+  const allowedStems = new Set([...allowedTokens].map(stemToken));
   // And the fixed rhetorical vocabulary.
   for (const token of ALLOWED_RHETORICAL_WORDS) allowedTokens.add(token);
-  // Words that are not numbers and come from none of the three sources.
-  const terms = tokenizeText(text).filter((token) => !/^\d+$/.test(token) && !allowedTokens.has(token));
+  // Words that are not numbers, not in any of the three sources, and not an inflection of a master word.
+  const terms = tokenizeText(text).filter((token) => !/^\d+$/.test(token) && !allowedTokens.has(token) && !allowedStems.has(stemToken(token)));
   // Both lists; the caller decides how to report them.
   return { metrics, terms };
 }
@@ -332,6 +461,43 @@ export function detectAuditFindings(
   // Experience and projects only: the two sections where "I used X here" is a claim about real work.
   for (const entry of [...master.experience, ...master.projects]) entryBulletText.set(entry.id, entry.bullets.map((b) => b.text).join("\n"));
 
+  // SIBLING SOURCES (S43, 2026-11-24): an AI-written tailored bullet lists in `sources` every master bullet its text
+  // draws on (TailoredBullet.sources, tailor #5). Rule 5 grounded only against the `ref` bullet, so an honest merge of
+  // two sibling bullets was flagged for the second one's words. The list lives on the raw tailor refs, not on the
+  // ResolvedResume, so it is read here once, keyed by section + entry ref + bullet ref (an entry ref is unique only
+  // within its section, a bullet ref only within its entry). tailor_refs is stored JSON, so every level is shape-checked
+  // and anything unexpected simply leaves the key out, which means "no sources": today's single-bullet grounding.
+  const tailoredSources = new Map<string, unknown>();
+  // Keys seen twice: an ambiguous key must not pick one list at random, so it falls back to the ref bullet only.
+  const ambiguousSourceKeys = new Set<string>();
+  // The five bullet-bearing sections, by the same names auditParentSection is called with below.
+  for (const sectionName of ["experience", "projects", "education", "achievements", "certifications"] as const) {
+    // Read through `unknown`: a stored row from before a section existed may lack it, and a malformed one may not be a list.
+    const entries: unknown = tailorRefs ? (tailorRefs as unknown as Record<string, unknown>)[sectionName] : undefined;
+    // No list, nothing to key; the section keeps today's grounding.
+    if (!Array.isArray(entries)) continue;
+    // Each tailored entry of the section.
+    for (const entry of entries) {
+      // Its ref and bullets, read loosely and checked below.
+      const { ref: entryRef, bullets } = (entry ?? {}) as { ref?: unknown; bullets?: unknown };
+      // Without a string ref and a bullet list there is no key to build.
+      if (typeof entryRef !== "string" || !Array.isArray(bullets)) continue;
+      // Each tailored bullet of the entry.
+      for (const tb of bullets) {
+        // Its ref and sources, read loosely; `sources` is validated where it is used.
+        const { ref: bulletRef, sources } = (tb ?? {}) as { ref?: unknown; sources?: unknown };
+        // A bullet without a string ref cannot be matched to a resume bullet.
+        if (typeof bulletRef !== "string") continue;
+        // NUL separators: no NodeId contains one, so two different triples can never build the same key.
+        const key = `${sectionName}\u0000${entryRef}\u0000${bulletRef}`;
+        // Seen before: mark it ambiguous instead of letting the last copy win silently.
+        if (tailoredSources.has(key)) ambiguousSourceKeys.add(key);
+        // Recorded as held, `undefined` included (that is the old reword path).
+        tailoredSources.set(key, sources);
+      }
+    }
+  }
+
   // Step 2: Audit Skills Section
   // Loop through skills in tailored resume
   for (let i = 0; i < resume.skills.length; i++) {
@@ -486,8 +652,51 @@ export function detectAuditFindings(
           // Fidelity is checked against the PINNED master's bullet only, never the resume's own master_text copy (it lives in the audited object, so it could agree with a fabrication; 2026-11-04).
           const masterText = masterBulletInfo.bullet.text;
 
-          // Rule 5 in its one shared definition (also run by the review page's AI box).
-          const gaps = bulletGroundingGaps(bullet.text, masterText, index.skillTokens);
+          // S43: the texts rule 5 may ground against. Always the ref bullet; plus each declared sibling source.
+          const groundingTexts = [masterText];
+          // This bullet's declared sources, if the tailor refs hold exactly one list for it.
+          const sourcesKey = `${sectionName}\u0000${item.ref}\u0000${bullet.ref}`;
+          // An ambiguous key reads as "no sources": never widen on a guess.
+          const declaredSources: unknown = ambiguousSourceKeys.has(sourcesKey) ? undefined : tailoredSources.get(sourcesKey);
+          // Absent, not a list or empty: today's single-bullet grounding, unchanged.
+          if (Array.isArray(declaredSources)) {
+            // Each id once, so a repeated source never adds a duplicate finding.
+            for (const sourceId of new Set<unknown>(declaredSources)) {
+              // The ref bullet is already in the corpus.
+              if (sourceId === bullet.ref) continue;
+              // Resolved through the PINNED master only; a non-string can never resolve.
+              const sourceInfo = typeof sourceId === "string" ? index.bullets.get(sourceId) : undefined;
+              // An id the master lacks widens nothing and is reported like any other unresolved id (fail closed).
+              if (!sourceInfo) {
+                // The existing kind for "a ref the master does not have".
+                findings.push({
+                  // Unresolved reference kind
+                  kind: "unresolved_ref",
+                  // Bullet path
+                  path: bulletPath,
+                  // The same place by refs, the review page's key
+                  ref_path: `${sectionName}.${item.ref}.${bullet.ref}`,
+                  // Bullet text claim
+                  claim: bullet.text,
+                  // Names the bad id so the fix is obvious
+                  reason: `Bullet sources id "${String(sourceId)}" does not exist in master profile`,
+                  // Deterministic lookup
+                  confidence: 1.0,
+                });
+                // Nothing to add to the corpus.
+                continue;
+              }
+              // Only a sibling under the ref bullet's TRUE master parent vouches (the validator's own sources rule):
+              // a bullet from another entry would let one job's facts ground a claim about a different job.
+              if (sourceInfo.parentId !== masterBulletInfo.parentId) continue;
+              // A real sibling: its words and numbers ground this bullet too.
+              groundingTexts.push(sourceInfo.bullet.text);
+            }
+          }
+
+          // Rule 5 in its one shared definition (also run by the review page's AI box); the corpus joined with
+          // newlines so tokens and metrics never fuse across two source texts.
+          const gaps = bulletGroundingGaps(bullet.text, groundingTexts.join("\n"), index.skillTokens);
 
           // Invented or inflated metrics.
           const inventedMetrics = gaps.metrics;
@@ -516,8 +725,9 @@ export function detectAuditFindings(
 
           // If ungrounded terms exist, push audit finding
           if (ungroundedTokens.length > 0) {
-            // Record ungrounded technology / claim token finding
-            findings.push({
+            // Built as a typed value first: `words` is not on the shared AuditFinding type yet, and an
+            // object literal pushed straight into AuditFinding[] would fail the excess-property check.
+            const termsFinding: UngroundedTermsFinding = {
               // Unfaithful rewording kind
               kind: "unfaithful_rewording",
               // Bullet path
@@ -530,7 +740,11 @@ export function detectAuditFindings(
               reason: `Bullet text contains ungrounded term(s) not found in master: ${ungroundedTokens.join(", ")}`,
               // Confidence score
               confidence: 0.85,
-            });
+              // The same words as data, so a reader marks them without parsing `reason` (the jd_keyword_dropped precedent)
+              words: [...ungroundedTokens],
+            };
+            // Recorded like every other finding.
+            findings.push(termsFinding);
           }
 
           // SKILL NOT TIED TO THIS ENTRY: only for experience and projects (the entries the map holds).
@@ -704,6 +918,50 @@ export function detectAuditFindings(
           // Deterministic match, same confidence as the invented-bullet-metric finding
           confidence: 0.95,
         });
+      }
+
+      // SUMMARY PROSE GROUNDING (S34, 2026-11-24): the checks above prove the refs exist, the numbers are cited and the
+      // vocabulary skills exist somewhere, but not the summary's own WORDS. Live row cac40516 (HackerRank) printed
+      // "Applied AI Researcher ... Proficient in PyTorch" with findings_count 0: "researcher" is a role noun no
+      // vocabulary lists and the master never states. Rule 5's one shared definition (bulletGroundingGaps: stems,
+      // allowlist, numbers skipped) now runs over the summary too, not a fork of it.
+      // Only with at least one ref: a ref-less summary already has its own finding above and keeps exactly that.
+      if (tailorRefs.summary.refs.length > 0) {
+        // The corpus is EVERY citable text of the pinned master, exactly the D4 map: the default summary, the PICKED
+        // variant (an unpicked variant does not vouch, as in the refs check), every bullet, every skill name, and every
+        // entry with its role/company/name/dates. Not only the CITED nodes, by measurement (2026-11-24, all 32 live
+        // v52 rows): a cited-only corpus flagged 27 of 32 summaries, mostly the employer name and plain words of
+        // uncited bullets, because a summary cites 2-3 bullets yet speaks for the whole profile. Wording no
+        // master text states at all is the S34 failure ("researcher", "PyTorch" were in no master version), and the
+        // whole-master corpus still catches it. Which node a summary cites stays D4's question (numbers).
+        const summaryCorpus = [...citableText.values()].join("\n");
+        // The ungrounded words; metrics are ignored here because D4 above already owns summary numbers. Then the
+        // summary-only framing list, matched exactly (never by stem), so prose connectives do not flag.
+        const summaryTerms = bulletGroundingGaps(resume.summary, summaryCorpus, index.skillTokens).terms.filter((word) => !SUMMARY_FRAMING_WORDS.has(word));
+        // One finding for the whole summary, naming each unmatched word once.
+        if (summaryTerms.length > 0) {
+          // De-duplicated: a summary repeating an invented word names it once.
+          const words = [...new Set(summaryTerms)];
+          // Typed first, for the same excess-property reason as rule 5's finding.
+          const summaryTermsFinding: UngroundedTermsFinding = {
+            // The kind enums.ts defines for exactly this: summary prose its declared refs do not support.
+            kind: "summary_unsupported",
+            // Summary path
+            path: summaryPath,
+            // The same place by refs, the review page's key
+            ref_path: "summary",
+            // The printed summary, as the reviewer will read it
+            claim: resume.summary,
+            // The words to verify or remove
+            reason: `Summary contains ungrounded term(s) not found in its cited master nodes, master summary or skills: ${words.join(", ")}`,
+            // Same confidence as rule 5's bullet word finding: same machinery, same false-positive profile
+            confidence: 0.85,
+            // As data, so the review page marks each word (perWordFindings) without parsing `reason`
+            words,
+          };
+          // Recorded like every other finding.
+          findings.push(summaryTermsFinding);
+        }
       }
     }
 

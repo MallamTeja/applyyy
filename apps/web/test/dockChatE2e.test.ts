@@ -5,6 +5,10 @@
  *   1. No chat is on screen until a row's chat is opened (the dock is absent, not empty).
  *   2. Opening row 1's chat docks it in the right-hand aside, titled with row 1's job; an edit sent there
  *      is saved to row 1 and row 1's live preview shows it.
+ *   S44a (2026-11-24): the browser no longer applies chat edits; every ask goes withServerApply. The route below
+ *   answers as resume-assist's server-apply does: it writes the row named by the request's application_id and
+ *   replies with `applied`, and the page re-reads the row. So "saved to row N" now means the row the BROWSER asked
+ *   the server to write; any page-side PATCH would also land in patchedIds and break the same assertions.
  *   3. Opening row 2's chat REPLACES the dock: row 1's thread is gone from view, row 2's thread is empty,
  *      and an edit sent there is saved to row 2 only. Every PATCH of the run names the row it was typed on.
  * Needs the e2e bundle: cd apps/web && ./node_modules/.bin/vite build --mode e2e (CI builds it first). */
@@ -29,8 +33,9 @@ const STAMP_0 = '2026-11-05T00:00:00.000000+00:00';
 
 /* Two applications, distinct in id and job title so every assertion can tell them apart. */
 const APPS = [
-  { id: '33333333-3333-4333-8333-333333333331', title: 'Dock Engineer One', skill: { name: 'SQL', category: 'Languages' } },
-  { id: '33333333-3333-4333-8333-333333333332', title: 'Dock Engineer Two', skill: { name: 'RAG Pipelines', category: 'AI' } },
+  // masterRef (S44a): the MASTER_V2 skill id, so the route's emulated server write prints a skill that traces to the master.
+  { id: '33333333-3333-4333-8333-333333333331', title: 'Dock Engineer One', skill: { name: 'SQL', category: 'Languages' }, masterRef: 'skill_sql' },
+  { id: '33333333-3333-4333-8333-333333333332', title: 'Dock Engineer Two', skill: { name: 'RAG Pipelines', category: 'AI' }, masterRef: 'skill_rag' },
 ] as const;
 
 /* One stored row per application, mutable: the PATCH route writes into it. */
@@ -118,14 +123,28 @@ describe('docked AI chat, end to end (2026-11-06)', () => {
       if (url.pathname.endsWith('/auth/v1/token')) return json(200, { access_token: 'e2e-test-token', token_type: 'bearer', expires_in: 7200, refresh_token: 'e2e-test-refresh', user: USER });
       // THE AI: one master skill, picked by the job title the browser sent (so each row's answer is its own).
       if (url.pathname.endsWith('/functions/v1/resume-assist')) {
-        // The request the browser sent.
-        const body = request.postDataJSON() as { job: { title: string } };
+        // The request the browser sent; server_apply and application_id are the S9i P2 fields (aiEdit.withServerApply).
+        const body = request.postDataJSON() as { job: { title: string }; server_apply?: boolean; application_id?: string };
         // The app this job title belongs to.
         const app = APPS.find((a) => a.title === body.job.title);
         // A request for an unknown job is a test bug, said by name.
         if (app === undefined) return json(500, { status: 'error', message: `e2e: unknown job ${body.job.title}` });
-        // The server's ok shape (assist.ts handleResumeAssist).
-        return json(200, { status: 'ok', ops: [{ op: 'add_skill', ...app.skill }], dropped: 0, rejected: [], note: `Done for ${app.title}`, usage: {} });
+        // S44a: the page must ask the server to apply, naming a row; a browser-side apply no longer exists.
+        if (body.server_apply !== true || body.application_id === undefined) return json(500, { status: 'error', message: 'e2e: expected a server-apply request' });
+        // The row the request names (deliberately NOT looked up by title, so a mis-scoped request writes the wrong row and fails below).
+        const row = ROWS.get(body.application_id);
+        // An unknown row is a test bug, said by name.
+        if (row === undefined) return json(500, { status: 'error', message: `e2e: unknown row ${body.application_id}` });
+        // Recorded: the scoping assertions read this, exactly as they read page PATCHes before S44a.
+        patchedIds.push(body.application_id);
+        // The server's write: the skill printed under its group, by its master ref, with a fresh stamp.
+        const profile = row.tailored_profile as { skills: { ref: string; name: string; category: string }[] };
+        // Appended, as the shared edit engine's add does.
+        profile.skills.push({ ref: app.masterRef, name: app.skill.name, category: app.skill.category });
+        // The stamp the page's re-read adopts.
+        row.updated_at = `2026-11-05T00:00:${String(patchedIds.length).padStart(2, '0')}.000000+00:00`;
+        // The server-apply ok shape (assist.ts handleResumeAssist): ops echoed, the outcome in `applied`, the chat left to the page.
+        return json(200, { status: 'ok', ops: [{ op: 'add_skill', ...app.skill }], dropped: 0, rejected: [], note: `Done for ${app.title}`, usage: {}, applied: [{ status: 'applied', label: `Add skill "${app.skill.name}"`, subject: { verb: 'added', name: app.skill.name, group: app.skill.category } }], chat_saved: false });
       }
       // THE RESUME WRITE: saveTailoredEdit's guarded update, matched on id, status and stamp.
       if (url.pathname.endsWith('/rest/v1/applications') && request.method() === 'PATCH') {
@@ -194,7 +213,7 @@ describe('docked AI chat, end to end (2026-11-06)', () => {
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
-  /* Sends one prompt in whatever chat the dock shows, and waits for its op card to be applied. */
+  /* Sends one prompt in whatever chat the dock shows, and waits for the server-applied reply (S44a: no op cards). */
   async function sendInDock(prompt: string, reply: string): Promise<void> {
     // The dock's chat region.
     const chat = page.locator('.queue__dock').getByRole('region', { name: 'AI resume chat' });
@@ -210,8 +229,8 @@ describe('docked AI chat, end to end (2026-11-06)', () => {
     const answer = chat.locator('li.ai-chat__msg--ai').filter({ hasText: reply });
     // Rendered.
     await answer.waitFor({ timeout: 10_000 });
-    // Its one op card, applied by itself (a master skill).
-    await answer.locator('li.ai-chat__op').first().locator('.ai-chat__done').waitFor({ timeout: 10_000 });
+    // The reply leads with what landed (S45 replyText: "Done. Added to <group>: <skill>."), so the write is done by now.
+    await answer.getByText('Added to ', { exact: false }).first().waitFor({ timeout: 10_000 });
   }
 
   it('1. no chat is on screen until a row opens one', async () => {

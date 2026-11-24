@@ -150,7 +150,7 @@ Constraint 15 in `PROJECT_PLAN.md` §3: "DON'T automate final submission by defa
 - `system_settings.auto_apply_on_approve` (migration `20261105140000`) decides whether an approval starts `apply.yml` at
   once. It defaults to false.
 - A kill switch, `system_settings.system_enabled`, stops every agent and the worker on the next tick. It does not stop
-  Teja's own clicks. Code: `supabase/functions/_shared/agent/kill-switch.ts`.
+  Teja's own clicks. Code: `supabase/functions/_shared/db/gates.ts`.
 
 **Approval buckets:** the plan chose two buckets. Clean, fully traced resumes can be approved in a batch. Flagged ones are
 reviewed one by one (`PROJECT_PLAN.md` §2).

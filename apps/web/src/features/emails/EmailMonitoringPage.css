@@ -262,15 +262,6 @@
   border-color: var(--accent);
 }
 
-.email-monitor__settings-box {
-  /* Container for inline sync URL configuration */
-  background: var(--sheet);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-sheet);
-  padding: var(--gap-3);
-  margin-bottom: var(--gap-3);
-}
-
 .email-monitor__url-input {
   /* Input box for pasting Apps Script Web App URL */
   width: 100%;
@@ -287,18 +278,6 @@
 .email-monitor__url-input:focus {
   border-color: var(--accent);
   outline: none;
-}
-
-.store-notice--info {
-  /* Info notice styling matching dark token elevations */
-  /* Accent wash token tracks the theme's accent instead of a fixed indigo. */
-  background: var(--accent-subtle);
-  /* Strong accent ink: #a5b4fc was pale lavender, unreadable on a light sheet. */
-  color: var(--accent-strong);
-  border-left: 3px solid var(--accent);
-  padding: var(--gap-2) var(--gap-3);
-  border-radius: var(--radius-sm);
-  font-size: var(--size-sm);
 }
 
 

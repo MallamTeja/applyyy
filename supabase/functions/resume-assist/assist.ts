@@ -48,8 +48,11 @@ import type { GeminiCallOutcome, GeminiResponseBody, GenerateGeminiOptions } fro
 import type { ApplyMaps, WireOp } from "../_shared/resume-edit/resolve-ops.ts";
 // What the server-side apply reports per op.
 import type { ServerOutcome } from "../_shared/resume-edit/server-plan.ts";
-// The one wording of an apply report, shared with the web panel (S9i P2), so both sides print the same record.
-import { outcomeText } from "../_shared/resume-edit/server-plan.ts";
+// S45 (2026-11-24): the readable chat reply built from the outcomes, shared with the web panel, so a stored reply and a
+// live one read the same ("Done. Removed: … Resume still fits one page.").
+import { replyText } from "../_shared/resume-edit/server-plan.ts";
+// S45: the remove_skill typo match, shared with resolve-ops so the name the parser accepts is the name the server applies.
+import { closestPrinted, tieWhy, typedDiffers } from "../_shared/resume-edit/resolve-ops.ts";
 // The operator-readable sentence for a failed Gemini call.
 import { describeGeminiFailure } from "../_shared/gemini/failure-message.ts";
 // The tailor's own number extractor, reused so "a new metric" means the same thing here as there; the one printable job-title shape (set_role, 2026-11-11); and the title allow-list the validator and the web enforce (2026-11-21).
@@ -230,7 +233,9 @@ export type AssistOp =
   | { readonly op: "add_skill"; readonly name: string; readonly category: string }
   // 2026-11-04: take a printed skill off the resume; `name` is the resume's own spelling.
   // `category` only when the same name prints under two groups and the AI named one of them.
-  | { readonly op: "remove_skill"; readonly name: string; readonly category?: string }
+  // S45: `typed` is the requested spelling when it matched the printed name only by a typo ("cgboost" -> XGBoost), so the
+  // reply can echo it; absent on an exact name.
+  | { readonly op: "remove_skill"; readonly name: string; readonly category?: string; readonly typed?: string }
   // One bullet one place up or down among the bullets of its entry, or (S9j) to a 1-based place.
   | { readonly op: "move"; readonly id: string; readonly direction: MoveDirection }
   // S9j: a bullet to a place (server-applied pages only).
@@ -555,8 +560,9 @@ export interface ChatRow {
 
 /* The two rows of one server-applied exchange, each inside the table's 1-2000 character check. */
 export function chatRows(applicationId: string, chatId: string, instruction: string, note: string, outcomes: readonly ServerOutcome[], usage: unknown): ChatRow[] {
-  // The answer: the record first (history keeps the first 500 characters), then the AI's own note.
-  const answer = [outcomeText(outcomes), note].filter((part) => part !== "").join(" ") || "No changes.";
+  // S45: the readable reply (it always starts "Done." or "Nothing changed.", which the web reads as a server record),
+  // with the AI's note and the shortfall sentences inside it, before the one-page line.
+  const answer = replyText(outcomes, note);
   // The ask, then the answer.
   return [
     // The owner's words.
@@ -1194,6 +1200,20 @@ const GROUP_FILLER_WORDS = new Set(["and", "the", "for", "with", "skill", "skill
 // 10 since 2026-11-21 14:41 (Teja: "increase that cap to 3 more skills in each"), so a chat top-up matches the tailor cap.
 const TOP_UP_GROUP_SIZE = 10;
 
+/* S45 (Teja 2026-11-24, "add 3 more tools" with 1 left): the sentence for a counted add the master could not fill, in
+   plain words with singular/plural right: "Only 1 more Tools skill is in your master, so 2 of the 3 weren't added."
+   `have` is how many the master still had (all of them were added), `asked` the owner's count (> have). */
+function masterShortfall(group: string, have: number, asked: number): string {
+  // None left at all.
+  if (have === 0) return `No more ${group} skills are in your master, so none of the ${asked} were added.`;
+  // How many of the count did not land.
+  const short = asked - have;
+  // "1 more X skill is" / "2 more X skills are".
+  const left = have === 1 ? `Only 1 more ${group} skill is in your master` : `Only ${have} more ${group} skills are in your master`;
+  // "1 of the 3 wasn't" / "2 of the 3 weren't".
+  return `${left}, so ${short} of the ${asked} ${short === 1 ? "wasn't" : "weren't"} added.`;
+}
+
 /* THE TOP-UP (2026-11-12, live Harvey row fcf3a2dd): "devops and clousde too, hld lld too" got ONE op, Docker, while the
    master held seven more DevOps & Cloud skills and "System Design (LLD/HLD)". The prompt already says "fill the group";
    a prompt is not a control (CLAUDE.md §6), so on a turn whose answer ALREADY adds a skill (the owner asked to add,
@@ -1207,7 +1227,9 @@ const TOP_UP_GROUP_SIZE = 10;
    Master skills only, in the master's spelling and group, so nothing is invented and the browser auto-applies them.
    Only the instruction is read, never earlier turns: a skill the owner declined before is not re-added. Never past MAX_OPS. */
 // `filledGroups`: keys of the groups an add_group filled this turn (2026-11-21); step 1 leaves them at the owner's count.
-function topUpNamedSkills(kept: readonly AssistOp[], request: AssistRequest, printed: ReadonlyMap<string, string>, claimed: Set<string>, filledGroups: ReadonlySet<string> = new Set()): AssistOp[] {
+// `shortfalls` (S45, 2026-11-24): step 1 appends one sentence per named group it could not fill, saying how many and why
+// (the line was full, or the answer hit MAX_OPS), so a top-up never comes up short in silence.
+function topUpNamedSkills(kept: readonly AssistOp[], request: AssistRequest, printed: ReadonlyMap<string, string>, claimed: Set<string>, filledGroups: ReadonlySet<string> = new Set(), shortfalls: string[] = []): AssistOp[] {
   // No skill added this turn: not an add request (a removal, a question), so nothing is topped up.
   if (!kept.some((op) => op.op === "add_skill")) return [];
   // The instruction's words, normalised like group names ("&" is "and").
@@ -1242,18 +1264,20 @@ function topUpNamedSkills(kept: readonly AssistOp[], request: AssistRequest, pri
   };
   // The ops this pass adds, in order.
   const added: AssistOp[] = [];
-  // Adds one master skill unless the cap, a printed or claimed name, or a twin spelling stops it; true when added.
-  const add = (skill: PrintedSkill): boolean => {
+  /* True when the owner could still want this skill: not printed, not already proposed, no twin spelling taken, not
+     removed earlier in this chat (S9b). Split out of add() (S45) so step 1 can tell "not wanted" from "no room". */
+  const eligible = (skill: PrintedSkill): boolean => !printed.has(skillKey(skill.name)) && !claimed.has(`skill:${skillKey(skill.name)}`) && !terms.has(termOf(skill.name)) && !removedAndNotAskedBack(skill.name, request);
+  // Adds one master skill unless the cap, a printed or claimed name, or a twin spelling stops it. S45: says which, so step
+  // 1 can report a cap cut ("cap"); "skip" is a skill the owner does not need (printed, claimed, twin, removed).
+  const add = (skill: PrintedSkill): "added" | "cap" | "skip" => {
+    // Printed, already proposed, another spelling of one that is, or removed in this chat: skipped.
+    if (!eligible(skill)) return "skip";
     // The changes this answer already spends, counted the way parseAssistOps counts them (capUnit).
     const units = new Set([...kept, ...added].map((op, index) => capUnit(op.op === "add_skill" ? op.category : "", index)));
     // A skill for a group already counted is free; a new group needs a seat under the cap.
-    if (!units.has(capUnit(skill.category, -1)) && units.size >= MAX_OPS) return false;
+    if (!units.has(capUnit(skill.category, -1)) && units.size >= MAX_OPS) return "cap";
     // The claim key parseAssistOps uses, so nothing is proposed twice.
     const key = `skill:${skillKey(skill.name)}`;
-    // Printed, already proposed, or another spelling of one that is: skipped.
-    if (printed.has(skillKey(skill.name)) || claimed.has(key) || terms.has(termOf(skill.name))) return false;
-    // S9b: removed by the owner earlier in this chat and not asked back now: never re-proposed.
-    if (removedAndNotAskedBack(skill.name, request)) return false;
     // Claimed, so parseAssistOps's one-op-per-target rule holds for the top-up too.
     claimed.add(key);
     // Its term taken, so a twin spelling later in the pool is skipped.
@@ -1263,7 +1287,7 @@ function topUpNamedSkills(kept: readonly AssistOp[], request: AssistRequest, pri
     // Kept, in the master's spelling and group, so the browser finds its node and auto-applies it.
     added.push({ op: "add_skill", name: skill.name, category: skill.category });
     // Added.
-    return true;
+    return "added";
   };
   // 1. Groups the owner named: a group is named when one of its distinctive words was said.
   for (const category of request.categories) {
@@ -1277,8 +1301,25 @@ function topUpNamedSkills(kept: readonly AssistOp[], request: AssistRequest, pri
     const pool = request.availableSkills.filter((skill) => skillKey(skill.category) === skillKey(category));
     // Missing keywords first.
     const ranked = [...pool].sort((a, b) => Number(missing.has(skillKey(b.name))) - Number(missing.has(skillKey(a.name))));
+    // S45: how many wanted skills the line had no room for, and how many the change cap cut.
+    let noRoom = 0;
+    // Same, for the cap.
+    let noSeat = 0;
     // Added while the line has room: a long name that would wrap is skipped and a shorter later one may still fit.
-    for (const skill of ranked) if (roomFor(category, skill.name)) add(skill);
+    for (const skill of ranked) {
+      // Not wanted (printed, proposed, twin, removed): not a shortfall.
+      if (!eligible(skill)) continue;
+      // Wanted, but the group's printed line is full: counted, so the reply says so.
+      if (!roomFor(category, skill.name)) { noRoom += 1; continue; }
+      // Wanted and fits; counted when the cap stops it.
+      if (add(skill) === "cap") noSeat += 1;
+    }
+    // The master's spelling of the group, as the owner sees it.
+    const shown = pool[0]?.category ?? category;
+    // S45: never short in silence: the line-width reason, with the way past it.
+    if (noRoom > 0) shortfalls.push(`${noRoom} more ${shown} skill${noRoom === 1 ? "" : "s"} in your master did not fit on that group's printed line; say "all" to add ${noRoom === 1 ? "it" : "them"} anyway.`);
+    // S45: the change cap's reason.
+    if (noSeat > 0) shortfalls.push(`${noSeat} more ${shown} skill${noSeat === 1 ? " was" : "s were"} not added: one answer makes at most ${MAX_OPS} changes; ask again for more.`);
   }
   // 2. Master skills named in full, or by a short form in their parentheses.
   for (const skill of request.availableSkills) {
@@ -1519,8 +1560,11 @@ function claimFreeSentences(text: string): string[] {
 
 /* S9k (live 21:22, row 942 "[Applied: Remove skill; Remove skill] Proposed 2 changes. See the list below."): on a
    server-applied page there is no list below and nothing is "proposed": the outcome line in front already says what
-   landed. So the count fallback is empty there, and the server's outcome line is the whole reply. */
-function honestNote(raw: unknown, ops: readonly AssistOp[], rejected: readonly RejectedOp[], serverApply = false): string {
+   landed. So the count fallback is empty there, and the server's outcome line is the whole reply.
+   S45 (2026-11-24): since S44a cut 1 the web ALWAYS asks for server apply, so the browser-applied "Proposed N changes. See
+   the list below." branch was dead in prod and is gone: an answer with ops and nothing else to say gets no note at all;
+   replyText says what landed. */
+function honestNote(raw: unknown, ops: readonly AssistOp[], rejected: readonly RejectedOp[]): string {
   // Sentences of the model's text, claims dropped; nothing when it sent no text.
   const kept = typeof raw === "string" ? claimFreeSentences(raw) : [];
   // Ops proposed but none survived: say so first, with the first reason.
@@ -1529,12 +1573,9 @@ function honestNote(raw: unknown, ops: readonly AssistOp[], rejected: readonly R
   const body = [lead, ...kept].filter((part) => part !== "").join(" ").slice(0, NOTE_MAX);
   // Something to read: done.
   if (body !== "") return body;
-  // Nothing to read (the model said nothing, or only claims): a count of what the list below holds, never a
-  // blank bubble above it (2026-11-06). No claim in it: "Proposed" is a fact about the answer, not the resume.
-  // Server-applied: the outcome line says it all (S9k), so nothing is added after it.
-  if (serverApply && ops.length > 0) return "";
-  // Browser-applied: the count of the cards below.
-  return ops.length > 0 ? `Proposed ${ops.length} change${ops.length === 1 ? "" : "s"}. See the list below.` : "No changes proposed.";
+  // Nothing to read (the model said nothing, or only claims): with ops, the reply's own sentences say what landed (S45);
+  // with none, said in words, never a blank bubble (2026-11-06).
+  return ops.length > 0 ? "" : "No changes proposed.";
 }
 
 export function parseAssistOps(
@@ -1721,12 +1762,19 @@ export function parseAssistOps(
       const name = textField(raw.name);
       // No name.
       if (name === "") return WHY.noSkillName;
-      // The resume's own spelling; undefined when it is not printed.
-      const spelling = printed.get(skillKey(name));
+      /* S45 (Teja 2026-11-24, "remove lightgbm, cgboost, …"): no exact printed name, so the ONE printed name a typo away
+         ("cgboost" -> XGBoost), by the budget closestPrinted documents; two equally close names are refused, never guessed. */
+      const close = printed.has(skillKey(name)) ? null : closestPrinted(name, [...printed.values()]);
+      // A tie: refused with both names, so the owner can say which.
+      if (close?.kind === "tie") return tieWhy(clip(name, 40), close.names);
+      // The resume's own spelling; undefined when it is not printed (not even a typo away).
+      const spelling = close === null ? printed.get(skillKey(name)) : close.kind === "match" ? close.name : undefined;
       // Not printed: nothing to remove.
       if (spelling === undefined) return `"${clip(name, 40)}" is not on the resume.`;
-      // The SAME namespace as add_skill, so an add and a remove of one skill cannot both pass.
-      const key = `skill:${skillKey(name)}`;
+      // What was asked for, carried only when it differs from the printed name beyond case and spaces (the reply echoes it).
+      const typed = typedDiffers(name, spelling) ? { typed: name } : {};
+      // The SAME namespace as add_skill, keyed by the PRINTED name, so an add and a remove of one skill cannot both pass.
+      const key = `skill:${skillKey(spelling)}`;
       // Already targeted earlier in this answer.
       if (claimed.has(key)) return WHY.targeted;
       // Claimed.
@@ -1736,9 +1784,10 @@ export function parseAssistOps(
          really prints under, in that group's spelling; otherwise left off and the browser takes the first. */
       const group = textField(raw.category);
       // The printed copy in that group, if the browser sent groups and one matches.
-      const copy = group === "" ? undefined : request.printedSkills?.find((skill) => skillKey(skill.name) === skillKey(name) && skillKey(skill.category) === skillKey(group));
-      // Kept, in the printed spelling, so the browser finds it by exact name (and group, when known).
-      return copy === undefined ? { op: "remove_skill", name: spelling } : { op: "remove_skill", name: spelling, category: copy.category };
+      // Matched on the printed spelling (S45: the typed name may be a typo of it).
+      const copy = group === "" ? undefined : request.printedSkills?.find((skill) => skillKey(skill.name) === skillKey(spelling) && skillKey(skill.category) === skillKey(group));
+      // Kept, in the printed spelling, so the browser finds it by exact name (and group, when known); typed rides along.
+      return copy === undefined ? { op: "remove_skill", name: spelling, ...typed } : { op: "remove_skill", name: spelling, category: copy.category, ...typed };
     }
     // One bullet one place.
     if (raw.op === "move") {
@@ -1989,16 +2038,22 @@ export function parseAssistOps(
       // Taken.
       picked.push(skill);
     }
-    // Nothing to add: left for check() to refuse with its reason.
-    if (picked.length === 0) return [raw];
     /* S9e (2026-11-21, "add 6 cs fundamentals" gave 5 with no reason): when fewer land than the owner's count, say why.
        Only for a real count (a positive whole n) and never on "all" (no count to fall short of). The master's group
        spelling, so the sentence names the group the owner sees. */
     const asked = typeof raw.n === "number" && Number.isInteger(raw.n) && raw.n > 0 && !saidAll ? raw.n : 0;
+    // The owner's group in the master's spelling, or undefined when the model named a group the owner does not have.
+    const known = request.categories.find((category) => skillKey(category) === key);
+    /* S45: a counted ask for a REAL group with nothing left in the master is the master running out, said as a shortfall
+       ("No more Tools skills are in your master, so none of the 3 were added.") instead of a refused card. Only when the
+       OWNER typed the count: a model-invented n on "add databases" keeps the refusal, which tells them what to do. */
+    if (picked.length === 0 && ranked.length === 0 && asked > 0 && known !== undefined && new RegExp(`\\b${asked}\\b`).test(request.instruction)) { shortfalls.push(masterShortfall(known, 0, asked)); return []; }
+    // Nothing to add: left for check() to refuse with its reason.
+    if (picked.length === 0) return [raw];
     // The group as the master spells it.
     const groupName = picked[0]!.category;
-    // Every candidate taken and still short: the master ran out.
-    if (asked > picked.length && picked.length === ranked.length) shortfalls.push(`Your master has only ${picked.length} more ${groupName} skills to add.`);
+    // Every candidate taken and still short: the master ran out (S45 wording: how many landed and how many did not).
+    if (asked > picked.length && picked.length === ranked.length) shortfalls.push(masterShortfall(groupName, picked.length, asked));
     // Stopped by the per-group cap.
     else if (asked > TOP_UP_GROUP_SIZE && picked.length === TOP_UP_GROUP_SIZE) shortfalls.push(`At most ${TOP_UP_GROUP_SIZE} skills are added to one group at a time; ask again for more.`);
     // Stopped by the printed line width.
@@ -2137,12 +2192,28 @@ export function parseAssistOps(
     ops.push(result);
   }
   // What the owner asked for and the model left out, from the master (2026-11-12, topUpNamedSkills says why).
-  ops.push(...topUpNamedSkills(ops, request, printed, claimed, filledGroups));
+  ops.push(...topUpNamedSkills(ops, request, printed, claimed, filledGroups, shortfalls));
+  /* S45 (c): a counted ask for one named group ("add 3 more tools") that the model answered with add_skill ops instead of
+     an add_group: when fewer than the count landed and the master has no more of that group, say so in the add_group
+     wording. A group an add_group filled already has its own sentence; a shortfall with skills left is the top-up's
+     line-width or cap sentence above. ponytail: counts every add in the group, master or owner-named, against the count. */
+  const countAsked = /\badd\s+(\d{1,2})\b/i.exec(request.instruction);
+  // The count as a number, or 0 when the instruction states none.
+  const wantCount = countAsked === null ? 0 : Number(countAsked[1]);
+  // Only for one named group the add_group expansion did not fill.
+  if (wantCount > 0 && namedGroup !== undefined && !filledGroups.has(skillKey(namedGroup))) {
+    // Adds this answer files under that group.
+    const have = ops.filter((op) => op.op === "add_skill" && skillKey(op.category) === skillKey(namedGroup)).length;
+    // Master skills of that group still not printed or proposed (and not removed in this chat).
+    const left = request.availableSkills.filter((skill) => skillKey(skill.category) === skillKey(namedGroup) && !printed.has(skillKey(skill.name)) && !claimed.has(`skill:${skillKey(skill.name)}`) && !removedAndNotAskedBack(skill.name, request)).length;
+    // Short, and the master is the reason.
+    if (have < wantCount && left === 0) shortfalls.push(masterShortfall(namedGroup, have, wantCount));
+  }
   // The note is display text, never a made-up success: claim sentences dropped, and an all-failed answer
   // led by what happened (honestNote). A note with nothing to read gets a one-line count (honestNote).
   // S9e: the shortfall reasons follow the model's own note, so "add 6" giving 5 always says why.
   // S9k: when the fit fallback fired, the model's own note answered a different question, so it is not shown.
-  const note = [honestNote(fallback ? "" : parsed.note, ops, rejected, request.serverApply), ...shortfalls].filter((part) => part !== "").join(" ");
+  const note = [honestNote(fallback ? "" : parsed.note, ops, rejected), ...shortfalls].filter((part) => part !== "").join(" ");
   // The surviving ops, the drop count, the named drops and the note.
   return { ok: true, ops, dropped, rejected, note };
 }

@@ -32,14 +32,33 @@ import type { TrimItem } from '../tailor/page-trim.ts';
 // The actions this planner folds: everything except the two that also write the master (they run on their own).
 export type PureServerAction = Exclude<ServerAction, { readonly kind: 'attest_skill' } | { readonly kind: 'attest_bullet' }>;
 
+/* S45 (Teja 2026-11-24 13:42, "very shit reply"): WHAT a skill outcome was about, so the reply can say "Removed: LightGBM,
+   XGBoost (you typed 'cgboost')" and "Added to Tools: YAML Flows" instead of "[Applied: Remove skill; Remove skill]".
+   `name` is the printed (or master) name; `typed` only when the ask spelled it differently beyond case and spaces;
+   `group` is where an added skill landed. Optional on every outcome, so an older reader ignores it. */
+export type OutcomeSubject = { readonly verb: 'removed' | 'added'; readonly name: string; readonly group?: string; readonly typed?: string };
+
 // What happened to one action.
 export type ServerOutcome =
   // Landed on the resume.
-  | { readonly status: 'applied'; readonly label: string }
+  | { readonly status: 'applied'; readonly label: string; readonly subject?: OutcomeSubject }
   // A check refused it; the reason is the engine's or the end-state check's own sentence.
-  | { readonly status: 'refused'; readonly label: string; readonly why: string }
+  | { readonly status: 'refused'; readonly label: string; readonly why: string; readonly subject?: OutcomeSubject }
   // Not applied by policy (ungrounded wording); offered as text instead.
-  | { readonly status: 'suggested'; readonly label: string; readonly why: string };
+  | { readonly status: 'suggested'; readonly label: string; readonly why: string; readonly subject?: OutcomeSubject };
+
+// The subject a skill action carries, or undefined for every other kind (S45). Shared by the planner and server-apply.
+export function subjectOf(action: ServerAction): OutcomeSubject | undefined {
+  // A removal names the printed skill, plus the typed spelling when it differed.
+  if (action.kind === 'remove_skill') return { verb: 'removed', name: action.name, ...(action.typed !== undefined ? { typed: action.typed } : {}) };
+  // An add names the skill and the group it is filed under (the parser already chose the master's group for a master skill).
+  if (action.kind === 'attest_skill') return { verb: 'added', name: action.keyword, group: action.category };
+  // Nothing to name beyond the label.
+  return undefined;
+}
+
+// The subject spread into an outcome only when there is one, so an outcome never carries `subject: undefined`.
+const withSubject = (subject: OutcomeSubject | undefined): { readonly subject?: OutcomeSubject } => (subject === undefined ? {} : { subject });
 
 // One applied step, for the history event (the browser's batch detail shape).
 export interface ServerStep {
@@ -203,18 +222,20 @@ export function planServerEdits(input: {
   const steps: ServerStep[] = [];
   // One action at a time.
   for (const { action, label } of input.actions) {
+    // S45: what the reply names this action by, if it is a skill change.
+    const subject = withSubject(subjectOf(action));
     // Policy first: ungrounded words are a suggestion, never applied.
     const why = ungrounded(action, resume, input.master, skillTokens);
     // Offered as text.
-    if (why !== null) { outcomes.push({ status: 'suggested', label, why }); continue; }
+    if (why !== null) { outcomes.push({ status: 'suggested', label, why, ...subject }); continue; }
     // The engine on the resume as it stands now.
     const result = applyOne(action, resume, input.full);
     // Refused by its own check: named, and the fold goes on without it.
-    if (!result.ok) { outcomes.push({ status: 'refused', label, why: result.reason }); continue; }
+    if (!result.ok) { outcomes.push({ status: 'refused', label, why: result.reason, ...subject }); continue; }
     // Kept.
     resume = result.resume;
     // Recorded.
-    outcomes.push({ status: 'applied', label });
+    outcomes.push({ status: 'applied', label, ...subject });
     // For the event.
     steps.push({ kind: EVENT_KIND[action.kind], ref: refOf(action), before: result.before, after: result.after });
   }
@@ -223,7 +244,8 @@ export function planServerEdits(input: {
   // The END STATE checked once, as the browser's batch save does (one page, floors, content rules).
   const fitted = fitEditToOnePage(resume, input.jdKeywords, { previous: input.current, master: input.master });
   // Refused: every applied action is refused with the end-state reason, so the reply names it.
-  if (!fitted.ok) return { resume: null, outcomes: outcomes.map((o) => (o.status === 'applied' ? { status: 'refused', label: o.label, why: fitted.reason } : o)), steps: [], trimmed: [], notice: null };
+  // The subject rides along (S45), so "Could not do: Remove skill "X"" still knows which skill it was.
+  if (!fitted.ok) return { resume: null, outcomes: outcomes.map((o) => (o.status === 'applied' ? { status: 'refused', label: o.label, why: fitted.reason, ...withSubject(o.subject) } : o)), steps: [], trimmed: [], notice: null };
   // The plan to save.
   return { resume: fitted.resume, outcomes, steps, trimmed: fitted.trimmed, notice: fitted.notice };
 }
@@ -241,4 +263,45 @@ export function outcomeText(outcomes: readonly ServerOutcome[]): string {
   const groups = [applied.length > 0 ? `Applied: ${applied.join("; ")}` : null, refused.length > 0 ? `Could not do: ${refused.join("; ")}` : null, suggested.length > 0 ? `Suggested, not applied: ${suggested.join("; ")}` : null].filter((g): g is string => g !== null);
   // Nothing to say.
   return groups.length === 0 ? "" : `[${groups.join(" | ")}]`;
+}
+
+/* S45 + S9k item 2 (Teja 2026-11-24 13:42, "very shit reply"): the chat reply the owner reads, in plain sentences.
+   "[Applied: Remove skill; Remove skill; …] Proposed 4 changes. See the list below." becomes "Done. Removed: LightGBM,
+   XGBoost (you typed 'cgboost'). Added to Tools: YAML Flows. <note> Resume still fits one page."
+   ALWAYS starts with exactly "Done." or "Nothing changed.": the web's isServerRecord recognises a stored reply by that
+   first word, so no branch below may put anything in front of it. */
+export function replyText(outcomes: readonly ServerOutcome[], note: string): string {
+  // The outcomes that landed.
+  const applied = outcomes.filter((o) => o.status === 'applied');
+  // The sentences, in the contract's order.
+  const sentences: string[] = [applied.length > 0 ? 'Done.' : 'Nothing changed.'];
+  // Applied removals, each by its printed name, the typed spelling echoed when it differed (op order kept).
+  const removed = applied.flatMap((o) => (o.subject?.verb === 'removed' ? [o.subject.typed === undefined ? o.subject.name : `${o.subject.name} (you typed '${o.subject.typed}')`] : []));
+  // One sentence for all of them.
+  if (removed.length > 0) sentences.push(`Removed: ${removed.join(', ')}.`);
+  // Applied adds by the group they landed in, groups in first-seen order ('' = no group known).
+  const added = new Map<string, string[]>();
+  // Each add into its group's list.
+  for (const o of applied) if (o.subject?.verb === 'added') added.set(o.subject.group ?? '', [...(added.get(o.subject.group ?? '') ?? []), o.subject.name]);
+  // One sentence per group, naming the group so a skill filed somewhere unexpected is visible.
+  for (const [group, names] of added) sentences.push(`${group === '' ? 'Added' : `Added to ${group}`}: ${names.join(', ')}.`);
+  // Applied outcomes with no subject (moves, edits, titles): their labels.
+  const other = applied.filter((o) => o.subject === undefined).map((o) => o.label);
+  // One sentence.
+  if (other.length > 0) sentences.push(`Also: ${other.join('; ')}.`);
+  // Refused, each with its reason.
+  const refused = outcomes.flatMap((o) => (o.status === 'refused' ? [`${o.label} (${o.why})`] : []));
+  // One sentence.
+  if (refused.length > 0) sentences.push(`Could not do: ${refused.join('; ')}.`);
+  // Held back as text, each with its reason.
+  const suggested = outcomes.flatMap((o) => (o.status === 'suggested' ? [`${o.label} (${o.why})`] : []));
+  // One sentence.
+  if (suggested.length > 0) sentences.push(`Suggested, not applied: ${suggested.join('; ')}.`);
+  // The AI's honest note plus the shortfall sentences, when there is one.
+  if (note.trim() !== '') sentences.push(note.trim());
+  /* True by construction: an outcome is 'applied' only after the end-state one-page fit accepted it (planServerEdits
+     turns every applied into refused when fitEditToOnePage fails; attestSkill and attestBullet fit before they write). */
+  if (applied.length > 0) sentences.push('Resume still fits one page.');
+  // One line; the caller caps it at the table's 2000 characters.
+  return sentences.join(' ');
 }

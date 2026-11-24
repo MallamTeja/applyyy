@@ -1,6 +1,6 @@
 /* S9i P2 + S9j, end to end in a real browser (orch round 2, 2026-11-23): Teja ruled every chat edit is applied
  * SERVER-side with no Apply button (15:34). The unit suites prove the reader and the server; this proves the panel:
- *   1. an answer carrying `applied` renders as ONE reply that leads with the outcome list ("Applied: …", and a
+ *   1. an answer carrying `applied` renders as ONE reply that leads with the outcome list (S45 replyText: "Done. Removed: …", and a
  *      refused op WITH its reason), shows NO Apply / Apply all / Retry button, writes the bubble itself when the
  *      server did not (chat_saved false), and re-reads the row the server wrote, so the preview shows the change;
  *   2. a S9j place-move ("projects first") applied by the server shows as applied: the preview's headings change
@@ -21,6 +21,8 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { chromium, type Browser, type BrowserContext, type FrameLocator, type Locator, type Page } from 'playwright';
 // The live row's three jsonb values, anonymised (the same fixture aiEditE2e drives).
 import { MASTER_V2, STORED_TAILORED_PROFILE, TAILOR_REFS } from './fixtures/gitlab-row-anonymised.ts';
+// S45: the server's reply builder (chatRows stores its output), used by the fake server below instead of a hand copy.
+import { replyText, type ServerOutcome } from '../../../supabase/functions/_shared/resume-edit/server-plan.ts';
 // The shared browser-test harness: dist guard, static SPA server, fake session.
 import { assertDistIsTestable, seedSession, startDistServer } from './support/e2eDist.ts';
 
@@ -68,7 +70,7 @@ const ANSWERS: { prompt: string; write: (resume: Resume) => void; body: Record<s
     // The server's save: the skill gone.
     write: (resume) => { resume.skills = resume.skills.filter((s) => s.name !== REMOVED_SKILL); },
     // chat_saved false: the page must write the bubble itself.
-    body: { status: 'ok', ops: [{ op: 'remove_skill', name: REMOVED_SKILL }], dropped: 0, rejected: [], note: 'Removed it.', usage: {}, applied: [{ status: 'applied', label: `Remove skill "${REMOVED_SKILL}"` }, { status: 'refused', ...REFUSED }], chat_saved: false },
+    body: { status: 'ok', ops: [{ op: 'remove_skill', name: REMOVED_SKILL }], dropped: 0, rejected: [], note: 'Removed it.', usage: {}, applied: [{ status: 'applied', label: `Remove skill "${REMOVED_SKILL}"`, subject: { verb: 'removed', name: REMOVED_SKILL } }, { status: 'refused', ...REFUSED }], chat_saved: false },
   },
   {
     // S9j: an absolute place.
@@ -155,8 +157,8 @@ describe('S9i P2: a server-applied chat answer in the browser (2026-11-23)', () 
         ROW.updated_at = `2026-11-23T00:00:0${assistBodies.length}.000000+00:00`;
         // The bubble the server wrote when it says so (index.ts saveChat), visible to a later history load.
         if (answer.body.chat_saved === true) {
-          // The two rows chatRows() writes: the ask, then the record-led answer with no cards.
-          const record = `[${(answer.body.applied as { label: string }[]).map((o) => `Applied: ${o.label}`).join(' | ')}]`;
+          // The two rows chatRows() writes: the ask, then the answer with no cards. S45: built by the server's own replyText, so this double cannot drift from it.
+          const record = replyText(answer.body.applied as readonly ServerOutcome[], '');
           // Stored with ids and times, as the table would (after the page's own rows from turn 1).
           chats.push(...[{ role: 'user', content: answer.prompt, ops: null }, { role: 'assistant', content: record, ops: [] }].map((m, i) => ({ ...m, id: 900 + chats.length + i, application_id: APP_ID, chat_id: assistBodies.at(-1)?.chat_id, usage: null, created_at: `2026-11-23T02:00:0${i}.000Z` })));
         }
@@ -296,7 +298,7 @@ describe('S9i P2: a server-applied chat answer in the browser (2026-11-23)', () 
     const mentionsBefore = await mentions(frame);
     // Asked.
     // The bubble must show what landed, by the server's label (a hidden record times out here, by name).
-    const { chat, reply: bubble } = await ask(ANSWERS[0]!.prompt, `Applied: Remove skill "${REMOVED_SKILL}"`);
+    const { chat, reply: bubble } = await ask(ANSWERS[0]!.prompt, `Removed: ${REMOVED_SKILL}`);
     // The ask turned server apply on, for this row.
     assert.deepEqual([assistBodies[0]?.server_apply, assistBodies[0]?.application_id], [true, APP_ID], 'the page must ask the server to apply, naming this row');
     // The reply bubble's text.
@@ -335,7 +337,7 @@ describe('S9i P2: a server-applied chat answer in the browser (2026-11-23)', () 
     const insertsBefore = pageChatInserts.length;
     // Asked.
     // The reply names the place-move as applied, by the server's label (re-read from the stored history).
-    const { chat, reply: bubble } = await ask(ANSWERS[1]!.prompt, 'Applied: Move section projects to 1st');
+    const { chat, reply: bubble } = await ask(ANSWERS[1]!.prompt, 'Also: Move section projects to 1st');
     // Its text.
     const reply = (await bubble.innerText()).replace(/\s+/g, ' ');
     // The server saved it, so the page must not claim otherwise (local copies with no id used to say this).

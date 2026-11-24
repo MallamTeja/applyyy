@@ -36,7 +36,15 @@ const STAMP = '2026-11-05T00:00:00.000000+00:00';
 /* The stored resume with its first experience bullet rewritten by `edit`: an operator's own typing. */
 function editedResume(edit: (text: string) => string): Record<string, unknown> {
   // A deep copy, so the two rows never share an object.
-  const resume = structuredClone(STORED_TAILORED_PROFILE) as { experience: { bullets: { text: string }[] }[] };
+  const resume = structuredClone(STORED_TAILORED_PROFILE) as { summary: string; experience: { bullets: { text: string }[] }[] };
+  /* Since S34 (2026-11-24) the approve re-check grounds the SUMMARY too, and this v2-era summary says "Software
+     engineer", "architectures", "practical": words master v2 never states, so the row is honestly held. These
+     rows test the BULLET edit, so the three words become master wording first; the shared fixture stays as stored. */
+  const grounded = resume.summary.replace('Software engineer', 'Full Stack AI Engineer').replace('containerized architectures', 'containerized services').replace('practical integration', 'integration');
+  // Each phrase must have been there, or the fixture moved and this rewrite silently did nothing.
+  assert.equal(grounded.length, resume.summary.length - 'Software engineer'.length + 'Full Stack AI Engineer'.length - 'architectures'.length + 'services'.length - 'practical '.length, 'fixture summary changed: update the S34 rewrite');
+  // The grounded summary the two rows share.
+  resume.summary = grounded;
   // The bullet the edit lands on; the fixture has one, or the rows prove nothing.
   const bullet = resume.experience[0]?.bullets[0];
   // Said by name rather than a TypeError deep in the browser.

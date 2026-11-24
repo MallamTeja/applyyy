@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 // The runner.
 import { describe, it } from "node:test";
 // The module under test.
-import { planServerEdits } from "./server-plan.ts";
+import { planServerEdits, replyText } from "./server-plan.ts";
 // A real one-page resume (the page-fit suites' fixture).
 import { zomatoBackendIntern } from "../../../../packages/resume-template/test/fixtures/zomato-backend-intern.ts";
 // Types only.
@@ -62,5 +62,53 @@ describe("planServerEdits move_skill_to (2026-11-23)", () => {
     assert.equal(out.resume?.skills[0]?.ref, "skl_python");
     // The new event kind, naming the skill's ref.
     assert.deepEqual(out.steps.map((s) => [s.kind, s.ref]), [["resume_move_skill", "skl_python"]]);
+  });
+});
+
+// S45 + S9k item 2 (Teja 2026-11-24 13:42, "very shit reply"): the readable reply, in the contract's sentence order.
+describe("replyText (S45)", () => {
+  it("orders: Done, removals (typed echoed), adds per group in first-seen order, other labels, refusals, suggestions, note, one-page line", () => {
+    // One of each kind, deliberately interleaved so the order below is the function's, not the input's.
+    const out = replyText([
+      // An add to Tools.
+      { status: "applied", label: 'Add skill "YAML Flows" under Tools', subject: { verb: "added", name: "YAML Flows", group: "Tools" } },
+      // A removal matched by a typo.
+      { status: "applied", label: 'Remove skill "XGBoost"', subject: { verb: "removed", name: "XGBoost", typed: "cgboost" } },
+      // A move: no subject.
+      { status: "applied", label: "Move bullet to place 1" },
+      // An add to Languages: its own sentence.
+      { status: "applied", label: 'Add skill "Go" under Languages', subject: { verb: "added", name: "Go", group: "Languages" } },
+      // A second Tools add joins the first Tools sentence.
+      { status: "applied", label: 'Add skill "Git" under Tools', subject: { verb: "added", name: "Git", group: "Tools" } },
+      // An exact removal.
+      { status: "applied", label: 'Remove skill "C#"', subject: { verb: "removed", name: "C#" } },
+      // A refusal.
+      { status: "refused", label: "Move section skills", why: "already first" },
+      // A suggestion.
+      { status: "suggested", label: "Edit bullet", why: "uses 900" },
+    ], "Note here.");
+    // Exactly the contract's sentences, joined by one space.
+    assert.equal(out, "Done. Removed: XGBoost (you typed 'cgboost'), C#. Added to Tools: YAML Flows, Git. Added to Languages: Go. Also: Move bullet to place 1. Could not do: Move section skills (already first). Suggested, not applied: Edit bullet (uses 900). Note here. Resume still fits one page.");
+  });
+
+  it("nothing applied: 'Nothing changed.' first and no one-page line; empty everything is 'Nothing changed.' alone", () => {
+    // Only a refusal (even a skill one: a refused subject is not listed as removed).
+    assert.equal(replyText([{ status: "refused", label: 'Remove skill "Go"', why: "x", subject: { verb: "removed", name: "Go" } }], ""), 'Nothing changed. Could not do: Remove skill "Go" (x).');
+    // No outcomes, no note.
+    assert.equal(replyText([], "  "), "Nothing changed.");
+    // An add with no group known.
+    assert.equal(replyText([{ status: "applied", label: "a", subject: { verb: "added", name: "Kafka" } }], ""), "Done. Added: Kafka. Resume still fits one page.");
+  });
+});
+
+describe("planServerEdits subjects (S45)", () => {
+  it("a skill removal carries its printed name (and the typed spelling) on its outcome; a move carries none", () => {
+    // Python off by ref, typed with a typo; a bullet moved.
+    const out = plan([
+      { action: { kind: "remove_skill", ref: "skl_python", name: "Python", typed: "pyhton" }, label: 'Remove skill "Python"' },
+      { action: { kind: "move_bullet_to", ref: "bul_auth", place: 1 }, label: "Move bullet to place 1" },
+    ]);
+    // The subject rides on the applied outcome; the move has none.
+    assert.deepEqual(out.outcomes, [{ status: "applied", label: 'Remove skill "Python"', subject: { verb: "removed", name: "Python", typed: "pyhton" } }, { status: "applied", label: "Move bullet to place 1" }]);
   });
 });

@@ -1062,19 +1062,21 @@ test("a past-tense claim with no 'I' is dropped from the note, like a first-pers
 
 // A reply the filter emptied (or the model left empty) must still say what the answer holds, or the panel
 // shows a blank chat bubble above its change list.
-test("an empty note gets a one-line summary of the surviving ops, or says nothing was proposed", () => {
+// S45 (2026-11-24): the "Proposed N changes. See the list below." count was the browser-applied branch, dead since the web
+// always asks for server apply; the reply (replyText) now says what landed, so a surviving op leaves the note empty.
+test("an empty note stays empty when ops survive (no dead 'Proposed N'), or says nothing was proposed", () => {
   // One surviving op, model note empty.
   const one = parseAssistOps(JSON.stringify({ ops: [{ op: "edit", id: "b0", text: "Built a billing API serving 500 users with p95 under 80 ms." }], note: "" }), request());
   // Valid.
   assert.ok(one.ok);
-  // Counted in words, pointing at the list that carries the detail.
-  assert.equal(one.note, "Proposed 1 change. See the list below.");
+  // Nothing added: the reply's own sentences carry the detail.
+  assert.equal(one.note, "");
   // A claim-only note on two surviving ops reads the same way, plural.
   const two = parseAssistOps(JSON.stringify({ ops: [{ op: "remove", id: "b0" }, { op: "add_skill", name: "Kafka", category: "Tools" }], note: "Added Kafka and removed b0." }), request());
   // Valid.
   assert.ok(two.ok);
-  // Plural, and the claim is not echoed.
-  assert.equal(two.note, "Proposed 2 changes. See the list below.");
+  // Empty too, and the claim is not echoed.
+  assert.equal(two.note, "");
   // No ops, no failures, no text: said, not blank.
   const none = parseAssistOps(JSON.stringify({ ops: [], note: "" }), request());
   // Valid.
@@ -1761,7 +1763,8 @@ test("S9e: an add_group for more skills than the master holds says so in the not
   // All five proposed.
   assert.equal(parsed.ops.length, 5);
   // RED before the fix: the note was the bare count. Now it names the shortfall's cause.
-  assert.match(parsed.note, /Your master has only 5 more Tools skills to add\./);
+  // S45 wording: how many the master had and how many of the count did not land.
+  assert.match(parsed.note, /Only 5 more Tools skills are in your master, so 1 of the 6 wasn't added\./);
 });
 
 test("S9e: past the per-group limit, the note names the limit; when the count is met there is no shortfall note", () => {
@@ -1955,7 +1958,8 @@ test("S9i P2: a closed tab still finds the bubble: the server writes the exchang
   // The ask, then the answer led by what landed and what did not.
   assert.deepEqual(written.map((r) => [(r as { role: string }).role, (r as { content: string }).content, (r as { ops: unknown }).ops]), [
     ["user", "drop the first point", null],
-    ["assistant", "[Applied: Remove bullet | Could not do: Move section (already first)] Dropped one.", []],
+    // S45: the readable reply (replyText), led by "Done." and closed by the one-page line.
+    ["assistant", "Done. Also: Remove bullet. Could not do: Move section (already first). Dropped one. Resume still fits one page.", []],
   ]);
 });
 
@@ -2037,16 +2041,16 @@ test("S9k: a group that already fits is told so, never a silent no-op", () => {
 test("S9k live 942: a server-applied answer never says 'Proposed 2 changes. See the list below.'", () => {
   // The live ask and the model's two removals, with no note of its own.
   const ops = [{ op: "remove_skill", name: "Tool Calling" }, { op: "remove_skill", name: "Guardrails" }];
-  // Server-applied: the outcome line ("[Applied: ...]") is the reply, so the note adds nothing.
+  // Server-applied: the reply (replyText, S45: "Done. Removed: …") says what landed, so the note adds nothing.
   const served = parsedOps(ops, liveRequest("rm tool calling gurad rails"));
   // Both kept.
   assert.equal(served.ops.length, 2);
   // No stale browser-era wording.
   assert.equal(served.note, "");
-  // A browser-applied page still gets the count of its cards.
+  // S45: the browser-applied count is gone too (that branch was dead in prod), so no page ever gets it.
   const browser = parsedOps(ops, { ...liveRequest("rm tool calling gurad rails"), serverApply: false });
-  // Unchanged there.
-  assert.equal(browser.note, "Proposed 2 changes. See the list below.");
+  // Empty there as well.
+  assert.equal(browser.note, "");
 });
 
 test("S9k live 944/946: 'put harnes rng at frist place' in the AI group is a move_skill, never 'a bullet it was not shown'", () => {

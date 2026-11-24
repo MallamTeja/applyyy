@@ -3,7 +3,7 @@
 // WHY: the column defaults to 0, so an agent that calls Gemini but never writes it reports "0 calls"
 // on every run. That fail-open (CLAUDE.md §6) hid the tailor's quota spend on all 203 runs since
 // 2026-11-01, and scout-web had the same gap. Each was a per-agent omission in its own run-close
-// write; the shared loop (loop.ts) has no production users. So the guard is a sweep over every
+// write; the shared loop (loop.ts) never had production users and was deleted 2026-11-24 (S44a). So the guard is a sweep over every
 // function directory: if its code reaches generateGeminiContent and it writes agent_runs, it must
 // also write gemini_calls. A new agent that forgets fails here before it ships.
 // Source-level on purpose: every index.ts calls Deno.serve on import, so none can be run here.

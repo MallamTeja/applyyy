@@ -33,38 +33,34 @@
  *      skill with its group, and can remove a skill or a whole entry: both through the save path's
  *      existing remove_skill / remove_entry actions, so still no new write path.
  *
+ * S44a (2026-11-24, Teja: "rm The old Apply / 'Apply all' cards in resume chat"). The server applies every answer
+ * (withServerApply), so the browser-side apply helpers went: the auto-apply rule, the card hold reasons, the op-to-action
+ * map, the swap pairing and the batch run. Older notes above that mention an
+ * Apply click describe the pre-S44a page; resolveOps and isApplied stay, for stored chats and the outcome history.
+ *
  * Pure apart from the injected client, so node --test drives it with a fake. */
 
-// Types only: the diff the page renders, the printed-skill record its skills line carries, and the
-// action vocabulary the save path understands.
+// Types only: the diff the page renders and the printed-skill record its skills line carries.
+// (S44a, 2026-11-24: the EditAction / EditResult imports went with the op-to-action map and the batch run.)
 import type { PrintedSkill, ResumeDiff } from './diffModel';
-// Type-only import from the view: the action union is declared there, beside the controls.
-import type { EditAction } from './DiffView';
-// Type only (T10): the save result a batch run reads, the same union every page save answers.
-import type { EditResult } from './DiffView';
 /* Types only from the core edits: section names, directions, and the shape of a master item not on
    the resume. Type-only so this file never runs W1's code, only compiles against its names. */
 import type { AddableBullet, AddableEntry, BulletSection, MoveDirection, SectionKind } from './tailoredEdits';
 /* The auditor's own rule 5 and tokenizer, imported by relative path (as diffAdapter.ts imports
    jd-keywords) so the advice shown before Apply is the audit's definition, never a copy. */
 import { bulletGroundingGaps, tokenizeText } from '../../../../../supabase/functions/_shared/audit/detector.ts';
-// "Did the owner name this?", the server's own matcher (resume-assist reads names the same way), 2026-11-21.
-import { namedIn } from '../../../../../supabase/functions/_shared/text/name-match.ts';
-// S9d: the exact stale-row message the shared save returns, so the retry matches it by identity, never a copied string.
-import { SAVE_MESSAGES } from './saveTailoredEdit.ts';
 /* S9i P2: the server's apply report type and its one wording, from the shared planner the server itself uses, so the
    panel prints exactly the record the server wrote into the chat. Re-exported for the panel. */
-import { outcomeText, type ServerOutcome } from '../../../../../supabase/functions/_shared/resume-edit/server-plan.ts';
-// Same.
-export { outcomeText, type ServerOutcome };
+import { outcomeText, replyText, type OutcomeSubject, type ServerOutcome } from '../../../../../supabase/functions/_shared/resume-edit/server-plan.ts';
+/* Same. S45 (Teja 13:42, "very shit reply"): replyText is the readable sentence run ("Done. Removed: … Resume still fits
+   one page.") the server stores; the panel uses it too when it writes the exchange itself, so both bubbles read alike. */
+export { outcomeText, replyText, type ServerOutcome };
 /* The closed list of section names, shared with the tailor's schema and the edge function, so a
    stored op naming a section is checked against the same seven words everywhere. */
 import { TAILOR_SECTION_KINDS } from '../../../../../supabase/functions/_shared/tailor/prompt.ts';
 /* The tailor's own keyword matcher (page-trim.ts ranks bullets with it), so "most job-relevant" here
    means exactly what it means when the page fit decides which bullet to cut. Never a copy. */
 import { keywordAppearsIn } from '../../../../../supabase/functions/_shared/tailor/jd-keywords.ts';
-// T10: the content rules' entry counts, so a swap pairs only where a rule caps the count (one home for the number).
-import { PAGE_FIT_FLOORS } from '../../../../../supabase/functions/_shared/tailor/page-trim.ts';
 /* The one edge call that refreshes once and retries once on a revoked session (2026-11-07), so the chat
    never shows the raw `invalid_session` code. */
 // Plus its streaming twin and the client-to-target read it needs (2026-11-18, live progress in the chat).
@@ -238,10 +234,28 @@ export type AssistResult =
 function readOutcome(value: unknown): ServerOutcome | null {
   // An object with a label.
   if (!isRecord(value) || typeof value.label !== 'string') return null;
+  /* S45: the optional subject (what skill, under which group, what the owner typed). Absent stays absent; present must be
+     well-formed, or the whole answer is refused like any other drifted outcome (a half-read subject could misname a skill). */
+  const subject = value.subject === undefined ? undefined : readSubject(value.subject);
+  // Present but malformed.
+  if (subject === null) return null;
+  // Spread only when present, so an outcome from an older server reads exactly as before (no `subject: undefined` key).
+  const extra = subject === undefined ? {} : { subject };
   // Applied needs nothing else.
-  if (value.status === 'applied') return { status: 'applied', label: value.label };
+  if (value.status === 'applied') return { status: 'applied', label: value.label, ...extra };
   // The other two carry why.
-  return (value.status === 'refused' || value.status === 'suggested') && typeof value.why === 'string' ? { status: value.status, label: value.label, why: value.why } : null;
+  return (value.status === 'refused' || value.status === 'suggested') && typeof value.why === 'string' ? { status: value.status, label: value.label, why: value.why, ...extra } : null;
+}
+
+/* S45: one outcome's subject, or null when its shape is wrong. The verb is a closed pair and the name must be non-empty
+   (CLAUDE.md §6: an empty name would print "Removed: ." as if a skill had gone). group and typed are optional strings. */
+function readSubject(value: unknown): OutcomeSubject | null {
+  // An object with a known verb and a real name.
+  if (!isRecord(value) || (value.verb !== 'removed' && value.verb !== 'added') || typeof value.name !== 'string' || value.name.trim() === '') return null;
+  // Each optional field, when present, must be a string.
+  if ((value.group !== undefined && typeof value.group !== 'string') || (value.typed !== undefined && typeof value.typed !== 'string')) return null;
+  // Rebuilt field by field, so nothing the wire added rides along, and absent fields stay absent.
+  return { verb: value.verb, name: value.name, ...(value.group === undefined ? {} : { group: value.group }), ...(value.typed === undefined ? {} : { typed: value.typed }) };
 }
 
 /* The request plus the map that turns the answer's ids back into this resume's targets. */
@@ -630,8 +644,8 @@ export function auditAdvice(op: AssistOp, draft: AssistDraft): AuditAdvice | nul
   // No master text means no comparison; never reported as clean.
   if (master === undefined || master === null) return { kind: 'not_checked', why: 'No master bullet to compare against.' };
   /* Rule 5, the auditor's own function. Since 2026-11-04 its verdict also decides whether the edit
-     applies without a click (shouldAutoApply), so it FAILS CLOSED: a throw or an answer of the wrong
-     shape is "not checked", which holds the edit, never a clean pass. */
+     applied without a click (the browser auto-apply rule, removed in S44a 2026-11-24), so it FAILS CLOSED:
+     a throw or an answer of the wrong shape is "not checked", never a clean pass. */
   let gaps: unknown;
   // The call itself may throw on input it was never written for.
   try {
@@ -651,34 +665,6 @@ export function auditAdvice(op: AssistOp, draft: AssistDraft): AuditAdvice | nul
 function isStringList(value: unknown): value is readonly string[] {
   // Every entry checked; one non-string makes the list unreadable.
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
-}
-
-/* Rule 5 found nothing the master lacks (2026-11-04): the ONLY advice that lets an edit apply
-   without a click. Read defensively, because stored rows and old answers reach it too. */
-function isGrounded(advice: AuditAdvice | null): boolean {
-  // Checked, both lists real and empty; anything else (null, not_checked, a drifted shape) is not.
-  return advice !== null && advice.kind === 'checked' && isStringList(advice.metrics) && isStringList(advice.terms) && advice.metrics.length === 0 && advice.terms.length === 0;
-}
-
-/* Why a card waits for the operator's click, when the reason is not already on the card; null when it
-   applies by itself or its body already says why (a new bullet, a skill the master lacks). */
-export function holdReason(op: StoredOp): string | null {
-  // A text edit the audit did not pass.
-  if (op.op === 'edit' && !isGrounded(op.advice)) {
-    // Checked and flagged: the flags are listed above this line.
-    return op.advice?.kind === 'checked'
-      ? 'Waiting for your click: the audit found words or numbers your master profile does not have.'
-      : 'Waiting for your click: the audit cannot check this edit, so it never applies by itself.';
-  }
-  // A whole entry off: always the operator's call.
-  if (op.op === 'remove_entry') return 'Waiting for your click: removing a whole entry always needs your OK.';
-  // A job title is a claim an employer can verify: always the owner's click (2026-11-11).
-  if (op.op === 'set_role') return 'Waiting for your click: a job title change always needs your OK.';
-  /* A skill new to the master (2026-11-05): said, because a skill the operator named used to apply by
-     itself, and a card that now waits would otherwise read as "did nothing". */
-  if (op.op === 'add_skill' && !op.inMaster) return 'Waiting for your click: your message did not name this skill, and one new to your master profile applies by itself only when you name it (S9g). Check its group first.';
-  // Nothing to add.
-  return null;
 }
 
 /* A proposed edit as the chat STORES it (2026-11-01): short ids resolved to this resume's real
@@ -722,10 +708,6 @@ export type StoredOp =
   /* A change that cannot land (2026-11-04): refused by the server or unresolvable here. Stored like
      any card so a reloaded chat still says what was NOT done and why; it has no action at all. */
   | ({ readonly op: 'rejected' } & Rejection);
-
-/* Every stored op that a click can apply: all but a rejected card. toEditAction takes only these, so
-   an Apply button on a rejected card does not typecheck. */
-export type ApplicableOp = Exclude<StoredOp, { readonly op: 'rejected' }>;
 
 /* A display name for a section key ("projects" -> "Projects"); the keys are single lower-case words. Exported so the chat panel spells sections the same way. */
 export function sectionTitle(section: string): string {
@@ -923,285 +905,6 @@ function resolveOne(op: AssistOp, draft: AssistDraft, lists: string[][], section
   return op.op === 'edit'
     ? { op: 'edit', target: { kind: 'bullet', ref }, before, text: op.text, advice: auditAdvice(op, draft) }
     : { op: 'remove', ref, before };
-}
-
-/* Whether the chat applies this op by itself, right after the answer (Teja, 2026-11-01: "my ai
-   need to perform the actions"). Edits: only when rule 5 finds them grounded (2026-11-04, see the
-   edit line below). Removals: yes; they change only this resume, the row
-   still needs Approve, and every edited line keeps its Reset in the diff. A skill ON: only when the
-   master already has it (2026-11-05). Otherwise applying writes a new claim, under the AI's chosen
-   group, into the master profile that every future resume inherits. Naming the skill vouches for the
-   skill, not for that group (master v14 got "Testing" and "Code review" filed under "AI"), so the card
-   waits for the operator to check the group and click. A skill OFF: only when the operator NAMED it,
-   matched by whole tokens, so "os" in "remove os" counts but "os" inside "cost" does not.
-   STRUCTURE (2026-11-01): moves and add-backs apply by themselves, since they only reorder or reuse
-   true master text. A new bullet never does: applying it writes a new claim into the master, the
-   same reason as an unnamed skill, so its card always waits for a click. */
-export function shouldAutoApply(op: StoredOp, instruction: string): boolean {
-  // A rejected card has nothing to apply.
-  if (op.op === 'rejected') return false;
-  // A new claim in the master is the operator's call, every time.
-  if (op.op === 'new_bullet') return false;
-  /* A whole entry off is the biggest change one op can make, and since 2026-11-04 the untrusted JD is in the prompt,
-     so a posting could ask for it (review finding). Since Teja's ruling (2026-11-21 14:36, "if i say rm something ...
-     it need to directly remove") it applies by itself ONLY when the owner named the entry by its whole name (the part
-     before " · ", typo-tolerant, the server's own matcher); a partial or unnamed one still waits for the click. A swap
-     half is held back separately (isPairedHalf in the panel). */
-  if (op.op === 'remove_entry') return namedIn(op.label.split(' · ')[0] ?? '', [instruction]);
-  // A job title is a claim an employer verifies (2026-11-11): always the operator's click.
-  if (op.op === 'set_role') return false;
-  /* A text edit applies by itself only when rule 5 found it grounded (Teja, 2026-11-04, "Audit-gated").
-     The untrusted JD is in the prompt, so a posting can steer the wording; an injected claim almost
-     always carries words the master lacks, which rule 5 names. Summary edits have no rule 5 and wait. */
-  if (op.op === 'edit') return isGrounded(op.advice);
-  /* Bullet removals, moves and add-backs insert no text that is not the master's own, and are
-     resume-only and reversible: Reset on the line brings the tailor's version back. */
-  if (op.op !== 'add_skill' && op.op !== 'remove_skill') return true;
-  /* A skill on: only a master claim, which attest reuses with the master's own group. A new one
-     waits even when named (2026-11-05): the group it would land under is the AI's pick. */
-  /* S9g, Teja 2026-11-21 15:11: "if i say once add it need to add without need of my click or confirmation even though it
-     is not there in my resume". A master skill lands as before; a skill new to the master lands too when HIS message
-     names it (the shared matcher, as for removals), so it is dictated, not invented. An AI-picked new skill still waits. */
-  if (op.op === 'add_skill') return op.inMaster || namedIn(op.name, [instruction]);
-  /* A skill off (2026-11-04, the JD reason above): only when the operator named it; "remove the
-     duplicate testing" names Testing, "trim my skills" names none. */
-  /* Named by the server's own matcher (2026-11-21): runs of 1-4 words, compacted, one typo on 6+ letters, two on 8+,
-     short names exact. Before, every word had to be typed exactly, so Teja's "rm  vs cod e" (which the server already
-     read as VS Code) left the card waiting. Same answer on both sides now; an empty name is never named. */
-  return namedIn(op.name, [instruction]);
-}
-
-/* The page action a stored op becomes on Apply. A switch over the closed union: a new StoredOp arm
-   without an action here fails typecheck (the function would not return on every path). Takes only
-   ApplicableOp, so a rejected card can never be turned into a save. */
-export function toEditAction(stored: ApplicableOp): EditAction {
-  // One case per stored shape.
-  switch (stored.op) {
-    /* A skill always goes through the attest path: it reuses the master's own node when the latest
-       master already has the skill, and otherwise records the operator's vouch as a new master
-       version first. Either way the printed skill traces to the master, which the auditor demands. */
-    case 'add_skill':
-      // The owner's "all" travels to the save as wrap: 'allow'; otherwise the save refuses a wrap.
-      return stored.allowWrap === true ? { kind: 'attest_skill', keyword: stored.name, category: stored.category, wrap: 'allow' } : { kind: 'attest_skill', keyword: stored.name, category: stored.category };
-    // New text on its resolved target.
-    case 'edit':
-      return { kind: 'edit', target: stored.target, text: stored.text };
-    // The bullet dropped.
-    case 'remove':
-      return { kind: 'remove', target: { kind: 'bullet', ref: stored.ref } };
-    // One place among its siblings; the save re-reads the order, so this is "one place from now".
-    case 'move':
-      return { kind: 'move_bullet', ref: stored.ref, direction: stored.direction };
-    // One place in section_order.
-    case 'move_section':
-      return { kind: 'move_section', section: stored.section, direction: stored.direction };
-    // A master bullet back, by ref; the save puts it under its own entry.
-    case 'add_bullet':
-      return { kind: 'add_master_bullet', ref: stored.ref };
-    // A master entry back, with all its bullets.
-    case 'add_entry':
-      return { kind: 'add_master_entry', section: stored.section, ref: stored.ref };
-    // New text: into the master first, then onto the resume by its new ref.
-    case 'new_bullet':
-      return { kind: 'attest_bullet', section: stored.section, parentRef: stored.parentRef, text: stored.text };
-    // The skill off, by master ref: the same action the skills row's own Remove makes.
-    case 'remove_skill':
-      return { kind: 'remove_skill', ref: stored.ref };
-    // The entry off, by section and ref: the same action the entry's own Remove makes.
-    case 'remove_entry':
-      return { kind: 'remove_entry', section: stored.section, ref: stored.ref };
-    // The job's title, by ref (2026-11-11).
-    case 'set_role':
-      return { kind: 'set_role', ref: stored.ref, role: stored.role };
-  }
-}
-
-/* T10 (2026-11-10): THE LINKED SWAP PAIR. A remove_entry of entry X and an add_entry (an add_back of a
-   master ENTRY) in the SAME section, in one answer, are one swap: "instead of One-on-One use F1 Race Pace".
-   Either half alone breaks the project count (1 < 2, or 3 > 2), so they are shown together and applied
-   together in one end-state-checked save (pageFitEdit.planBatch). DERIVED from the stored ops on every
-   read, never stored: StoredOp and readStoredOp stay exactly as they were, so a chat saved before this
-   pairs too on reload, and no wire or table changes. Greedy in answer order: each remove takes the first
-   unpaired add of its section, so "swap two for two" pairs one-to-one. Answers index -> partner index,
-   both ways.
-   Review fix (2026-11-10): ONLY in a section whose content rule CAPS the count (SWAP_CAPPED below), because
-   only there does a lone add break a rule. Elsewhere (certifications: a floor, no cap) each card applies
-   on its own, and linking would only make one click do two things nobody asked to join. */
-/* THE BULLET SWAP (2026-11-20, tailor pending #3): a bullet `remove` and a `new_bullet` under the SAME entry, in
-   one answer, are one swap too ("replace the invoice line with the CI/CD one"). Live BlackRock case: the remove
-   auto-applied alone and broke the Aczen floor ("exp_aczen: 3 bullets, needs 4"), and the new line, judged on
-   the untouched resume, ran past one page. Linked, they reach ONE save judged on the end state (the page folds
-   the remove into the attest: attestBullet.alsoRemove). Only new_bullet: a remove + add_bullet (a master line
-   back) are both pure, so they already auto-apply in one end-state batch; linking them would only stop that.
-   `parents` maps a printed bullet ref to its entry ref (bulletParents over the current structure). Absent, no
-   bullet pairs: a remove's parent cannot be known, so each card stays its own, exactly as before. */
-export function swapPartners(ops: readonly StoredOp[], parents?: ReadonlyMap<string, string>): ReadonlyMap<number, number> {
-  // Both directions, filled as pairs are found.
-  const partners = new Map<number, number>();
-  // Each bullet remove in order, when the page told us where its bullets sit.
-  if (parents !== undefined) ops.forEach((remove, i) => {
-    // Only a bullet removal starts a bullet swap.
-    if (remove.op !== 'remove') return;
-    // The entry that bullet is printed under; unknown (already gone) means no swap.
-    const entry = parents.get(remove.ref);
-    // Not printed now: nothing to pair.
-    if (entry === undefined) return;
-    // The first new line under that same entry not yet taken by an earlier remove.
-    const j = ops.findIndex((add, k) => add.op === 'new_bullet' && add.parentRef === entry && !partners.has(k));
-    // No new line there: the remove stands alone (and its refusal offers the swap).
-    if (j === -1) return;
-    // Linked one way.
-    partners.set(i, j);
-    // And back.
-    partners.set(j, i);
-  });
-  // Each remove_entry in order.
-  ops.forEach((remove, i) => {
-    // Only a whole-entry removal starts a swap, and only in a capped section.
-    if (remove.op !== 'remove_entry' || !(remove.section in SWAP_CAPPED)) return;
-    // The first add_entry of the same section not yet taken by an earlier remove.
-    const j = ops.findIndex((add, k) => add.op === 'add_entry' && add.section === remove.section && !partners.has(k));
-    // No add in this section: the remove stands alone.
-    if (j === -1) return;
-    // Linked one way.
-    partners.set(i, j);
-    // And back, so either card finds the other.
-    partners.set(j, i);
-  });
-  // The pairs.
-  return partners;
-}
-
-/* The sections whose entry COUNT a content rule caps, with the cap read from the rule's own floors
-   (page-trim.ts PAGE_FIT_FLOORS, which checkContentRules reads). A table, not derived: the rules are named
-   checks per field ("projects: 3, at most 2"), with no list of capped sections to read. Today only projects
-   has a cap; a new cap is one line here beside the floor it reads. */
-const SWAP_CAPPED: Readonly<Partial<Record<BulletSection, number>>> = {
-  // "never and ever 3 projects, only 2" (Teja, 2026-11-08): the cap the live swap bug hit.
-  projects: PAGE_FIT_FLOORS.maxProjects,
-};
-
-/* T10 review fix (2026-11-10): THE BATCH RUN, pure so it is tested without a page. Resume-only items go to
-   ONE atomic save (all or none); the attest items (they also write a master version) each run on their own
-   path AFTER it, one at a time. True all-or-none across a master insert and a row update is impossible from
-   the browser (no single DB transaction spans them), so a refused attest after a saved batch is NOT undone:
-   it is reported, never silent. A refused batch runs no attest at all. */
-export type BatchRun =
-  // Every item landed.
-  | { readonly kind: 'all_saved' }
-  // Nothing landed: the batch (or the only attest) was refused.
-  | { readonly kind: 'none_saved'; readonly reason: string }
-  // Some landed (`saved`), then `notSaved` was refused for `reason`; `notTried` attests after it never ran.
-  | { readonly kind: 'partial'; readonly saved: number; readonly notSaved: string; readonly reason: string; readonly notTried: number };
-
-/* Run a batch: the injected saves are the page's (the panel passes onEditBatch and its single save). */
-export async function runApplyBatch<T>(
-  // The items, in answer order.
-  items: readonly T[],
-  // Whether an item also writes the master (and so cannot be folded into the batch).
-  isAttest: (item: T) => boolean,
-  // How the report names an item.
-  label: (item: T) => string,
-  // The atomic save of every resume-only item.
-  saveBatch: (items: readonly T[]) => Promise<EditResult>,
-  // One attest's own guarded save.
-  saveOne: (item: T) => Promise<EditResult>,
-): Promise<BatchRun> {
-  // Resume-only items: folded into one save.
-  const pure = items.filter((item) => !isAttest(item));
-  // Master-writing items: after it.
-  const attests = items.filter(isAttest);
-  // How many landed so far.
-  let saved = 0;
-  // Only when there is something to fold.
-  if (pure.length > 0) {
-    // ONE save of the end state, retried once when the row moved under it (S9d, below).
-    const result = await onceMore(() => saveBatch(pure));
-    // Refused: nothing landed, and no attest runs on top of it.
-    if (!result.ok) return { kind: 'none_saved', reason: result.reason };
-    // All of them landed together.
-    saved = pure.length;
-  }
-  // The attests in order; the first refusal stops the run, after one retry when the row had moved (S9d).
-  for (const [i, item] of attests.entries()) {
-    // Its own save.
-    const result = await onceMore(() => saveOne(item));
-    // Landed: count it.
-    if (result.ok) { saved += 1; continue; }
-    // Refused with nothing before it: nothing landed at all.
-    if (saved === 0) return { kind: 'none_saved', reason: result.reason };
-    // Refused after something landed: say both, and how many were never tried.
-    return { kind: 'partial', saved, notSaved: label(item), reason: result.reason, notTried: attests.length - i - 1 };
-  }
-  // Everything landed.
-  return { kind: 'all_saved' };
-}
-
-/* S9d (2026-11-21, live BA4 msg 823: "rm vector search" got the right op but never saved). A save refused because the
-   row changed under it says exactly SAVE_MESSAGES.changedShown, and by then the page has ADOPTED the newer row (its
-   stamp lives in a ref, latestSources), so the same edit can simply be tried again. Once: a second stale refusal means
-   something keeps writing the row, and the owner should see that rather than a loop. Every other refusal is final. */
-async function onceMore(save: () => Promise<EditResult>): Promise<EditResult> {
-  // The first try.
-  const first = await save();
-  // Anything but the reloaded-stale refusal is the answer.
-  return !first.ok && first.reason === SAVE_MESSAGES.changedShown ? save() : first;
-}
-
-/* The one line a batch run puts above the composer, or null when everything landed. */
-export function batchRunLine(run: BatchRun): string | null {
-  // Nothing to say.
-  if (run.kind === 'all_saved') return null;
-  // Nothing landed, in the save's own words.
-  if (run.kind === 'none_saved') return `Not applied: ${run.reason}`;
-  // What landed, what did not and why, and what never ran: a partial save is never silent.
-  return `Saved ${run.saved} change${run.saved === 1 ? '' : 's'}; not saved: ${run.notSaved} — ${run.reason}.${run.notTried > 0 ? ` ${run.notTried} more not tried.` : ''}`;
-}
-
-/* A short name for a card in a batch report. Only the attest kinds reach the report today, but every arm
-   answers, so a new caller never prints "undefined". */
-export function opLabel(op: ApplicableOp): string {
-  // A skill: by name.
-  if (op.op === 'add_skill') return `add skill "${op.name}"`;
-  // A new bullet: by its entry.
-  if (op.op === 'new_bullet') return `new bullet under "${op.parentLabel}"`;
-  // Anything else: its kind, readable.
-  return op.op.replace(/_/g, ' ');
-}
-
-/* Which ops one card's Apply takes, as answer indices in answer order. A half whose partner is NOT on the
-   resume yet takes the partner with it: applying it alone would be refused, or worse, would leave the
-   resume a project short until the second click. A half whose partner already landed (applied earlier,
-   or by hand) is an ordinary single op again. `applied` is injected (the panel passes isApplied over its
-   diff), so this stays pure and testable. */
-export function applyTogether(ops: readonly StoredOp[], index: number, applied: (op: StoredOp) => boolean, parents?: ReadonlyMap<string, string>): number[] {
-  // This card's partner, if it has one (a bullet swap needs `parents`; see swapPartners).
-  const partner = swapPartners(ops, parents).get(index);
-  // Unpaired, or the partner is already on the resume: this card alone.
-  if (partner === undefined || applied(ops[partner]!)) return [index];
-  // Both, in the order the AI answered them (the order the batch folds them in).
-  return [index, partner].sort((a, b) => a - b);
-}
-
-/* Whether this op is one half of a swap: the chat never auto-applies such a half by itself (an add_back
-   would otherwise land alone and be refused on the project cap), and its card says it goes with its partner. */
-export function isPairedHalf(ops: readonly StoredOp[], index: number, parents?: ReadonlyMap<string, string>): boolean {
-  // Any partner at all (a bullet swap needs `parents`; see swapPartners).
-  return swapPartners(ops, parents).has(index);
-}
-
-/* Printed bullet ref -> its entry ref, read from the current resume's structure: what swapPartners needs to
-   link a bullet remove with a new line under the same entry. Empty without a structure (nothing pairs). */
-export function bulletParents(structure: AssistStructure | null): ReadonlyMap<string, string> {
-  // Filled from every entry's printed bullets.
-  const parents = new Map<string, string>();
-  // Each entry on the resume, if the page passed one.
-  for (const entry of structure?.entries ?? []) {
-    // Each of its bullets points back at it.
-    for (const ref of entry.bulletRefs) parents.set(ref, entry.ref);
-  }
-  // The lookup.
-  return parents;
 }
 
 /* Whether the resume already shows this op's effect. Derived, never stored: the resume is the one
@@ -1419,20 +1122,6 @@ export function readStoredOp(value: unknown): StoredOp | null {
   return target !== null && advice !== undefined ? { op: 'edit', target, before, text: value.text, advice } : null;
 }
 
-/* What one ask cost, in one line; unknown counts are left out, never shown as 0. */
-export function formatUsage(usage: AssistUsage): string {
-  // The parts Google reported, in billing order.
-  const parts: string[] = [];
-  // Input, with the cached share when known (cached input is billed at a discount).
-  if (usage.input !== null) parts.push(usage.cached !== null && usage.cached > 0 ? `${usage.input} in (${usage.cached} cached)` : `${usage.input} in`);
-  // Visible output.
-  if (usage.output !== null) parts.push(`${usage.output} out`);
-  // Thinking, billed as output.
-  if (usage.thinking !== null) parts.push(`${usage.thinking} thinking`);
-  // Nothing reported is said as such.
-  return parts.length === 0 ? 'Token use not reported.' : `Tokens: ${parts.join(', ')}.`;
-}
-
 /* True for a plain object. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   // Arrays and null are not records.
@@ -1566,8 +1255,10 @@ const CLAIMS_A_CHANGE = /\b(?:added|removed|changed|moved|applied|updated|rewrot
    because the server applied it, so the claim filter above hid the whole record and the summary said "No changes made"
    over edits that HAD landed. Matched on the record's exact opening, never on a word an AI note could contain. */
 export function isServerRecord(content: string): boolean {
-  // The bracket and one of the three group names the server writes first.
-  return /^\[(?:Applied|Could not do|Suggested, not applied): /.test(content);
+  /* The old bracket record (stored before S45, kept so those bubbles still show), or one of the two exact openings
+     replyText always writes since S45: "Done. " (something landed) or "Nothing changed." (nothing did). Exact openings
+     only: a model note that merely contains "Done" or "removed" stays under the claim filter. */
+  return /^\[(?:Applied|Could not do|Suggested, not applied): /.test(content) || /^(?:Done\. |Nothing changed\.)/.test(content);
 }
 
 /* The reply text the panel shows (bug a, Teja 2026-11-06, live Revature row: "Added GCP, MySQL, Redis, MongoDB"

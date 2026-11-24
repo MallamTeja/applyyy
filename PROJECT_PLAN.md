@@ -27,7 +27,7 @@ discover → screen → tailor → approve → **submit by the bot** → confirm
 
 Switches that decide what runs (read them live, they change):
 
-- `system_settings.system_enabled` — the kill switch (`_shared/agent/kill-switch.ts`).
+- `system_settings.system_enabled` — the kill switch (`_shared/db/gates.ts`).
 - `system_settings.auto_apply_on_approve` — approve starts a live apply drain. Default false (migration `20261105140000`). It was false on 2026-11-08.
 - Repo variable `APPLYY_CRON_LIVE` — a scheduled `apply.yml` run submits only when it is `true`.
 - Repo variable `APPLYY_SATELLITES_LIVE` — gates the daily `satellites.yml` run.
@@ -945,7 +945,7 @@ Measured rather than assumed: the real golden resume was rendered in two columns
 > | Multiplier | State | Evidence |
 > |---|---|---|
 > | 1. Referral outreach | built; drafts only, Teja sends | `supabase/functions/referral/`, run by `satellites.yml`; page `features/referral/` |
-> | 2. ATS parse simulator | built | `worker/src/ats-parse-check.ts` (called from `worker/src/render-resume-pdf.ts`); tailor-side `_shared/tailor/ats-simulator.ts`; ATS keyword panel in the approval view |
+> | 2. ATS parse simulator | built | `worker/src/ats-parse-check.ts` (called from `worker/src/render-resume-pdf.ts`); tailor-side keyword list `_shared/tailor/jd-keywords.ts` (the unused `ats-simulator.ts` was deleted 2026-11-24, S44a); ATS keyword panel in the approval view |
 > | 3. Freshness priority | built inside the matcher, although the table below calls it superseded | `supabase/functions/matcher/freshness-queue.ts` orders <24 h jobs first; the 3-day filter (§13) also stands |
 > | 4. Skill-gap aggregator | built | `supabase/functions/skill-gap/`, run by `satellites.yml`; page `features/analytics/` |
 
@@ -1011,7 +1011,7 @@ and all seven §18 items.
 >
 > | Item | State | Evidence |
 > |---|---|---|
-> | 1. Kill switch | done | `system_settings.system_enabled`, read by `_shared/agent/kill-switch.ts` and `_shared/db/gates.ts`; the kit sweep honours it too |
+> | 1. Kill switch | done | `system_settings.system_enabled`, read by `_shared/db/gates.ts` (the unused `_shared/agent/kill-switch.ts` was deleted 2026-11-24, S44a); the kit sweep honours it too |
 > | 2. Gemini budget breaker | done | `_shared/gemini/pool.ts` (`gemini_daily_call_budget`, Pacific-dated) |
 > | 3. Golden eval set | done, all three parts | table `matcher_eval_cases`; fixture `_shared/eval/fixtures/matcher-eval-set.json`; gate `_shared/eval/gate.test.ts`, run by CI's edge-function `node --test` step (`.github/workflows/ci.yml`) |
 > | 4. Reposted-job signal | done | `scout-ats` bumps `jobs.repost_count` when a vanished job returns (`_shared/scout/liveness.ts`) |

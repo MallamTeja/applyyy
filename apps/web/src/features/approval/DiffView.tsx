@@ -50,8 +50,12 @@ import type {
   TailoredRun,
 } from './diffModel';
 import {
+  // The claim notice's words, built from the COUNT only so no claim can be spliced into a sentence (S24).
+  claimNoticeCopy,
   // Every claim still in the resume, which the Approve gate counts.
   collectFlaggedClaims,
+  // The quoted "Not in your master profile: ..." note under a line (S24).
+  lineCheckNote,
   // The honest ATS figure in the header.
   coveragePercent,
   // A or B, which picks the status badge and the clean notice.
@@ -147,9 +151,6 @@ export interface DiffViewProps {
   /* The page's save; editSource (2026-11-04) says who decided the edit, for the history note. A
      line's Reset passes 'operator'; the AI chat passes its own. */
   readonly onEdit?: ((action: EditAction, editSource: EditSource) => Promise<EditResult>) | undefined;
-  /* T10 (2026-11-10): the page's ATOMIC batch save, handed through to the chat: every action folded, the end
-     state fitted and rule-checked once, then one write (a swap can never pass a check after each op). */
-  readonly onEditBatch?: ((actions: readonly EditAction[], editSource: EditSource) => Promise<EditResult>) | undefined;
   /* S9i P2 (2026-11-21): the page's re-read of this row, handed through to the chat, which then lets the SERVER apply
      each answer (Teja 15:34: edits land even with the tab closed) and re-reads the row it wrote. */
   readonly onReloadRow?: (() => Promise<void>) | undefined;
@@ -162,8 +163,8 @@ export interface DiffViewProps {
   readonly locked?: boolean | undefined;
   /* The pinned master's skill groups, handed to the AI chat so a skill it adds prints under a real group. */
   readonly attestCategories?: readonly string[] | undefined;
-  /* The AI box's ask (2026-10-31). Absent means no AI box; its proposals apply through onEdit,
-     so a screen without a save path never shows it. */
+  /* The AI box's ask (2026-10-31). Absent means no AI box. The server applies every answer (S44a, 2026-11-24), but the
+     box still mounts only where onEdit exists, so a screen that offers no editing never shows it. */
   /* 2026-11-18: the optional onProgress carries the streamed status and reply text through to AiEditPanel. */
   readonly onAssist?: ((body: AssistBody, onProgress?: (progress: AssistProgress) => void) => Promise<AssistResult>) | undefined;
   /* Where the AI chat keeps its chats (2026-11-01). Absent means a session-only chat. */
@@ -336,49 +337,40 @@ function FabricationAlert({
   // A save or the page's approve is in flight; every control waits for it.
   readonly busy: boolean;
 }): ReactElement {
-  /* Name the first claim in the consequence sentence. A specific sentence -
-   * "the first question is about your Docker setup" - lands where a generic
-   * warning about fabrication does not. `noUncheckedIndexedAccess` makes the
-   * guard mandatory, and the fallback keeps the sentence grammatical if the
-   * list is ever empty. */
-  const firstClaim = claims[0];
-  // The example the consequence sentence names.
-  const exampleClaim = firstClaim === undefined ? 'one of these' : firstClaim.text;
+  /* The copy takes the COUNT only (S24, 2026-11-24). The old consequence sentence spliced the first
+   * claim into "...about your {claim} work.", and a claim that is a whole bullet ending in a full stop
+   * printed "...social media. work." The claims are listed verbatim below instead. */
+  const copy = claimNoticeCopy(claims.length);
 
   return (
-    <section className="alarm" aria-labelledby="alarm-heading">
-      <h3 id="alarm-heading" className="alarm__heading">
-        {/* A numeral, not a word: this line is scanned, not read. */}
-        {claims.length} {claims.length === 1 ? 'claim' : 'claims'} trace to
-        nothing in your profile
+    <section className="claim-notice" aria-labelledby="claim-notice-heading">
+      <h3 id="claim-notice-heading" className="claim-notice__heading">
+        {/* What to check and how many: a numeral, because this line is scanned, not read. */}
+        {copy.heading}
       </h3>
 
-      <p className="alarm__consequence">
-        {/* The consequence, in concrete terms. This is the sentence that makes
-            the operator stop, so it is written as a scene rather than a rule. */}
-        Your master profile does not support{' '}
-        {claims.length === 1 ? 'this' : 'these'}. If it wins the interview, the
-        first technical question is about your {exampleClaim} work.
+      <p className="claim-notice__consequence">
+        {/* Why, as a check rather than an accusation: most flagged words are honest rewording. */}
+        {copy.lead}
       </p>
 
-      <p className="alarm__instruction">
-        {/* Says exactly what unblocks the screen, and where the other route is now that cutting
-            happens in the AI chat. */}
-        Keep each claim you can defend to unlock approval. To change or drop one, ask the AI chat.
+      <p className="claim-notice__instruction">
+        {/* Says exactly what unblocks the screen, and where the other route is (the AI chat). */}
+        {copy.instruction}
       </p>
 
-      <ul className="alarm__claims">
+      <ul className="claim-notice__claims">
         {claims.map((claim) => {
           /* Undefined until the operator decides, which is what keeps Approve
              disabled. Absence of a decision is the gate. */
           const kept = decisions.get(claim.key) === 'keep';
 
           return (
-            <li key={claim.key} className="alarm__claim">
+            <li key={claim.key} className="claim-notice__claim">
               {/* The claim text, set in the same serif as the resume so the
                   operator recognises it as the words that would be submitted
                   rather than as a UI label about them. */}
-              <span className="alarm__claim-text">{claim.text}</span>
+              <span className="claim-notice__claim-text">{claim.text}</span>
 
               {/* ONE compact control per claim (2026-11-07, D1). A real button with aria-pressed, so
                   the kept state is spoken, not only coloured. The label is the commitment, so the
@@ -387,7 +379,7 @@ function FabricationAlert({
                 // Never a form submit.
                 type="button"
                 // The small control style, tinted for the dark band.
-                className="button button--small alarm__keep"
+                className="button button--small claim-notice__keep"
                 // Spoken as a toggle that is on once kept.
                 aria-pressed={kept}
                 // Waits for any save, and has nothing more to do once kept.
@@ -395,8 +387,8 @@ function FabricationAlert({
                 // Records the acknowledgement; the gate re-counts on the next render.
                 onClick={() => onDecide(claim.key, 'keep')}
               >
-                {/* The commitment, verbatim from the earlier radio label. */}
-                Keep it, I can defend it
+                {/* The commitment, in the notice's calm wording: the operator asserts it is true (S24). */}
+                It&apos;s true, keep it
               </button>
             </li>
           );
@@ -435,7 +427,7 @@ function Run({ run }: { readonly run: TailoredRun }): ReactElement {
         {run.text}
         {/* Read aloud after the claim, so a screen-reader user hears the
             verdict rather than inferring it from styling they cannot see. */}
-        <span className="visually-hidden"> — traces to nothing in the master profile</span>
+        <span className="visually-hidden"> — not in your master profile</span>
       </mark>
     );
   }
@@ -542,8 +534,8 @@ function Provenance({ line }: { readonly line: DiffLine }): ReactElement {
           you" must never hide that some of its words trace to nothing. */}
       {fabricated.length > 0 ? (
         <p className="line__provenance line__provenance--fabricated">
-          {fabricated.map((run) => run.text).join(' and ')} trace
-          {fabricated.length === 1 ? 's' : ''} to nothing
+          {/* Each flagged text quoted on its own, so a bullet ending in a full stop still reads as a quote (S24). */}
+          {lineCheckNote(fabricated.map((run) => run.text))}
         </p>
       ) : null}
 
@@ -844,8 +836,6 @@ export function DiffView({
   onApprove,
   onReject,
   onEdit,
-  // T10: the atomic batch save, wrapped below like onEdit.
-  onEditBatch,
   // S9i P2: handed to the chat as is.
   onReloadRow,
   editDisabledReason,
@@ -902,27 +892,6 @@ export function DiffView({
           } catch (cause) {
             /* A throw here escaped the page, so whether the write landed is unknown; said as unknown
                (the prefix is no longer added at render), never as "not saved". */
-            return { ok: false, reason: `Save status unknown: ${cause instanceof Error ? cause.message : 'the save threw'}. Reload to see what is stored.` };
-          } finally {
-            // Unlocks whatever happened.
-            setSaving(false);
-          }
-        };
-
-  /* T10: the batch save under the same lock and the same "unknown, never not-saved" catch as runEdit. Absent
-     when the page gives none or there is no single save path either; T16: the chat then does not mount at all
-     (it requires the batch save), instead of falling back to op-by-op saves. */
-  const runEditBatch =
-    onEditBatch === undefined || onEdit === undefined
-      ? undefined
-      : async (actions: readonly EditAction[], editSource: EditSource): Promise<EditResult> => {
-          // Locks every control in this view, exactly as one edit does.
-          setSaving(true);
-          try {
-            // The page folds, checks and saves the whole batch once.
-            return await onEditBatch(actions, editSource);
-          } catch (cause) {
-            // Same wording as runEdit: a throw that escaped the page leaves the write's fate unknown.
             return { ok: false, reason: `Save status unknown: ${cause instanceof Error ? cause.message : 'the save threw'}. Reload to see what is stored.` };
           } finally {
             // Unlocks whatever happened.
@@ -1096,11 +1065,11 @@ export function DiffView({
       {/* The AI box, only where an edit could honestly land: a save path, an ask, and editing on.
           Keyed by row so a new row never shows the previous row's proposals. */}
       {(() => {
-        // The panel itself: bound to THIS row's onEdit and id, so whatever it applies lands on this row only.
+        // The panel itself: keyed by THIS row's id, so its chat and re-read stay on this row only.
         const panel =
-          /* T16: the batch save is required by the panel, so it mounts only where the page gave one (both pages do). */
-          runEdit !== null && runEditBatch !== undefined && onAssist !== undefined && !editDisabledReason ? (
-            <AiEditPanel key={diff.applicationId} diff={diff} onEdit={runEdit} onEditBatch={runEditBatch} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} chat={chat} structure={assistStructure ?? undefined} seed={chatSeed} onReloadRow={onReloadRow} />
+          /* Mounts only where editing is honestly on (a save path, no editDisabledReason); the server applies its answers. */
+          runEdit !== null && onAssist !== undefined && !editDisabledReason ? (
+            <AiEditPanel key={diff.applicationId} diff={diff} onAssist={onAssist} busy={busy} categories={attestCategories ?? []} chat={chat} structure={assistStructure ?? undefined} seed={chatSeed} onReloadRow={onReloadRow} />
           ) : /* Docked and read-only: say why, instead of a dock that is silently empty. */ chatDock?.active === true && editDisabledReason ? (
             <p className="diff__edit-note">AI chat is off for this resume: {editDisabledReason}</p>
           ) : null;

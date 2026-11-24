@@ -968,10 +968,13 @@ test("summary numbers: a number no cited node states is one summary_unsupported 
   const resume = { ...createCleanResume(), summary: "Backend engineer who served 40 engineers with Node.js and Express REST APIs." };
   // The clean refs: sum-1 and b-exp-1 exist, so only the number can be wrong.
   const outcome = auditApplication(TEST_MASTER, resume, createCleanTailorRefs());
-  // Exactly one finding, on the summary.
-  assert.deepEqual(outcome.findings.map((f) => [f.kind, f.path]), [["summary_unsupported", "summary"]]);
+  // Since S34 (2026-11-24) the summary word check also, rightly, flags the invented verb "served"; it has its own
+  // tests (detector-grounding-sources.test.ts). Set aside here by its reason, so this test still pins D4 alone.
+  const d4Findings = outcome.findings.filter((f) => !f.reason.startsWith("Summary contains ungrounded term"));
+  // Exactly one D4 finding, on the summary.
+  assert.deepEqual(d4Findings.map((f) => [f.kind, f.path]), [["summary_unsupported", "summary"]]);
   // It names the unsupported number, so the reviewer knows what to check.
-  assert.ok(outcome.findings[0].reason.includes("40"), outcome.findings[0].reason);
+  assert.ok(d4Findings[0].reason.includes("40"), d4Findings[0].reason);
   // The ruling: the row goes to individual review.
   assert.equal(outcome.status, "audit_flagged");
 });

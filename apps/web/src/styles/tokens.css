@@ -113,11 +113,6 @@
   /* Any surface a pointer is over: subtle, delicate translucency. */
   --surface-hover: light-dark(rgba(0, 0, 0, 0.035), rgba(255, 255, 255, 0.045));
 
-  /* THE ALARM SURFACE. Reserved for the fabrication band on the diff view and
-     nothing else - its scarcity is the whole signal. */
-  --alarm-ground: light-dark(#1a1215, #2b1216);
-  --alarm-raised: rgba(246, 236, 233, 0.07);
-
   /* --- Semantic text hierarchy ---------------------------------------
      MEASURED, not asserted. This block used to be labelled "WCAG AA certified",
      which was false of the third token and true only by accident of the first
@@ -153,7 +148,6 @@
 
   /* Text on the alarm surface */
   --ink-inverse: #f6ece9;
-  --alarm-ink-muted: light-dark(rgba(246, 236, 233, 0.65), rgba(246, 236, 233, 0.62));
   --ink-on-fill: light-dark(#ffffff, #0d0f11);
 
   /* --- Structure ------------------------------------------------------- */

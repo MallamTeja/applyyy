@@ -64,7 +64,7 @@ scheduled pipeline call is the daily approval-queue re-gate (`auditor?mode=regat
 
 **Every agent checks `system_settings.system_enabled` first, before any other work.**
 One row halts the whole system on the next run. You do not need to delete a cron or
-revoke a key at 2 am. Code: `supabase/functions/_shared/agent/kill-switch.ts`.
+revoke a key at 2 am. Code: `supabase/functions/_shared/db/gates.ts`.
 
 **It does not stop the `human` identity**, and it should not. Approving a row in the
 dashboard is not something the kill switch exists to prevent.

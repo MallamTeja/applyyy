@@ -113,6 +113,29 @@ export interface DiffAdapterInput {
 
 /* --- Locating a finding inside a line -------------------------------- */
 
+/* Where `needle` sits in `haystack` (both lowercased): the first WHOLE-WORD hit, else the first hit
+ * of any kind, else -1 (S24, 2026-11-24). Whole-word means no letter or digit touches either edge,
+ * the same split the auditor's tokenizer uses (detector.ts tokenizeText: /[^a-z0-9]+/). Since rule 5
+ * findings arrive one word each, a plain indexOf would mark "ai" inside "maintaining". The fallback
+ * keeps every claim that was located before this change located now, so nothing new goes unlocated. */
+function locateClaim(haystack: string, needle: string): number {
+  // The tokenizer's word characters; anything else is a boundary.
+  const wordChar = /[a-z0-9]/;
+  // The first occurrence of any kind, which is also the fallback answer.
+  const first = haystack.indexOf(needle);
+  // Walk every occurrence from the first, looking for one with clean edges.
+  for (let at = first; at !== -1; at = haystack.indexOf(needle, at + 1)) {
+    // The character before the hit, or '' at the start of the line.
+    const before = haystack.charAt(at - 1);
+    // The character after the hit, or '' at the end of the line.
+    const after = haystack.charAt(at + needle.length);
+    // Both edges clean: this is the word itself, not part of another.
+    if (!wordChar.test(before) && !wordChar.test(after)) return at;
+  }
+  // No whole-word hit: the old answer, so a claim the auditor quoted mid-word still lands somewhere.
+  return first;
+}
+
 /* Split one line of tailored text into runs, given the claims flagged on it.
  *
  * The Auditor reports a finding as a quoted substring (`AuditFinding.claim`)
@@ -162,8 +185,9 @@ function splitIntoRuns(
       if (run.verdict === 'fabricated') return [run];
 
       /* Case-insensitive, because the Auditor quotes the JD's casing and the
-       * Tailor may have written the resume's. */
-      const index = run.text.toLowerCase().indexOf(claim.toLowerCase());
+       * Tailor may have written the resume's. Whole-word first (S24): a flagged
+       * word like "ai" must mark itself, not the "ai" inside "maintaining". */
+      const index = locateClaim(run.text.toLowerCase(), claim.toLowerCase());
       if (index === -1) return [run];
 
       located = true;
@@ -810,6 +834,31 @@ function refPathOf(path: string, read: ResolvedResume): string {
   return section + '.' + entry.ref + '.' + bullet.ref;
 }
 
+/* --- Rule 5's flagged words --------------------------------------------- */
+
+/* One finding per flagged WORD, when the auditor names its words (S24, 2026-11-24).
+ *
+ * Rule 5 ("ungrounded term") quotes the WHOLE bullet as its claim, so the page marked a whole true
+ * bullet as invented over one re-inflected verb, and the notice printed the bullet as "the claim".
+ * Since 2026-11-23 the detector also stores `words`, the exact tokens it could not ground. Each word
+ * becomes its own finding with the word as the claim, so only those words are marked and listed,
+ * which is what this file's splitIntoRuns header already promised ("marking the whole line would
+ * make a single invented word look like a wholly invented bullet").
+ *
+ * Shape-checked, never trusted (CLAUDE.md §6): stored jsonb, and rows audited before 2026-11-23 have
+ * no `words`. Anything but a non-empty array of non-empty strings keeps the whole-bullet claim, so a
+ * malformed field can only widen the mark, never hide a finding. Pure. */
+function perWordFindings(finding: AuditFinding): AuditFinding[] {
+  // Read off the untyped row: `words` is not on the shared AuditFinding type yet.
+  const words: unknown = (finding as { words?: unknown }).words;
+  // The positive shape: a non-empty list whose every element is a non-empty string.
+  const valid = Array.isArray(words) && words.length > 0 && words.every((word) => typeof word === 'string' && word !== '');
+  // Anything else falls back to the whole bullet, exactly as before this change (fail closed).
+  if (!valid) return [finding];
+  // One finding per distinct word; a word repeated in the list is still one thing to check.
+  return [...new Set(words as string[])].map((word) => ({ ...finding, claim: word }));
+}
+
 /* --- The adapter ------------------------------------------------------- */
 
 export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
@@ -860,13 +909,21 @@ export function buildResumeDiff(input: DiffAdapterInput): ResumeDiff {
       // Not located, not unlocated: it is not a claim.
       continue;
     }
-    /* Everything else, including a malformed jd_keyword_dropped, keeps the existing path. */
-    flaggable.push(finding);
-    const existing = findingsByPath.get(finding.path);
-    if (existing === undefined) {
-      findingsByPath.set(finding.path, [finding]);
-    } else {
-      existing.push(finding);
+    /* Everything else, including a malformed jd_keyword_dropped, keeps the existing path, split into
+       one finding per flagged word where the auditor named them (S24). */
+    for (const one of perWordFindings(finding)) {
+      // Counted for the fail-loud step below, word by word, so an unplaceable word is still listed.
+      flaggable.push(one);
+      // This line's existing findings, if any.
+      const existing = findingsByPath.get(one.path);
+      // The first finding on this path starts its list.
+      if (existing === undefined) {
+        // Keyed by path, the one place the lookup key is written.
+        findingsByPath.set(one.path, [one]);
+      } else {
+        // Later ones join it.
+        existing.push(one);
+      }
     }
   }
 

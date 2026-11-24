@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 // The runner.
 import { describe, it } from "node:test";
 // The module under test.
-import { resolveWireOp, type ApplyMaps } from "./resolve-ops.ts";
+import { actionLabel, closestPrinted, resolveWireOp, type ApplyMaps } from "./resolve-ops.ts";
 
 // The maps for a resume with one job (e0), two projects (e1 One-on-One, e2 applyyy), two bullets and two skills.
 const maps: ApplyMaps = {
@@ -37,7 +37,7 @@ describe("resolveWireOp", () => {
 
   it("maps every other kind to the browser's action, and refuses unknown ids", () => {
     // remove_skill takes the named group's copy.
-    assert.deepEqual(resolveWireOp({ op: "remove_skill", name: "testing", category: "ai" }, maps, [...sections]), { ok: true, action: { kind: "remove_skill", ref: "sk_t2" } });
+    assert.deepEqual(resolveWireOp({ op: "remove_skill", name: "testing", category: "ai" }, maps, [...sections]), { ok: true, action: { kind: "remove_skill", ref: "sk_t2", name: "Testing" } });
     // add_back of a master bullet and a master entry.
     assert.deepEqual([resolveWireOp({ op: "add_back", id: "m0" }, maps, [...sections]), resolveWireOp({ op: "add_back", id: "n0" }, maps, [...sections])], [{ ok: true, action: { kind: "add_master_bullet", ref: "exp_b9" } }, { ok: true, action: { kind: "add_master_entry", section: "achievements", ref: "ach_1" } }]);
     // set_role only on a job.
@@ -77,5 +77,43 @@ describe("resolveWireOp move_skill (2026-11-23)", () => {
     assert.deepEqual(resolveWireOp({ op: "move_skill", name: "Prompt Engineering", place: 0 }, skillMaps, [...sections]), { ok: false, what: 'Move skill "Prompt Engineering"', why: "The AI did not say which place." });
     // "Al" is one edit from "AI" but a 2-letter group matches exactly only.
     assert.equal(resolveWireOp({ op: "move_skill", name: "Harness Engineering", category: "Al", place: 1 }, skillMaps, [...sections]).ok, false);
+  });
+});
+
+// S45 (Teja 2026-11-24, "remove lightgbm, cgboost, …"): a remove names the printed skill a typo away, uniquely, or refuses.
+describe("remove_skill typo match (S45)", () => {
+  // Printed skills with near-twins, so uniqueness and the short-name rule are real.
+  const typoMaps: ApplyMaps = { ...maps, skills: [{ name: "XGBoost", category: "ML", ref: "sk_xgb" }, { name: "CatBoost", category: "ML", ref: "sk_cat" }, { name: "C#", category: "Languages", ref: "sk_cs" }, { name: "Java", category: "Languages", ref: "sk_java" }, { name: "Spark", category: "Data", ref: "sk_spark" }, { name: "Stark", category: "Data", ref: "sk_stark" }] };
+
+  it("a unique close name (one edit on 'cgboost') is removed, named, and the typed spelling is kept", () => {
+    // Teja's typo.
+    assert.deepEqual(resolveWireOp({ op: "remove_skill", name: "cgboost" }, typoMaps, [...sections]), { ok: true, action: { kind: "remove_skill", ref: "sk_xgb", name: "XGBoost", typed: "cgboost" } });
+    // A 3-4 letter name forgives one edit.
+    assert.deepEqual(resolveWireOp({ op: "remove_skill", name: "jav" }, typoMaps, [...sections]), { ok: true, action: { kind: "remove_skill", ref: "sk_java", name: "Java", typed: "jav" } });
+    // Case and spaces only: no typed echo.
+    assert.deepEqual(resolveWireOp({ op: "remove_skill", name: "c#" }, typoMaps, [...sections]), { ok: true, action: { kind: "remove_skill", ref: "sk_cs", name: "C#" } });
+  });
+
+  it("two equally close names are refused naming both; a 1-2 letter name is never fuzzy-matched", () => {
+    // "Sxark" is one edit from both Spark and Stark.
+    assert.deepEqual(resolveWireOp({ op: "remove_skill", name: "Sxark" }, typoMaps, [...sections]), { ok: false, what: 'Remove skill "Sxark"', why: '"Sxark" is close to "Spark" and "Stark"; say which one.' });
+    // "C" is one edit from "C#", but a 2-letter name matches exactly only.
+    assert.equal(resolveWireOp({ op: "remove_skill", name: "C" }, typoMaps, [...sections]).ok, false);
+    // Far names stay refused.
+    assert.equal(resolveWireOp({ op: "remove_skill", name: "Kubernetes" }, typoMaps, [...sections]).ok, false);
+  });
+
+  it("closestPrinted: unique, tie, none", () => {
+    // Unique.
+    assert.deepEqual(closestPrinted("cgboost", ["XGBoost", "CatBoost"]), { kind: "match", name: "XGBoost" });
+    // Tie.
+    assert.deepEqual(closestPrinted("sxark", ["Spark", "Stark"]), { kind: "tie", names: ["Spark", "Stark"] });
+    // Punctuation only is no name.
+    assert.deepEqual(closestPrinted("--", ["C#"]), { kind: "none" });
+  });
+
+  it("the label names the skill (was a bare 'Remove skill')", () => {
+    // Named.
+    assert.equal(actionLabel({ kind: "remove_skill", ref: "sk_xgb", name: "XGBoost" }), 'Remove skill "XGBoost"');
   });
 });

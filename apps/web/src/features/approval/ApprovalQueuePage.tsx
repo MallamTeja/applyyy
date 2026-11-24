@@ -51,16 +51,8 @@ import type { ClaimDecision, EditAction, EditResult } from './DiffView';
 import { buildResumeDiff } from './diffAdapter';
 // The one-page rule, live: every edit is fitted on one page before it is saved (2026-11-07).
 import { planBatch } from './pageFitEdit';
-// Type only (T10 review): what the Apply-all preview answers.
-import type { BatchPlan } from './pageFitEdit';
-// T10: the overflow preview an AI-chat card shows before Apply, run on the same fit the save runs.
-import { overflowPreview, previewAdd } from './pageFitEdit';
-// Type only: the preview's answer, handed to the chat through its context.
-import type { OverflowPreview } from './pageFitEdit';
-// T10: the context the chat reads the preview from (DiffView sits between this page and the chat).
-import { OverflowPreviewContext } from './AiEditPanel';
-// T10 review: the Apply-all line's preview, provided beside the card preview.
-import { BatchPreviewContext } from './AiEditPanel';
+/* S44a (2026-11-24): the card / Apply-all previews (overflowPreview, previewAdd, OverflowPreviewContext,
+   BatchPreviewContext) went with the chat's Apply cards; the server applies every chat answer now. */
 // The adapter's own row shape, so the page holds exactly the fields the diff is built from.
 import type { DiffAdapterInput } from './diffAdapter';
 // coveragePercent (2026-11-04): the row's "ATS score" chip, the same honest figure as the badge and the 'ats' sort.
@@ -1915,54 +1907,6 @@ export function ApprovalQueuePage(): ReactElement {
      never describe a resume that was not stored. */
   /* editSource (2026-11-04): who decided the edit, written to the history note; required, so no path
      is logged as the operator by omission. Named editSource because `source` below is the RowSource. */
-  /* T10 (2026-11-10): THE OVERFLOW PREVIEW for one content-adding AI card, before its Apply. Built from the
-     same refs and the same edit its save would use, then the same fit, so the drop it names is the trim the
-     save makes. Pure: reads refs, writes nothing. null = no preview (not an add, or the row is not simulable;
-     its save's own guards then speak). */
-  function overflowFor(applicationId: string, action: EditAction): OverflowPreview | null {
-    // The same inputs editRow reads.
-    const source = latestSources.current.get(applicationId);
-    // The latest saved resume, the one Apply builds on.
-    const current = latestResumes.current.get(applicationId);
-    // Not simulable: Apply's own guards will say why.
-    if (source === undefined || current === undefined || source.original === null || source.full === null) return null;
-    // The row's JD keywords, exactly as every save ranks the trim by.
-    const jd = source.application.selected_jd_keywords;
-    // A skill the master lacks: its real ref is minted at the save, so the preview builds it with a stand-in.
-    if (action.kind === 'attest_skill') return previewAdd(current, { kind: 'skill', name: action.keyword, category: action.category }, jd);
-    // A vouched bullet: appended under its parent, as attestBullet places it.
-    if (action.kind === 'attest_bullet') return previewAdd(current, { kind: 'bullet', section: action.section, entryRef: action.parentRef, text: action.text }, jd);
-    // Every other add is a pure edit from the master: the very resume its save would fit.
-    if (action.kind === 'add_skill' || action.kind === 'add_master_bullet' || action.kind === 'add_master_entry') {
-      // The same pure edit editRow runs.
-      const outcome = pureEdit(action, current, source.original, source.master, source.full);
-      // A refused edit adds nothing, so there is nothing to preview (its Apply reports the refusal).
-      return outcome.ok ? overflowPreview(current, outcome.resume, jd) : null;
-    }
-    // Removes, moves and text edits never add a line.
-    return null;
-  }
-
-  /* T10 review fix (2026-11-10): THE APPLY-ALL PREVIEW. The very planBatch editRows runs, over the same latest
-     saved resume, master and JD keywords, so the line by Apply all names the trim the save makes (or its refusal).
-     Pure: reads refs, writes nothing. null = not simulable, or an attest in the list (the panel never sends one). */
-  function batchPreviewFor(applicationId: string, actions: readonly EditAction[]): BatchPlan | null {
-    // The same inputs editRow reads.
-    const source = latestSources.current.get(applicationId);
-    // The latest saved resume, the one the batch folds over.
-    const current = latestResumes.current.get(applicationId);
-    // Not simulable: Apply all's own guards will say why.
-    if (source === undefined || current === undefined || source.original === null || source.full === null) return null;
-    // Narrowed copies for the step closure.
-    const { original, master, full } = source;
-    // Resume-only actions; an attest cannot be folded, so its presence means no preview.
-    const pure = actions.flatMap((action) => (action.kind === 'attest_skill' || action.kind === 'attest_bullet' ? [] : [action]));
-    // Mixed in: the save would refuse with its own words; the preview stays quiet.
-    if (pure.length !== actions.length) return null;
-    // Exactly what editRows plans.
-    return planBatch(current, pure, (resume, action) => pureEdit(action, resume, original, master, full), source.application.selected_jd_keywords, master);
-  }
-
   async function editRow(applicationId: string, action: PageEditAction, editSource: EditSource): Promise<EditResult> {
     // One edit is a batch of one: the same guards, the same fit, the same single save (T10 made editRows the one path).
     return editRows(applicationId, [action], editSource);
@@ -2014,7 +1958,8 @@ export function ApprovalQueuePage(): ReactElement {
     // A brand-new bullet writes the master too, so it has the same kind of path (attestBulletRow above).
     if (only?.kind === 'attest_bullet') return attestBulletRow(applicationId, only, source, source.original, current, stamp, supabase, editSource, []);
     /* THE BULLET SWAP (2026-11-20, tailor pending #3): one new line plus the bullet removes it replaces, sent
-       together by the chat (aiEdit.swapPartners). The removes are folded into the attest's own save, so the
+       together by the chat (aiEdit swapPartners, removed in S44a 2026-11-24 with the Apply cards: no caller sends
+       this batch from the chat now, the server applies it). The removes are folded into the attest's own save, so the
        floor ("exp_aczen: 3 bullets, needs 4") and the page fit are judged on the END state, never on one half.
        Only bullet removes may ride along: anything else in a batch with a master write is still refused below. */
     const attests = actions.filter((action) => action.kind === 'attest_bullet');
@@ -2215,10 +2160,7 @@ export function ApprovalQueuePage(): ReactElement {
   return (
     /* The wide variant: two resume panes need every pixel, and the standard
        page measure would force the operator to scroll to compare them.
-       queue-page scopes the page's one control height (ApprovalQueuePage.css) to this screen only.
-       T10: the provider hands every AI chat on the page (docked or inline) its overflow preview. */
-    <OverflowPreviewContext.Provider value={overflowFor}>
-    <BatchPreviewContext.Provider value={batchPreviewFor}>
+       queue-page scopes the page's one control height (ApprovalQueuePage.css) to this screen only. */
     <div className="page page--wide queue-page">
       <PageHeader path="approvals" />
 
@@ -2571,8 +2513,6 @@ export function ApprovalQueuePage(): ReactElement {
                     onReject={(reason) => rejectReviewed(diff.applicationId, reason)}
                     /* Saves for real; see editRow. */
                     onEdit={(action, editSource) => editRow(diff.applicationId, action, editSource)}
-                    /* T10: the AI chat's atomic batch save (a swap is judged on its end state); see editRows. */
-                    onEditBatch={(actions, editSource) => editRows(diff.applicationId, actions, editSource)}
                     /* S9i P2: the chat lets the server apply its answers, then re-reads the row it wrote. */
                     onReloadRow={() => reloadRow(diff.applicationId)}
                     /* D4: only when the tailor's original could not be rebuilt. */
@@ -2583,7 +2523,7 @@ export function ApprovalQueuePage(): ReactElement {
                     locked={settling.has(diff.applicationId)}
                     /* The pinned master's groups, so a missing keyword can be vouched for and printed in one. */
                     attestCategories={skillGroups(sources.get(diff.applicationId))}
-                    /* The AI box's ask; its proposals come back through onEdit like any hand edit. */
+                    /* The AI box's ask; the server applies its answers, then onReloadRow re-reads the row. */
                     onAssist={(body, onProgress) => requestAssist(supabase, body, onProgress)}
                     /* Where the chat keeps its chats; undefined when not connected. */
                     chat={chatStore}
@@ -2754,8 +2694,6 @@ export function ApprovalQueuePage(): ReactElement {
                         onReject={(reason) => rejectReviewed(diff.applicationId, reason)}
                         /* Same save path as Bucket B; an edit moves the row there (R2). */
                         onEdit={(action, editSource) => editRow(diff.applicationId, action, editSource)}
-                    /* T10: the AI chat's atomic batch save (a swap is judged on its end state); see editRows. */
-                    onEditBatch={(actions, editSource) => editRows(diff.applicationId, actions, editSource)}
                     /* S9i P2: the chat lets the server apply its answers, then re-reads the row it wrote. */
                     onReloadRow={() => reloadRow(diff.applicationId)}
                         /* D4, as in Bucket B. */
@@ -2821,7 +2759,5 @@ export function ApprovalQueuePage(): ReactElement {
       ) : null}
       </div>
     </div>
-    </BatchPreviewContext.Provider>
-    </OverflowPreviewContext.Provider>
   );
 }

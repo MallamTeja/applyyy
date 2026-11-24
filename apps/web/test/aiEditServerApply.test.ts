@@ -113,3 +113,45 @@ describe('S9i P2: a server-applied reply shows its record (found by aiEditServer
     assert.deepEqual([ai.isServerRecord(record), ai.isServerRecord('Applied: nothing'), ai.isServerRecord('[Suggested, not applied: x (y)]')], [true, false, true]);
   });
 });
+
+/* S45 (Teja 13:42): the server's reply is now replyText ("Done. Removed: … Resume still fits one page." or
+   "Nothing changed. …"), with an optional `subject` per outcome naming the skill. The web is the strict reader, so it
+   ships FIRST (deploy order web -> resume-assist): it must take the new opening and the new field, and still refuse a
+   malformed subject whole (CLAUDE.md §6). */
+describe('S45: the reader and the record check take the readable reply', () => {
+  it('isServerRecord takes the two new openings and the old bracket, and nothing looser', () => {
+    // Both openings replyText can write, the old bracket record, then three that must stay non-records.
+    assert.deepEqual(
+      [
+        ai.isServerRecord('Done. Removed: XGBoost. Resume still fits one page.'),
+        ai.isServerRecord('Nothing changed. Could not do: Remove skill "Kafka" (It is not on this resume.)'),
+        ai.isServerRecord('[Applied: Remove skill "Redis"]'),
+        ai.isServerRecord('Done'),
+        ai.isServerRecord('I removed Redis. Done.'),
+        ai.isServerRecord('Nothing changed'),
+      ],
+      [true, true, true, false, false, false],
+    );
+    // A new-shape record is shown whole by replyNote, though it says "Done" and "Removed" with no ops beside it.
+    assert.equal(ai.replyNote('Done. Removed: XGBoost. Resume still fits one page.', []), 'Done. Removed: XGBoost. Resume still fits one page.');
+  });
+
+  it('keeps a well-formed subject on an outcome; a malformed subject refuses the answer whole', async () => {
+    // A remove that fuzzy-matched a typo, and an add with its group.
+    const applied = [
+      { status: 'applied', label: 'Remove skill "XGBoost"', subject: { verb: 'removed', name: 'XGBoost', typed: 'cgboost' } },
+      { status: 'applied', label: 'Add skill "YAML Flows" under Tools', subject: { verb: 'added', name: 'YAML Flows', group: 'Tools' } },
+    ];
+    // Read from a server-applied answer.
+    const answer = await ai.requestAssist(answering({ status: 'ok', ops: [], note: '', applied, chat_saved: true }), body);
+    // Kept exactly, so the page can rebuild the same reply when it writes the exchange itself.
+    assert.deepEqual(answer.kind === 'ok' ? answer.applied : answer, applied);
+    // An unknown verb, an empty name, a numeric group: each refused whole, never shown in part.
+    for (const subject of [{ verb: 'zapped', name: 'X' }, { verb: 'removed', name: '' }, { verb: 'added', name: 'X', group: 3 }]) {
+      // One malformed outcome.
+      const bad = await ai.requestAssist(answering({ status: 'ok', ops: [], note: '', applied: [{ status: 'applied', label: 'x', subject }] }), body);
+      // The whole answer is an error.
+      assert.equal(bad.kind, 'error', JSON.stringify(subject));
+    }
+  });
+});

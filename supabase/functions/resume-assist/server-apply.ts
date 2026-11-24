@@ -16,7 +16,7 @@
 // The pure resolver and planner.
 import { resolveWireOp, actionLabel, type ApplyMaps, type ServerAction, type WireOp } from "../_shared/resume-edit/resolve-ops.ts";
 // Same.
-import { planServerEdits, type PureServerAction, type ServerOutcome } from "../_shared/resume-edit/server-plan.ts";
+import { planServerEdits, subjectOf, type OutcomeSubject, type PureServerAction, type ServerOutcome } from "../_shared/resume-edit/server-plan.ts";
 // The engine's row readers.
 import { isResumeShape, masterFromRow, rebuildOriginal, resolveFullMaster, type SectionKind } from "../_shared/resume-edit/tailored-edits.ts";
 // The guarded save and its stale-row message.
@@ -86,6 +86,9 @@ async function loadRow(db: Client, applicationId: string): Promise<LoadedRow> {
   return { ok: true, current: row.tailored_profile, original, master, full, tailorRefs: row.tailor_refs, jd, stamp: row.updated_at };
 }
 
+// S45: an action's subject as an outcome field, or nothing, so an outcome never carries `subject: undefined`.
+const subjectField = (action: ServerAction): { readonly subject?: OutcomeSubject } => { const subject = subjectOf(action); return subject === undefined ? {} : { subject }; };
+
 // The reason every step past the deadline is reported with.
 const OUT_OF_TIME = "The server ran out of time before this change; ask again to apply it.";
 
@@ -110,7 +113,8 @@ export async function applyOnServer(db: Client, args: { readonly applicationId: 
     // At most two tries.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       // Past the deadline: report, never half-run.
-      if (deps.now() > args.deadline) { for (const { i, action } of pure) outcomes[i] = { status: "refused", label: actionLabel(action), why: OUT_OF_TIME }; break; }
+      // S45: the subject rides along, so the reply still names the skill it could not touch.
+      if (deps.now() > args.deadline) { for (const { i, action } of pure) outcomes[i] = { status: "refused", label: actionLabel(action), why: OUT_OF_TIME, ...subjectField(action) }; break; }
       // The current row (narrowed: a re-read that failed has already returned below).
       const loaded = row as Extract<LoadedRow, { ok: true }>;
       // The plan on the resume as it stands.
@@ -145,12 +149,14 @@ export async function applyOnServer(db: Client, args: { readonly applicationId: 
         // Fresh.
         row = await loadRow(db, args.applicationId);
         // Unreadable now: every action says why.
-        if (!row.ok) { const why = row.why; for (const { i, action } of pure) outcomes[i] = { status: "refused", label: actionLabel(action), why }; break; }
+        // S45: subject kept, as above.
+        if (!row.ok) { const why = row.why; for (const { i, action } of pure) outcomes[i] = { status: "refused", label: actionLabel(action), why, ...subjectField(action) }; break; }
         // Again.
         continue;
       }
       // Any other refusal, or a second loss: every applied action is refused with the save's own words.
-      for (const { i } of pure) { const o = outcomes[i]; if (o?.status === "applied") outcomes[i] = { status: "refused", label: o.label, why: saved.message }; }
+      // S45: the subject rides along on the refusal.
+      for (const { i } of pure) { const o = outcomes[i]; if (o?.status === "applied") outcomes[i] = { status: "refused", label: o.label, why: saved.message, ...(o.subject === undefined ? {} : { subject: o.subject }) }; }
       // Done.
       break;
     }
@@ -159,18 +165,20 @@ export async function applyOnServer(db: Client, args: { readonly applicationId: 
   for (const { i, action } of attests) {
     // The card label.
     const label = actionLabel(action as ServerAction);
+    // S45: what the reply names it by ("Added to Tools: YAML Flows"), on every outcome below.
+    const subject = subjectField(action as ServerAction);
     // Past the deadline.
-    if (deps.now() > args.deadline) { outcomes[i] = { status: "refused", label, why: OUT_OF_TIME }; continue; }
+    if (deps.now() > args.deadline) { outcomes[i] = { status: "refused", label, why: OUT_OF_TIME, ...subject }; continue; }
     // Fresh row.
     const fresh = await loadRow(db, args.applicationId);
     // Unreadable.
-    if (!fresh.ok) { outcomes[i] = { status: "refused", label, why: fresh.why }; continue; }
+    if (!fresh.ok) { outcomes[i] = { status: "refused", label, why: fresh.why, ...subject }; continue; }
     // A skill: at the pin, or a new master version plus a repin (attestSkill decides).
     if (action.kind === "attest_skill") {
       // The browser's own call (Page:1666), with the row read here.
       const result = await attestSkill(db, { applicationId: args.applicationId, keyword: action.keyword, category: action.category, current: fresh.current, original: fresh.original, tailorRefs: fresh.tailorRefs, expectedUpdatedAt: fresh.stamp, newSkillId: `skill_${deps.uuid()}`, source: "ai_chat_auto", pinnedMaster: fresh.master, jdKeywords: fresh.jd, wrap: "refuse" });
       // Landed or refused, in its own words.
-      outcomes[i] = result.ok ? { status: "applied", label } : { status: "refused", label, why: result.message };
+      outcomes[i] = result.ok ? { status: "applied", label, ...subject } : { status: "refused", label, why: result.message, ...subject };
       // The new stamp.
       if (result.ok) updatedAt = result.updatedAt;
       // Next.
@@ -181,7 +189,7 @@ export async function applyOnServer(db: Client, args: { readonly applicationId: 
       // The browser's own call (Page:1744).
       const result = await attestBullet(db, { applicationId: args.applicationId, section: action.section, parentRef: action.parentRef, text: action.text, current: fresh.current, original: fresh.original, tailorRefs: fresh.tailorRefs, expectedUpdatedAt: fresh.stamp, newBulletId: `bullet_${deps.uuid()}`, source: "ai_chat_auto", jdKeywords: fresh.jd });
       // Landed or refused.
-      outcomes[i] = result.ok ? { status: "applied", label } : { status: "refused", label, why: result.message };
+      outcomes[i] = result.ok ? { status: "applied", label, ...subject } : { status: "refused", label, why: result.message, ...subject };
       // The new stamp.
       if (result.ok) updatedAt = result.updatedAt;
     }

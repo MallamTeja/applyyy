@@ -5,7 +5,7 @@
  * bare substring a comment could carry:
  *   - no hand-edit control renders (click-to-edit, Move, Remove, Add back, keyword "+ Add" chips);
  *   - "Changes by AI (N)" is a collapsed <details> listing only CHANGED lines, each with its Reset;
- *   - one "Keep it, I can defend it" per flagged claim, and Approve is disabled while one is undecided;
+ *   - one "It's true, keep it" per flagged claim (S24 calm notice), and Approve is disabled while one is undecided;
  *   - Reject's first click ARMS app/InlineConfirm (no onReject); only its Confirm rejects;
  *   - the facts line carries the posting link and, when the page sends one, the pay-band chip;
  *   - no master version, no node ids, no keyword chips, no JD body.
@@ -166,7 +166,7 @@ describe('slim card: no hand-edit controls', () => {
       // Each button's visible text, tags dropped.
       const text = b.replace(/<[^>]*>/g, '');
       // Positive shape: one of the four allowed controls.
-      assert.match(text, /^(Keep it, I can defend it|Reset to tailor’s version.*|Approve and queue for submission|Reject application)$/, `unexpected control: ${text}`);
+      assert.match(text, /^(It&#x27;s true, keep it|Reset to tailor’s version.*|Approve and queue for submission|Reject application)$/, `unexpected control: ${text}`);
     }
     // No click-to-edit text button and no textarea of any kind.
     assert.doesNotMatch(html, /<textarea\b|class="line__text-button"/);
@@ -217,11 +217,11 @@ describe('slim card: the per-claim gate', () => {
     // One flagged claim.
     const html = card([FLAGGED]);
     // Exactly one Keep control, a real button, not yet pressed.
-    assert.equal(html.match(/<button type="button" class="button button--small alarm__keep" aria-pressed="false">Keep it, I can defend it<\/button>/g)?.length, 1);
+    assert.equal(html.match(/<button type="button" class="button button--small claim-notice__keep" aria-pressed="false">It&#x27;s true, keep it<\/button>/g)?.length, 1);
     // Approve is disabled while the claim is undecided.
     assert.match(html, /<button type="button" class="button button--approve" disabled="">Approve and queue for submission<\/button>/);
-    // The instruction no longer offers a cut.
-    assert.match(html, /<p class="alarm__instruction">Keep each claim you can defend to unlock approval\. To change or drop one, ask the AI chat\.<\/p>/);
+    // The instruction no longer offers a cut, in the S24 notice wording (diffModel claimNoticeCopy).
+    assert.match(html, /<p class="claim-notice__instruction">Keep each one that is true to unlock approval\. To change or drop one, ask the AI chat\.<\/p>/);
     // Paired control: a clean row's Approve is enabled, so "disabled" above is the claim's doing.
     assert.match(card([UNCHANGED]), /<button type="button" class="button button--approve">Approve and queue for submission<\/button>/);
   });

@@ -10,7 +10,7 @@
  *   1. ApprovalQueuePage's editRow refuses to write once the page has unmounted (a mounted ref), and it
  *      refuses BEFORE any write path. The guard lives in the page, never in AiEditPanel: a Bucket A->B
  *      move remounts the panel mid-auto-apply while the page, and its fresh refs, stay mounted.
- *   2. AiEditPanel never shows a failed reason on a card that is applied. */
+ *   2. (Retired in S44a, 2026-11-24: AiEditPanel has no op cards and no per-card failed reason any more.) */
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -23,10 +23,8 @@ function source(relative: string): string {
   return readFileSync(fileURLToPath(new URL(relative, import.meta.url)), 'utf8');
 }
 
-// The page and the panel: the two files these contracts live in.
+// The page: the file the remaining contract lives in.
 const page = source('../src/features/approval/ApprovalQueuePage.tsx');
-// The panel renders each op card and its failed reason.
-const panel = source('../src/features/approval/AiEditPanel.tsx');
 
 /* Code only: block comments (incl. JSX {/* *\/}) and // line comments removed. A // counts as a comment
    only at line start or after whitespace, so a "https://" inside a string survives. */
@@ -79,18 +77,5 @@ describe('a late AI answer never writes from an unmounted page (2026-11-05)', ()
       // The guard comes first.
       assert.ok(guard < at, `the mounted guard must run before ${write}`);
     }
-  });
-});
-
-describe('an applied card never shows a failed reason (2026-11-05)', () => {
-  it('the failed reason renders only when the op is NOT applied', () => {
-    // The panel, comments stripped.
-    const body = code(panel);
-    // Exactly one place renders the save path's refusal on a card.
-    const renders = body.match(/<p className="ai-chat__error">\{state\.reason\}<\/p>/g) ?? [];
-    // One, so the gate below covers every render of it.
-    assert.equal(renders.length, 1, 'expected exactly one per-card failed-reason render');
-    // Gated on !applied, so "Applied" and a stale refusal can never show on one card.
-    assert.match(body, /\{!applied && state\?\.status === 'failed' \? <p className="ai-chat__error">\{state\.reason\}<\/p> : null\}/);
   });
 });

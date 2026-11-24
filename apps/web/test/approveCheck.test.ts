@@ -174,10 +174,21 @@ describe('checkBeforeApprove', () => {
     const master = (await import('../src/features/approval/tailoredEdits.ts')).masterFromRow(live.MASTER_V2);
     // The fixture must parse, or the rest proves nothing.
     assert.notEqual(master, null, 'fixture master_v2 must parse');
-    // As stored: clean.
-    assert.deepEqual(checkBeforeApprove(master!, live.STORED_TAILORED_PROFILE as never, live.TAILOR_REFS), { kind: 'clean' });
+    /* As stored, the v2-era summary carries three words master v2 never states ("Software engineer", a title
+       never held per Teja's 2026-11-24 ruling, "architectures", "practical"). Since S34 the re-check grounds the
+       summary, so exactly those three hold the row: no more (the derived "integration"/"automated"/"scaling" pass),
+       no fewer (S34 still bites). */
+    const raw = checkBeforeApprove(master!, live.STORED_TAILORED_PROFILE as never, live.TAILOR_REFS);
+    // Held on the summary alone, with exactly the three words.
+    assert.ok(raw.kind === 'flagged' && raw.findings.length === 1 && /: software, architectures, practical$/.test(raw.findings[0]!.reason), JSON.stringify(raw));
+    // The same row with those three phrases in master wording: the real shape re-checks clean.
+    const stored = structuredClone(live.STORED_TAILORED_PROFILE) as { summary: string; experience: { bullets: { text: string }[] }[] };
+    // Only the three phrases change; every other word is the live row's.
+    stored.summary = stored.summary.replace('Software engineer', 'Full Stack AI Engineer').replace('containerized architectures', 'containerized services').replace('practical integration', 'integration');
+    // Clean, or the hold would fire on every real approval and Teja would learn to click through it.
+    assert.deepEqual(checkBeforeApprove(master!, stored as never, live.TAILOR_REFS), { kind: 'clean' });
     // A copy with one real bullet edited to carry a word no master node has.
-    const edited = structuredClone(live.STORED_TAILORED_PROFILE) as { experience: { bullets: { text: string }[] }[] };
+    const edited = structuredClone(stored);
     // The first experience bullet, as the operator would type over it.
     edited.experience[0]!.bullets[0]!.text += ' using Zanzibarql';
     // Flagged.

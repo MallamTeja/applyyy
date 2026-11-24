@@ -4,7 +4,8 @@
  *   - an add that would wrap is REFUSED, and the refusal names the full group;
  *   - when the owner said "all" in the chat, the add lands and the save says the group now wraps.
  * Each test fails if its rule is reverted: the refusal tests go red when the guard is removed, and the
- * "all" tests go red when the flag stops travelling from the chat to the save. */
+ * "all" tests go red when the flag stops travelling from the chat onto the stored op (S44a, 2026-11-24: the op-to-action
+ * step after it went with the browser apply path; the server carries the flag to its save now). */
 
 // The .tsx loader; must be the first import so the extensionless relative imports resolve.
 import './support/registerTsxHooks.ts';
@@ -79,19 +80,17 @@ describe('addSkill keeps every skill group within SKILL_GROUP_MAX_LINES (2) line
   });
 });
 
-describe('the chat carries "all" from the instruction to the save', () => {
+describe('the chat carries "all" from the instruction onto the stored op', () => {
   // The smallest draft resolveOps reads for an add_skill: the instruction and the master's skill names.
   const draft = (instruction: string) => ({ body: { instruction }, masterSkills: new Set([WRAPPER.toLowerCase()]), structure: null, entries: new Map(), printedSkills: new Map() }) as never;
   // One add_skill op as the server sends it.
   const op = { op: 'add_skill', name: WRAPPER, category: DEVOPS } as const;
 
-  it('an "all" turn marks the add as allowed to wrap, and the save action carries it', () => {
+  it('an "all" turn marks the add as allowed to wrap, and the mark survives storage', () => {
     // Resolved against an instruction that says "all".
     const [stored] = ai.resolveOps([op], draft('add all devops skills'));
     // Marked on the stored card, so a later click still knows.
     assert.deepEqual(stored, { op: 'add_skill', name: WRAPPER, category: DEVOPS, inMaster: true, allowWrap: true });
-    // And handed to the attest save.
-    assert.deepEqual(ai.toEditAction(stored as never), { kind: 'attest_skill', keyword: WRAPPER, category: DEVOPS, wrap: 'allow' });
     // It survives the round trip through the stored chat row.
     assert.deepEqual(ai.readStoredOp(stored), stored);
   });
@@ -101,7 +100,5 @@ describe('the chat carries "all" from the instruction to the save', () => {
     const [stored] = ai.resolveOps([op], draft('add a small devops skill'));
     // No flag.
     assert.deepEqual(stored, { op: 'add_skill', name: WRAPPER, category: DEVOPS, inMaster: true });
-    // The plain attest action, which refuses a wrap.
-    assert.deepEqual(ai.toEditAction(stored as never), { kind: 'attest_skill', keyword: WRAPPER, category: DEVOPS });
   });
 });

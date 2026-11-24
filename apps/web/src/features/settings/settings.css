@@ -276,22 +276,6 @@
   border-color: var(--rule-strong);
 }
 
-/* --- Not-yet-wired notice --------------------------------------------- */
-
-/* Marks a page whose controls are laid out but not yet reading or writing the
-   database. Bronze, the "a human is needed and nothing is broken" colour -
-   this is an incomplete build, not a fabrication and not a failure.
-   Stated plainly on the page rather than left for the operator to discover by
-   editing a field and watching nothing happen. */
-.not-wired {
-  margin-top: var(--gap-4);
-  padding: var(--gap-3) var(--gap-4);
-  max-width: 64ch;
-  background: var(--signal-wash);
-  border-left: 3px solid var(--signal);
-  font-size: var(--size-sm);
-}
-
 /* --- The master-profile ingest surface -------------------------------- */
 
 /* The paste box. Mono, because JSON is code and proportional type makes a
@@ -1455,11 +1439,6 @@
   background: var(--sheet);
 }
 
-.suggestions-search-wrap {
-  flex: 1;
-  min-width: 220px;
-}
-
 .suggestions-search-input {
   width: 100%;
   padding: 6px 10px;
@@ -2152,12 +2131,6 @@
   flex-direction: column;
   gap: var(--gap-2);
   min-width: 240px;
-}
-
-.answer-bank__input-row {
-  display: flex;
-  align-items: center;
-  gap: var(--gap-2);
 }
 
 .answer-bank__input {

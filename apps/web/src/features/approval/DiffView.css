@@ -319,134 +319,113 @@
   border: 1px solid var(--traced-edge);
 }
 
-/* --- The fabrication alert -------------------------------------------- */
+/* --- The claim notice (S24, 2026-11-24) -------------------------------- */
 
-/* The ONLY dark surface in the application. Its scarcity is the signal: a dark
-   band means this row can hurt you. Do not reuse --alarm-ground elsewhere. */
-.alarm {
-  padding: var(--gap-5);
-  background: var(--alarm-ground);
-  color: var(--ink-inverse);
-  /* No radius. Paper has trimmed edges; this is not paper, it is an
-     instrument panel, and the square edge says so. */
-  border-radius: 0;
-  /* A single bright edge on the left, the way a warning lamp is bezelled. */
-  border-left: 4px solid var(--fabricated);
+/* A calm notice, not an alarm. Until 2026-11-24 this was the app's only dark surface: an oxblood-edged
+   near-black band (Teja: "rip empathy ux"). Most of what it lists is honest rewording the auditor could
+   not match, so it now sits on paper like every other panel, with the amber "needs you" edge the queue
+   already uses for human steps. Still unmissable: a 3px edge, a wash, and a heading at section size.
+   The classes were renamed `.alarm*` -> `.claim-notice*` with DiffView.tsx in the same change (S24). */
+.claim-notice {
+  /* Room to read, at the same rhythm as the clean-row notice below. */
+  padding: var(--gap-4) var(--gap-5);
+  /* The amber "needs a human" wash over paper, themed by light-dark() in tokens.css. */
+  background: var(--signal-wash);
+  /* Body ink, not the inverse ink of a dark band. */
+  color: var(--ink);
+  /* The same soft corner the other panels use; this is a note on the page, not an instrument panel. */
+  border-radius: 6px;
+  /* One edge in the signal hue: visible in a glance and in greyscale, without a wall of colour. */
+  border-left: 3px solid var(--signal);
 }
 
-.alarm__heading {
-  /* The largest type in the app, used exactly once, on the thing that matters
-     most. Boldness spent in one place. */
-  font-size: var(--size-xl);
-  font-weight: 600;
-  line-height: 1.2;
-  letter-spacing: -0.015em;
-  /* The band's light ink. base.css's h3 colour otherwise wins over the band's inherited colour, which
-     printed this heading dark-on-dark (2026-11-07 audit, both themes). */
-  color: inherit;
+.claim-notice__heading {
+  /* Section-header size: important, never the largest type on the screen. */
+  font-size: var(--font-size-section-header);
+  /* Matches every other section heading. */
+  font-weight: var(--font-weight-section-header);
+  /* Same leading as the other section headers. */
+  line-height: var(--line-height-section-header);
+  /* The deep amber, which reads as "look here" and measures as text on the wash in both themes. */
+  color: var(--signal-strong);
 }
 
-.alarm__consequence {
-  margin-top: var(--gap-3);
-  /* Serif, because this sentence describes the document and its consequences
-     rather than the interface - it reads as a finding, not a toast. */
-  font-family: var(--font-paper);
-  font-size: var(--size-md);
-  line-height: 1.45;
-  /* Under 80 characters so the sentence that stops the operator is actually
-     readable rather than scanned across a full-width band. */
-  max-width: 46ch;
+.claim-notice__consequence {
+  /* A breath under the heading. */
+  margin-top: var(--gap-2);
+  /* Body size: this is an explanation, not a verdict. */
+  font-size: var(--font-size-body);
+  /* Comfortable reading leading. */
+  line-height: var(--line-height-body);
+  /* A readable measure on a full-width card. */
+  max-width: 70ch;
 }
 
-.alarm__instruction {
-  margin-top: var(--gap-4);
-  /* Dimmer than the consequence: it is procedural, and the finding outranks
-     the procedure. */
-  color: var(--alarm-ink-muted);
+.claim-notice__instruction {
+  /* Set apart from the explanation above it. */
+  margin-top: var(--gap-2);
+  /* Procedural, so one step quieter than the explanation. */
+  color: var(--ink-secondary);
+  /* Helper size, as elsewhere for instructions. */
   font-size: var(--size-sm);
 }
 
-.alarm__claims {
+.claim-notice__claims {
+  /* One claim per row. */
   display: flex;
+  /* Stacked, in document order. */
   flex-direction: column;
+  /* Each row a separate decision. */
   gap: var(--gap-2);
+  /* Clear of the instruction. */
   margin-top: var(--gap-3);
 }
 
-.alarm__claim {
+.claim-notice__claim {
+  /* Text and its one control on one line where there is room. */
   display: flex;
+  /* Wraps on a phone instead of overflowing. */
   flex-wrap: wrap;
-  /* Claim text and its one control on one line where there is room, so each
-     claim reads as one decision rather than a form section. */
+  /* So each claim reads as one decision rather than a form section. */
   align-items: center;
+  /* Text left, control right. */
   justify-content: space-between;
-  gap: var(--gap-4);
-  padding: var(--gap-3) var(--gap-4);
-  /* Slightly lifted off the alarm ground so each claim is a discrete object
-     the operator can work through one at a time. */
-  background: var(--alarm-raised);
-  border-left: 2px solid var(--fabricated);
+  /* Space between text and control. */
+  gap: var(--gap-3);
+  /* Compact, but a comfortable tap target around the button. */
+  padding: var(--gap-2) var(--gap-3);
+  /* Paper, lifted off the wash, so each claim is a discrete object to work through. */
+  background: var(--sheet);
+  /* A hairline, not a coloured stripe: the notice's edge already carries the signal. */
+  border: 1px solid var(--rule);
+  /* Same soft corner as the notice. */
+  border-radius: 4px;
 }
 
-.alarm__claim-text {
-  /* The submitted words, set in the resume's own serif so the operator
-     recognises them as document content rather than a UI label. */
+.claim-notice__claim-text {
+  /* The submitted words, in the resume's own serif, so they read as document content. */
   font-family: var(--font-paper);
-  font-size: var(--size-md);
-  font-weight: 600;
+  /* Body size: a whole bullet must fit without shouting. */
+  font-size: var(--size-base);
+  /* Ordinary weight; the quote is the content, not an alert. */
+  font-weight: 500;
+  /* A long bullet wraps inside its row instead of pushing the control off screen. */
+  min-width: 0;
+  /* Takes the space the control does not need. */
+  flex: 1 1 24ch;
 }
 
-/* "Keep it, I can defend it" (D1, 2026-11-07): the one control per claim. On the dark band, so it
-   takes the band's light ink rather than the paper button's dark one. Scoped under .alarm so these rules
-   outrank base.css's .button fill (equal specificity lost on load order: a white box, 2026-11-07 audit). */
-.alarm .alarm__keep {
-  /* Transparent, so the raised claim surface shows through: the control is quieter than the claim. */
-  background: transparent;
-  /* The band's own light ink. */
-  color: inherit;
-  /* A light edge that reads on the dark ground in both themes. */
-  border-color: var(--alarm-ink-muted);
-}
-
-/* Hover on the band: a hair of lift, never the paper panel colour, which would flash white. */
-.alarm .alarm__keep:hover:not(:disabled) {
-  /* The raised tone the claim already uses, so hover stays inside the band's palette. */
-  background: var(--alarm-raised);
-  /* Brighter edge, so the hover survives greyscale. */
-  border-color: var(--ink-inverse);
-  /* Keeps the light ink against the raised tone. */
-  color: inherit;
-}
-
-/* Kept: pressed, and visibly done. base.css's :disabled would grey it out like an unavailable control;
-   a kept claim is a recorded answer, so it keeps the light ink with a solid edge instead. */
-.alarm .alarm__keep[aria-pressed='true'] {
-  /* The band's raised tone: filled means "answered". */
-  background: var(--alarm-raised);
-  /* Light ink, overriding the disabled grey. */
-  color: var(--ink-inverse);
-  /* The fabricated edge: this claim still traces to nothing, the operator just stands behind it. */
-  border-color: var(--fabricated);
+/* The one control per claim: base.css's paper button, untouched, which already themes in both modes.
+   Only the kept state is restyled, so a recorded answer does not look like an unavailable control. */
+.claim-notice .claim-notice__keep[aria-pressed='true'] {
+  /* The traced wash: kept means "you vouched for this". */
+  background: var(--traced-wash);
+  /* Readable green ink over that wash, overriding the disabled grey. */
+  color: var(--traced-strong);
+  /* A green edge, so the done state survives greyscale through the border change too. */
+  border-color: var(--traced);
   /* Not a pointer: there is nothing more to do. */
   cursor: default;
-}
-
-/* Briefly disabled while a save runs: base.css's :disabled paints a white paper fill with grey ink, which
-   on the dark band read as an empty white box (2026-11-07 audit). Dimmed band ink instead. */
-.alarm .alarm__keep:disabled:not([aria-pressed='true']) {
-  /* The band shows through, as when enabled. */
-  background: transparent;
-  /* Dimmer than enabled, still legible on the dark ground. */
-  color: var(--alarm-ink-muted);
-  /* The same light edge as enabled. */
-  border-color: var(--alarm-ink-muted);
-}
-
-/* Focus rings on the dark band need the inverse ink, because the forest green
-   default from base.css is close to invisible against --alarm-ground. */
-.alarm .alarm__keep:focus-visible {
-  /* The band's light ink as the ring colour. */
-  outline-color: var(--ink-inverse);
 }
 
 /* --- The clean-row notice --------------------------------------------- */
@@ -587,20 +566,21 @@
   border-radius: 2px;
 }
 
-/* FABRICATED: traces to nothing. Every dimension pushed the opposite way from
-   traced - colour on the text itself, semibold, a heavy underline, and a wash
-   underneath. Four redundant signals, because any one of them alone can be
-   lost to a colour-blind operator, a greyscale screenshot, or a tired glance. */
+/* FLAGGED ("fabricated" verdict): words the auditor could not find in the master. Still four
+   redundant signals - ink colour, weight, an underline and a wash - because any one alone can be
+   lost to a colour-blind operator, a greyscale screenshot, or a tired glance; each is calmer now. */
 .run--fabricated {
-  /* Overrides the browser's yellow <mark> default, which would read as a
-     highlighter pen rather than a finding. */
-  background: var(--fabricated-wash);
-  color: var(--fabricated-strong);
-  font-weight: 600;
+  /* S24 (2026-11-24): the amber "check this" wash, not oxblood. Since rule 5 now names single
+     words, most marks are honest rewordings, and red accused them. Overrides <mark>'s yellow. */
+  background: var(--signal-wash);
+  /* Deep amber ink, legible on the wash in both themes. */
+  color: var(--signal-strong);
+  /* A step bolder than body, so the mark survives greyscale without shouting. */
+  font-weight: 550;
+  /* A hair of padding so the wash reads as a marked passage. */
   padding: 0 0.15em;
-  /* Thick, and in the deep tone so it survives being printed. This is the
-     signal that reads at a distance. */
-  border-bottom: 3px solid var(--fabricated);
+  /* Dotted, not a heavy rule: a second, non-colour signal that still prints. */
+  border-bottom: 2px dotted var(--signal);
 }
 
 /* The edit's wording: an accent wash with a dashed underline, so it survives greyscale. Accent,
@@ -626,9 +606,12 @@
 /* Loud: names the untraceable claims in words, so the finding survives a
    screenshot, a printout, and colour-blind vision. */
 .line__provenance--fabricated {
-  color: var(--fabricated-strong);
+  /* The same amber as the run it names (S24), never oxblood. */
+  color: var(--signal-strong);
+  /* Bolder than the other provenance notes, so it is read first. */
   font-weight: 600;
-  border-top-color: var(--fabricated);
+  /* The divider takes the signal hue too. */
+  border-top-color: var(--signal);
 }
 
 /* "edited / added / moved by you": the accent of the edit's own wording. */
