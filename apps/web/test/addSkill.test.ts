@@ -338,7 +338,7 @@ describe("tracesToMaster with a master (R0' rule 2, skills)", () => {
     assert.equal(check(withSkills(DOCKER)), true);
   });
 
-  it('accepts dropping a tailor-selected skill, refuses an empty list and any reorder', () => {
+  it('accepts dropping or reordering tailor-selected skills (S9k), refuses an empty list', () => {
     // The tailor's two skills.
     const [node, pg] = original().skills;
     /* Node.js dropped (2026-11-05 ruling: the AI chat's remove_skill). A removal prints no new claim,
@@ -354,10 +354,15 @@ describe("tracesToMaster with a master (R0' rule 2, skills)", () => {
     emptied.skills = [];
     // Refused.
     assert.equal(check(emptied as unknown as Resume), false);
-    // Swapped order: order is part of the tailoring.
+    /* Swapped order: ACCEPTED since S9k (Teja 2026-11-23 21:22, "put harnes rng at frist place ... in ai skill grp"). His
+       "put X first" supersedes c3195b2c's "order is part of the tailoring": a reorder prints no new claim. */
     const reordered = clone(original()) as unknown as { skills: unknown[] };
     // PostgreSQL first.
     reordered.skills = [pg, node];
+    // Accepted: the same two nodes, verbatim.
+    assert.equal(check(reordered as unknown as Resume), true);
+    // A reorder that also renames is still refused: the deep-equal stays the control.
+    reordered.skills = [{ ...(pg as object), name: 'Postgres 16' }, node];
     // Refused.
     assert.equal(check(reordered as unknown as Resume), false);
   });

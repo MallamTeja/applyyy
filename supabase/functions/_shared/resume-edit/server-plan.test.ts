@@ -51,3 +51,16 @@ describe("planServerEdits", () => {
     assert.deepEqual([out.outcomes[0]?.status, out.resume], ["refused", null]);
   });
 });
+
+describe("planServerEdits move_skill_to (2026-11-23)", () => {
+  it("a skill moved to a place in its group lands and is logged as resume_move_skill", () => {
+    // Python is third in Languages & Runtimes; to place 1.
+    const out = plan([{ action: { kind: "move_skill_to", ref: "skl_python", place: 1 }, label: "Move skill to place 1" }]);
+    // Applied.
+    assert.equal(out.outcomes[0]?.status, "applied");
+    // The saved list starts with Python.
+    assert.equal(out.resume?.skills[0]?.ref, "skl_python");
+    // The new event kind, naming the skill's ref.
+    assert.deepEqual(out.steps.map((s) => [s.kind, s.ref]), [["resume_move_skill", "skl_python"]]);
+  });
+});

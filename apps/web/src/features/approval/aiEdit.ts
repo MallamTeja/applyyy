@@ -192,6 +192,9 @@ export type AssistOp =
      asked it to apply (server_apply), and applies them itself; read here so the strict reader never refuses an answer
      over them. In browser-apply mode they resolve to a named refusal (resolveOne). */
   | { readonly op: 'move_entry'; readonly entry: string; readonly place: number }
+  /* 2026-11-23: a printed skill to a 1-based place, server-applied only like move_entry; the group, when sent, picks one
+     of two same-named copies (as on remove_skill). Read so the strict reader never refuses a whole answer over it. */
+  | { readonly op: 'move_skill'; readonly name: string; readonly category?: string; readonly place: number }
   // A master item back onto the resume, by its "mN" or "nN" id.
   | { readonly op: 'add_back'; readonly id: string }
   // New bullet text under an entry, by its "eN" id.
@@ -798,6 +801,8 @@ const SERVER_ONLY_MOVE = 'This move is applied by the server; reload the page an
 function resolveOne(op: AssistOp, draft: AssistDraft, lists: string[][], sections: SectionKind[], gone: Set<string>): StoredOp {
   // S9j: an entry to a place is applied only by the server; this page names the refusal instead of guessing a move.
   if (op.op === 'move_entry') return reject(`Move entry ${op.entry} to place ${op.place}`, SERVER_ONLY_MOVE);
+  // 2026-11-23: a skill to a place likewise has no stored shape; refused by name instead of a guessed browser move.
+  if (op.op === 'move_skill') return reject(`Move skill "${op.name}" to place ${op.place}`, SERVER_ONLY_MOVE);
   // Same for a bullet or a section sent with a place: a direction move below still resolves here.
   if ((op.op === 'move' || op.op === 'move_section') && op.place !== undefined) return reject(`Move ${op.op === 'move' ? op.id : op.section} to place ${op.place}`, SERVER_ONLY_MOVE);
   // A skill needs no target; the master check is made once, now.
@@ -1462,6 +1467,11 @@ function readOp(value: unknown): AssistOp | null {
   if (value.op === 'move_section' && typeof value.section === 'string' && place !== null) return { op: 'move_section', section: value.section, place };
   // S9j: an entry to a place.
   if (value.op === 'move_entry' && typeof value.entry === 'string' && place !== null) return { op: 'move_entry', entry: value.entry, place };
+  // 2026-11-23: a skill to a place: a non-empty name (an empty one names nothing), an optional string group, a place.
+  if (value.op === 'move_skill' && typeof value.name === 'string' && value.name !== '' && (value.category === undefined || typeof value.category === 'string') && place !== null) {
+    // The group only when sent, so the op matches the wire exactly (no invented key).
+    return value.category === undefined ? { op: 'move_skill', name: value.name, place } : { op: 'move_skill', name: value.name, category: value.category, place };
+  }
   // A bullet move: an id and a direction.
   if (value.op === 'move' && typeof value.id === 'string' && direction !== null) return { op: 'move', id: value.id, direction };
   // A section move: a name (checked against the order on resolve) and a direction.

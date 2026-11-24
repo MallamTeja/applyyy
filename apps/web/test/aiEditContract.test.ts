@@ -53,6 +53,8 @@ const SAMPLES: Record<string, Record<string, unknown>> = {
   set_role: { op: 'set_role', entry: 'e0', text: 'Data Analyst Intern' },
   // S9j (2026-11-21): an entry to a place, sent only to a server-applied page; the reader must take it.
   move_entry: { op: 'move_entry', entry: 'e2', place: 1 },
+  // 2026-11-23: a printed skill to a place, sent only to a server-applied page; the reader must take it too.
+  move_skill: { op: 'move_skill', name: 'Harness Engineering', category: 'AI', place: 1 },
 };
 
 // The smallest request parseAssistRequest accepts, so buildAssistPrompt can run.

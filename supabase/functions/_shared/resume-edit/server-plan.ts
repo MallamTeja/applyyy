@@ -15,7 +15,7 @@
 import type { MasterProfile, ResolvedResume } from '../contracts/shared-types.ts';
 // The engine's edits, each a pure function of the resume.
 import {
-  applyTextEdit, removeBullet, removeSkill, moveBullet, moveSection, moveBulletTo, moveSectionTo, moveEntryTo,
+  applyTextEdit, removeBullet, removeSkill, moveBullet, moveSection, moveBulletTo, moveSectionTo, moveEntryTo, moveSkillTo,
   addMasterBullet, addMasterEntry, removeEntry, setEntryRole, type EditOutcome,
 } from './tailored-edits.ts';
 // The one-page fit and content rules, the same call the browser's save runs.
@@ -85,6 +85,8 @@ const EVENT_KIND: Readonly<Record<PureServerAction['kind'], EditEventKind>> = {
   move_section_to: 'resume_move_section',
   // S9j entry place: a new kind of move.
   move_entry_to: 'resume_move_entry',
+  // 2026-11-23 skill place within its group: a new kind of move, as move_entry was.
+  move_skill_to: 'resume_move_skill',
   // Master bullet back.
   add_master_bullet: 'resume_add_bullet',
   // Master entry back.
@@ -125,6 +127,8 @@ function applyOne(action: PureServerAction, current: ResolvedResume, full: Resol
     case 'move_section_to': return moveSectionTo(current, action.section, action.place);
     // S9j.
     case 'move_entry_to': return moveEntryTo(current, action.section, action.ref, action.place);
+    // 2026-11-23.
+    case 'move_skill_to': return moveSkillTo(current, action.ref, action.place);
     // Master bullet back, from FULL.
     case 'add_master_bullet': return addMasterBullet(current, full, action.ref);
     // Master entry back, from FULL.

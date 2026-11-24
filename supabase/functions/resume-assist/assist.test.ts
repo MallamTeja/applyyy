@@ -13,6 +13,9 @@ import {
   MODEL_ONLY_OP_KINDS,
   parseAssistOps,
   parseAssistRequest,
+  // S9k: the fit-to-lines planner and the instruction reader behind its fallback.
+  planGroupFit,
+  fitGroupAsked,
   readUsage,
   type AssistDeps,
   type AssistRequest,
@@ -500,11 +503,11 @@ test("the schema and the system text offer exactly the twelve ops the model may 
   // The schema, read through its nested shape.
   const schema = prompt.responseSchema as { properties: { ops: { items: { properties: { op: { enum: string[] }; direction: { enum: string[] } } } } } };
   // Closed to what parseAssistOps reads; the two remove ops joined on 2026-11-04.
-  assert.deepEqual(schema.properties.ops.items.properties.op.enum, ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "move_entry", "add_back", "new_bullet", "remove_entry", "set_role", "add_group"]);
+  assert.deepEqual(schema.properties.ops.items.properties.op.enum, ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "move_entry", "add_back", "new_bullet", "remove_entry", "set_role", "add_group", "move_skill", "fit_group"]);
   // Direction closed in the schema too.
   assert.deepEqual(schema.properties.ops.items.properties.direction.enum, ["up", "down"]);
   // Since 2026-11-04 the system text spells every op as exact JSON, so a skill's name cannot land in "text".
-  for (const kind of ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "move_entry", "add_back", "new_bullet", "remove_entry", "set_role", "add_group"]) {
+  for (const kind of ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "move_entry", "add_back", "new_bullet", "remove_entry", "set_role", "add_group", "move_skill", "fit_group"]) {
     // Each kind appears as a JSON example, quoted exactly as the model must write it.
     assert.match(prompt.systemInstruction, new RegExp(`\\{"op":"${kind}"`), kind);
   }
@@ -1658,7 +1661,7 @@ test("add_group: the answer never carries add_group, so the browser's strict rea
   // Only kinds the web already reads; the model-only kind is gone from the answer.
   assert.deepEqual([...new Set(ops.ops.map((op) => op.op))].sort(), ["add_skill", "remove"]);
   // And it is listed as model-only, for the web contract test to subtract.
-  assert.deepEqual([...MODEL_ONLY_OP_KINDS], ["add_group"]);
+  assert.deepEqual([...MODEL_ONLY_OP_KINDS], ["add_group", "fit_group"]);
 });
 
 test("add_group: a group the master has nothing left for is refused with a reason, never filled with invented skills", () => {
@@ -1954,4 +1957,133 @@ test("S9i P2: a closed tab still finds the bubble: the server writes the exchang
     ["user", "drop the first point", null],
     ["assistant", "[Applied: Remove bullet | Could not do: Move section (already first)] Dropped one.", []],
   ]);
+});
+
+// --- S9k: three live failures on row 957991ec (ElevenLabs "Full-Stack Engineer (Backend Leaning) - Creative Agents") ---
+//
+// Teja's chat c56bd963, 2026-11-23 21:21-21:22 IST (resume_chat_messages 939-946). Each test below quotes the live text.
+
+// The live AI group in print order before 21:21 (8 printed now, plus Tool Calling and Guardrails that 941 removed).
+const LIVE_AI = ["AI Agents & Workflows", "Prompt Engineering", "MCP Integrations", "RAG Pipelines", "Context Engineering", "LLM/SLM API Integration", "Multi-Agent Systems", "Harness Engineering", "Tool Calling", "Guardrails"];
+// Another printed group, so a fit or a move can be shown to leave it alone.
+const LIVE_TESTING = ["Unit Testing", "Integration Testing", "Pytest"];
+
+// The live row as a server-applied request: the AI group (all ten or the given names), a Testing group, the live JD keywords.
+function liveRequest(instruction: string, ai: readonly string[] = LIVE_AI, description = "Build backend services for creative AI agents. APIs, monitoring, observability and testing."): AssistRequest {
+  // The printed skills with their groups, in print order.
+  const printedSkills = [...ai.map((name) => ({ name, category: "AI" })), ...LIVE_TESTING.map((name) => ({ name, category: "Testing & Quality" }))];
+  // Through the real validator, so the fixture cannot drift from it.
+  const parsed = parseAssistRequest(body({ instruction, job: { title: "Full-Stack Engineer (Backend Leaning) - Creative Agents", company: "Elevenlabs", missing: ["Observability"], description }, skills: printedSkills.map((skill) => skill.name).join(", "), printedSkills, categories: ["AI", "Testing & Quality"] }));
+  // Valid fixture.
+  if (!parsed.ok) throw new Error(parsed.message);
+  // Server-applied, as the live page was (7ae57c92).
+  return { ...parsed.request, serverApply: true };
+}
+
+// The worst-rung line count, the planner's own measure, restated for the assertions.
+const linesOf = (category: string, names: readonly string[]): number => Math.max(...TYPOGRAPHY_LADDER.map((_, index) => skillGroupLineCount(category, names, index)));
+
+test("S9k live 939: 'rm some aim skills to fill it in one line only' reads as the AI group in 1 line", () => {
+  // The live words, typo included: "aim skills" names AI only through the "<word> skills" frame.
+  assert.deepEqual(fitGroupAsked(liveRequest("rm some aim skills to fill it in one line only")), { category: "AI", lines: 1 });
+  // A line ask with no group named is no fit ask: nothing guessed.
+  assert.equal(fitGroupAsked(liveRequest("keep it in one line")), null);
+  // A group ask with no line count is not a fit ask either.
+  assert.equal(fitGroupAsked(liveRequest("rm some ai skills")), null);
+});
+
+test("S9k live 939: the model's off-topic personal-details answer is replaced by the server's fit of the AI group", () => {
+  // The live answer: no op, the personal-details sentence.
+  const parsed = parseAssistOps(JSON.stringify({ ops: [], note: "Personal details like email, phone, and links are updated on the Master profile page." }), liveRequest("rm some aim skills to fill it in one line only"));
+  // Well-formed.
+  if (!parsed.ok) throw new Error("answer did not parse");
+  // The off-topic sentence is gone.
+  assert.doesNotMatch(parsed.note, /Personal details/);
+  // Measured 2026-11-23 on the live 10-skill group: five JD-unnamed skills go, weakest (last) first, down to the floor of 5.
+  const removed = ["Guardrails", "Tool Calling", "Harness Engineering", "Multi-Agent Systems", "LLM/SLM API Integration"];
+  // Ordinary removals in the AI group, so the web reads them as it always has.
+  assert.deepEqual(parsed.ops, removed.map((name) => ({ op: "remove_skill", name, category: "AI" })));
+  // What is left.
+  const left = LIVE_AI.filter((name) => !removed.includes(name));
+  // One printed line at every rung, and exactly the floor kept.
+  assert.deepEqual([linesOf("AI", left), left.length], [1, 5]);
+});
+
+test("S9k: planGroupFit removes the least JD-relevant first (JD-unnamed from the end), keeps the floor, never touches another group", () => {
+  // Wide names, so one line forces several removals; the JD names only "RAG Pipelines" and "Harness Engineering".
+  const plan = planGroupFit(liveRequest("x", LIVE_AI, "We need RAG Pipelines and Harness Engineering."), "ai", 1);
+  // Harness Engineering now survives (the JD names it) and Context Engineering goes in its place; RAG is kept too.
+  assert.deepEqual(plan, { ok: true, category: "AI", remove: ["Guardrails", "Tool Calling", "Multi-Agent Systems", "LLM/SLM API Integration", "Context Engineering"] });
+});
+
+test("S9k: a fit the floor cannot reach removes NOTHING and says how many lines the 5 need", () => {
+  // Five very long AI names: five of them cannot print on one line at any rung.
+  const long = ["Retrieval-Augmented Generation Pipelines", "Large Language Model API Integration", "Multi-Agent Orchestration Systems", "Context Engineering for Long Sessions", "Evaluation Harness Engineering"];
+  // The planner.
+  const plan = planGroupFit(liveRequest("x", long), "AI", 1);
+  // Refused.
+  assert.equal(plan.ok, false);
+  // With the floor and the real line count.
+  assert.equal(!plan.ok && plan.why, `"AI" cannot fit in 1 line: AI skills never go below 5, and 5 of them still take ${linesOf("AI", long)} lines. Remove or shorten a skill by name to choose which.`);
+});
+
+test("S9k: a group that already fits is told so, never a silent no-op", () => {
+  // Three short testing skills fit one line.
+  const plan = planGroupFit(liveRequest("x"), "Testing & Quality", 1);
+  // Refused with the reason.
+  assert.deepEqual(plan, { ok: false, why: '"Testing & Quality" already fits in 1 line.' });
+});
+
+test("S9k live 942: a server-applied answer never says 'Proposed 2 changes. See the list below.'", () => {
+  // The live ask and the model's two removals, with no note of its own.
+  const ops = [{ op: "remove_skill", name: "Tool Calling" }, { op: "remove_skill", name: "Guardrails" }];
+  // Server-applied: the outcome line ("[Applied: ...]") is the reply, so the note adds nothing.
+  const served = parsedOps(ops, liveRequest("rm tool calling gurad rails"));
+  // Both kept.
+  assert.equal(served.ops.length, 2);
+  // No stale browser-era wording.
+  assert.equal(served.note, "");
+  // A browser-applied page still gets the count of its cards.
+  const browser = parsedOps(ops, { ...liveRequest("rm tool calling gurad rails"), serverApply: false });
+  // Unchanged there.
+  assert.equal(browser.note, "Proposed 2 changes. See the list below.");
+});
+
+test("S9k live 944/946: 'put harnes rng at frist place' in the AI group is a move_skill, never 'a bullet it was not shown'", () => {
+  // The model now sends the skill op, its own spelling slightly off and the group in lower case.
+  const kept = parsedOps([{ op: "move_skill", name: "Harnes Engineering", category: "ai", place: 1 }], liveRequest("put harnes rng at frist place in skills section in ai skill grp"));
+  // Kept in the printed spelling and group, so the server finds it exactly.
+  assert.deepEqual(kept.ops, [{ op: "move_skill", name: "Harness Engineering", category: "AI", place: 1 }]);
+  // A skill that is not printed names the real reason.
+  const missing = parsedOps([{ op: "move_skill", name: "Kubernetes", category: "AI", place: 1 }], liveRequest("put kubernetes first"));
+  // Refused with the skill's name, never "bullet".
+  assert.equal(missing.rejected[0]?.why, '"Kubernetes" is not on the resume.');
+  // An older, browser-applied page cannot apply a place move: said so.
+  const older = parsedOps([{ op: "move_skill", name: "Harness Engineering", category: "AI", place: 1 }], { ...liveRequest("x"), serverApply: false });
+  // The reload sentence.
+  assert.match(older.rejected[0]?.why ?? "", /reload it and ask again/);
+});
+
+test("S9k review: the fit fallback never fires when the model answered with ANY op (a bullet edit, an add_skill)", () => {
+  // "fit in one line" about a BULLET, with a printed group named in the sentence: the model's edit is the answer.
+  const edited = parsedOps([{ op: "edit", id: "b0", text: "Shorter bullet text." }], liveRequest("make the Testing & Quality bullet fit in one line"));
+  // No server-added removal rode along with the model's edit: none kept...
+  assert.equal(edited.ops.some((op) => op.op === "remove_skill"), false);
+  // ...and none refused either (a refused removal would still mean the server invented one).
+  assert.equal(edited.rejected.some((r) => /remove skill/i.test(r.what)), false);
+  // An add with a "keep it on one line" wish: the model's add_skill stands and nothing is trimmed behind it.
+  const added = parsedOps([{ op: "add_skill", name: "Monitoring", category: "AI" }], liveRequest("add monitoring to ai skills, keep it in one line"));
+  // Still no server-added removal, kept...
+  assert.equal(added.ops.some((op) => op.op === "remove_skill"), false);
+  // ...or refused.
+  assert.equal(added.rejected.some((r) => /remove skill/i.test(r.what)), false);
+});
+
+test("S9k review: move_skill naming a group the skill is NOT printed in is refused, never moved inside another group", () => {
+  // Harness Engineering prints only in AI; the model said Testing & Quality.
+  const moved = parsedOps([{ op: "move_skill", name: "Harness Engineering", category: "Testing & Quality", place: 1 }], liveRequest("put harness engineering first in testing"));
+  // Nothing kept: moving it inside AI would be a change the owner did not ask for.
+  assert.deepEqual(moved.ops, []);
+  // The reason names both, like resolve-ops does.
+  assert.equal(moved.rejected[0]?.why, '"Harness Engineering" is not in group "Testing & Quality".');
 });

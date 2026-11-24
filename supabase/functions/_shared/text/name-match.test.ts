@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 // Strict comparisons.
 import assert from "node:assert/strict";
 // The unit under test.
-import { compactName, namedIn, withinOneEdit, withinTwoEdits } from "./name-match.ts";
+import { compactName, namedIn, sameName, withinOneEdit, withinTwoEdits } from "./name-match.ts";
 
 describe("namedIn", () => {
   it("reads Teja's live typo 'rm  vs cod e' as naming VS Code (the run compacts to 'vscode')", () => {
@@ -43,5 +43,25 @@ describe("namedIn", () => {
     assert.equal(withinOneEdit("ab", "abcd"), false);
     // A swap plus a substitution is two.
     assert.equal(withinTwoEdits("typegrpahy", "typography"), true);
+  });
+});
+
+describe("sameName", () => {
+  it("matches a skill name across spacing, case and namedIn's typo budget (6+: one edit, 8+: two)", () => {
+    // The live ask's own words: "harness eng" is not the name, but "harness engineering" with a typo is.
+    assert.equal(sameName("harnes engineering", "Harness Engineering"), true);
+    // Spacing and case never matter: both compact to "llmslmapiintegration".
+    assert.equal(sameName("llm/slm api integration", "LLM/SLM API Integration"), true);
+    // A swap plus a substitution on an 8+ name is within two.
+    assert.equal(sameName("typogarphy", "Typography"), true);
+  });
+
+  it("is exact on short names and never matches an empty target", () => {
+    // Group "AI" is 2 letters: one edit away is a different group.
+    assert.equal(sameName("Al", "AI"), false);
+    // Exact short name still matches.
+    assert.equal(sameName("ai", "AI"), true);
+    // Pure punctuation compacts to nothing: never a name.
+    assert.equal(sameName("", "--"), false);
   });
 });

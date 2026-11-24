@@ -47,6 +47,8 @@ export type EditEventKind =
   | 'resume_move_section'
   // S9j (2026-11-21): one entry (a job, a project) moved to a place within its section, by the chat.
   | 'resume_move_entry'
+  // 2026-11-23: one skill moved to a place within its group, by the chat.
+  | 'resume_move_skill'
   // R0': a master bullet put back under its entry.
   | 'resume_add_bullet'
   // R0': a whole master entry put on.

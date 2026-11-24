@@ -13,6 +13,8 @@
 import type { BulletSection, SectionKind } from './tailored-edits.ts';
 // The edit target union the engine's text edits take.
 import type { EditTarget } from './edit-target.ts';
+// The shared name matcher, so "harnes engineering" finds Harness Engineering with namedIn's own typo budget.
+import { sameName } from '../text/name-match.ts';
 
 // The id -> ref maps the browser sends with a server-applied ask (it minted the ids in buildAssistDraft).
 export interface ApplyMaps {
@@ -44,6 +46,8 @@ export type WireOp =
   | { readonly op: 'move_section'; readonly section: string; readonly direction?: 'up' | 'down'; readonly place?: number }
   // S9j: an entry to a place within its section ("applyyy first, One-on-One second").
   | { readonly op: 'move_entry'; readonly entry: string; readonly place: number }
+  // 2026-11-23: a skill to a place within its group ("harness eng at first place in ai skill grp"), by name.
+  | { readonly op: 'move_skill'; readonly name: string; readonly category?: string; readonly place: number }
   // A master item back (mN bullet, nN entry).
   | { readonly op: 'add_back'; readonly id: string }
   // A bullet the owner dictated, under an entry.
@@ -73,6 +77,8 @@ export type ServerAction =
   | { readonly kind: 'move_section_to'; readonly section: SectionKind; readonly place: number }
   // moveEntryTo (S9j).
   | { readonly kind: 'move_entry_to'; readonly section: BulletSection; readonly ref: string; readonly place: number }
+  // moveSkillTo (2026-11-23).
+  | { readonly kind: 'move_skill_to'; readonly ref: string; readonly place: number }
   // addMasterBullet.
   | { readonly kind: 'add_master_bullet'; readonly ref: string }
   // addMasterEntry.
@@ -149,6 +155,23 @@ export function resolveWireOp(op: WireOp, maps: ApplyMaps, sections: readonly Se
     // A real place only.
     return isPlace(op.place) ? { ok: true, action: { kind: 'move_entry_to', section: entry.section, ref: entry.ref, place: op.place } } : no(`Move entry ${op.entry}`, 'The AI did not say which place.');
   }
+  // 2026-11-23: a skill to a place within its group, found by name (skills have no short id).
+  if (op.op === 'move_skill') {
+    // The card wording for every refusal below.
+    const what = `Move skill "${op.name}"`;
+    // Every printed copy whose name is this one, typo-forgiving on long names only.
+    const named = maps.skills.filter((skill) => sameName(op.name, skill.name));
+    // Narrowed to the named group: sameName is exact on a short group ("AI" is 2 letters, so "Al" is not it).
+    const copies = op.category === undefined ? named : named.filter((skill) => sameName(op.category!, skill.category));
+    // Not printed (or not in the named group).
+    if (copies.length === 0) return no(what, `"${op.name}" is not on the resume.`);
+    // The distinct groups it prints under, in print order.
+    const groups = [...new Set(copies.map((skill) => skill.category))];
+    // In two groups with none named: refuse rather than move the wrong copy.
+    if (groups.length > 1) return no(what, `"${op.name}" prints under ${groups.join(' and ')}; say which group.`);
+    // A real place only.
+    return isPlace(op.place) ? { ok: true, action: { kind: 'move_skill_to', ref: copies[0]!.ref, place: op.place } } : no(what, 'The AI did not say which place.');
+  }
   // A master item back: an mN bullet or an nN entry.
   if (op.op === 'add_back') {
     // A bullet first.
@@ -205,6 +228,8 @@ export function actionLabel(action: ServerAction): string {
     case 'move_section_to': return `Move section ${action.section} to ${placeWord(action.place)}`;
     // Entry place.
     case 'move_entry_to': return `Move ${action.section} entry to ${placeWord(action.place)}`;
+    // Skill place within its group.
+    case 'move_skill_to': return `Move skill to ${placeWord(action.place)}`;
     // Master bullet back.
     case 'add_master_bullet': return 'Add back a master bullet';
     // Master entry back.

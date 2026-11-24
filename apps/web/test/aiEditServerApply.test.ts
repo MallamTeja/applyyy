@@ -50,6 +50,28 @@ describe('S9i P2: the reader takes a server-applied answer', () => {
     assert.equal(old.kind === 'ok' && 'applied' in old, false);
   });
 
+  it('reads a server-applied move_skill (the live "Harness Engineering first" ask); a malformed one is refused whole', async () => {
+    // The live case (2026-11-23): a skill to the first place of its group, applied by the server.
+    const ops = [{ op: 'move_skill', name: 'Harness Engineering', category: 'AI', place: 1 }];
+    // The server's answer with its one-line apply report.
+    const answer = await ai.requestAssist(answering({ status: 'ok', ops, note: '', applied: [{ status: 'applied', label: 'Move skill to place 1' }], chat_saved: true }), body);
+    // Read, not refused, and the op kept exactly as the wire sent it.
+    assert.deepEqual(answer.kind === 'ok' ? answer.ops : answer, ops);
+    // Malformed shapes: place 0, an empty name, a fractional place, a numeric category, a missing place.
+    const bad = [{ place: 0 }, { name: '' }, { place: 1.5 }, { category: 3 }, { place: undefined }];
+    // Each must refuse the WHOLE answer, never pass as a half-read op.
+    for (const patch of bad) {
+      // One answer per malformed shape, so a failure names it.
+      const read = await ai.requestAssist(answering({ status: 'ok', ops: [{ ...ops[0], ...patch }], note: '' }), body);
+      // Refused whole.
+      assert.equal(read.kind, 'error', `accepted ${JSON.stringify(patch)}`);
+    }
+    // The group is optional: without it the op still reads, with no category key invented.
+    const bare = await ai.requestAssist(answering({ status: 'ok', ops: [{ op: 'move_skill', name: 'Go', place: 2 }], note: '' }), body);
+    // Exactly the two sent fields.
+    assert.deepEqual(bare.kind === 'ok' ? bare.ops : bare, [{ op: 'move_skill', name: 'Go', place: 2 }]);
+  });
+
   it('a place-move reaching a page that applies in the browser becomes a named refusal card', () => {
     // The smallest diff the draft builder reads.
     const empty = { applicationId: 'app-1', jobTitle: '', companyName: '', coverage: { jdKeywords: [], honestlyMatched: [], matchedByFabrication: [], matchedByEdit: [] }, lines: [] } as never;
@@ -57,6 +79,10 @@ describe('S9i P2: the reader takes a server-applied answer', () => {
     const [card] = ai.resolveOps([{ op: 'move_entry', entry: 'e2', place: 1 }], ai.buildAssistDraft(empty, [], 'x'));
     // Refused by name, never applied by the browser.
     assert.equal(card?.op, 'rejected');
+    // A skill to a place is server-only too (2026-11-23): refused by name, never guessed into a browser move.
+    const [skill] = ai.resolveOps([{ op: 'move_skill', name: 'Go', place: 1 }], ai.buildAssistDraft(empty, [], 'x'));
+    // The same named refusal.
+    assert.equal(skill?.op, 'rejected');
   });
 });
 

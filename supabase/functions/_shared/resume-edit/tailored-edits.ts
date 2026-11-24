@@ -677,12 +677,10 @@ function skillsAreOriginalPlusMaster(candidate: unknown, original: ResolvedResum
     /* Field for field, the same construction addSkill uses, so "deep-equal" means "built by addSkill". */
     master.skills.map((skill) => [skill.id, { ref: skill.id, name: skill.name, category: skill.category }]),
   );
-  /* The tailor's skills by ref, with their position, so order can be enforced. */
+  /* The tailor's skills by ref, with their position, so each one is compared with the tailor's own node. */
   const tailorIndex = new Map<string, number>(original.skills.map((skill, index) => [skill.ref, index]));
   /* Refs seen so far, for the duplicate check. */
   const seen = new Set<string>();
-  /* The last tailor skill's position; strictly increasing means the tailor's order is kept. */
-  let lastTailorIndex = -1;
   /* Every entry, proven to be either a tailor skill or a master addition. */
   for (const entry of candidate as unknown[]) {
     /* Each skill must be an object before its ref can be read. */
@@ -701,10 +699,10 @@ function skillsAreOriginalPlusMaster(candidate: unknown, original: ResolvedResum
     if (at !== undefined) {
       /* Any field changed (a renamed skill) is outside R0. */
       if (!deepEqual(entry, original.skills[at])) return false;
-      /* Behind an earlier tailor skill is a reorder, not an addition. */
-      if (at <= lastTailorIndex) return false;
-      /* Advance the floor. */
-      lastTailorIndex = at;
+      /* S9k (2026-11-23): a REORDER of the tailor's skills is allowed. Until then "order is part of the tailoring" (c3195b2c,
+         2026-10-08, a code choice, not a ruling) refused it, so "put harness eng at first place" in the AI group could be
+         planned and then failed this save. A reorder prints no new claim: the deep-equal above still refuses a renamed or
+         re-grouped skill, `seen` a duplicate, and entries and bullets were already free to reorder (rules 4-5). */
       /* Proven; next entry. */
       continue;
     }
@@ -1071,6 +1069,35 @@ export function moveBulletTo(current: ResolvedResume, ref: string, place: number
   const moved = movedTo(bullets, at.bulletIndex, to);
   /* Only that entry's bullets replaced. */
   return { ok: true, resume: replaceBullets(current, at.section, at.entryIndex, () => moved), before: refList(bullets), after: refList(moved) };
+}
+
+/* One skill to a place within its group (2026-11-23: "put harness eng at first place ... in ai skill grp"; no op
+   could reorder a skill, so the AI sent a bullet move and was refused). skills is FLAT; a group is every skill with
+   the same category, printed in array order. Only that group's members are permuted, inside the slots they already
+   occupy, so every other skill keeps its exact index and no other group's print order can change. */
+export function moveSkillTo(current: ResolvedResume, ref: string, place: number): EditOutcome {
+  /* Where the skill sits in the flat list. */
+  const from = current.skills.findIndex((skill) => skill.ref === ref);
+  /* Not on the resume: refuse, never guess (removeSkill's wording). */
+  if (from === -1) return { ok: false, reason: 'That skill is no longer on this resume.' };
+  /* The group's slots in the flat list, in print order: the only indexes this move may write. */
+  const slots = current.skills.flatMap((skill, i) => (skill.category === current.skills[from]!.category ? [i] : []));
+  /* The group's members in print order. */
+  const group = slots.map((i) => current.skills[i]!);
+  /* Where it goes inside the group; past the end means last. */
+  const to = placeIndex(place, group.length);
+  /* Not a place. */
+  if (to === null) return { ok: false, reason: 'A place is a whole number from 1.' };
+  /* Already there: a no-op is never recorded as a move. */
+  if (to === slots.indexOf(from)) return { ok: false, reason: `That skill is already in place ${to + 1} in its group.` };
+  /* The group's new order, every other member keeping its relative order. */
+  const moved = movedTo(group, slots.indexOf(from), to);
+  /* A copy of the flat list to write the group back into. */
+  const skills = [...current.skills];
+  /* Each group slot gets the member now at that rank; every other index is untouched. */
+  slots.forEach((slot, rank) => { skills[slot] = moved[rank]!; });
+  /* Only skills replaced; before/after are the group's names, readable in the log like the printed line. */
+  return { ok: true, resume: { ...current, skills }, before: skillNames(group), after: skillNames(moved) };
 }
 
 /* A master bullet back onto the resume under its own entry, in the master's words (FULL's node,

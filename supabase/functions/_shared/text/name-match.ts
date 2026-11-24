@@ -50,6 +50,24 @@ export function withinTwoEdits(a: string, b: string): boolean {
   return dp[a.length]![b.length]! <= 2;
 }
 
+/* namedIn's typo budget on two already-compacted names, shared so namedIn and sameName can never drift apart:
+   exact, one edit on a target of 6+ characters, two (a swap is one) on 8+. Short names stay exact because one edit
+   from "C", "Go" or the group "AI" is a different name. */
+function closeCompact(compact: string, target: string): boolean {
+  // Exact, or one typo on a 6+ name, or two (a swap is one) on an 8+ name.
+  return compact === target || (target.length >= 6 && withinOneEdit(compact, target)) || (target.length >= 8 && withinTwoEdits(compact, target));
+}
+
+/* Is `a` the same name as `b` (2026-11-23, move_skill)? Whole name against whole name, with namedIn's typo budget
+   measured on b, the printed name: the AI's "harnes engineering" is the resume's "Harness Engineering". namedIn
+   searches a sentence for runs; this compares two names, so a skill named inside a longer phrase never matches. */
+export function sameName(a: string, b: string): boolean {
+  // The printed name compacted; empty (pure punctuation) is never a name, as in namedIn.
+  const target = compactName(b);
+  // Nothing to match, else the shared budget.
+  return target !== "" && closeCompact(compactName(a), target);
+}
+
 /* Did any of these texts NAME `name` (ownerNamed's rule, 2026-11-09)? Matched on runs of 1-4 consecutive words, so
    "tailwind css" names "Tailwind CSS" and "vs cod e" names "VS Code" (the run compacts to "vscode"). Whole runs only,
    never a substring: "can" must not name "C", "good" must not name "Go". One typo is forgiven on names of 6+
@@ -72,7 +90,7 @@ export function namedIn(name: string, texts: readonly string[]): boolean {
         // The run compacted the same way as the name.
         const compact = compactName(words.slice(start, end).join(""));
         // Exact, or one typo on a 6+ name, or two (a swap is one) on an 8+ name.
-        if (compact === target || (target.length >= 6 && withinOneEdit(compact, target)) || (target.length >= 8 && withinTwoEdits(compact, target))) return true;
+        if (closeCompact(compact, target)) return true;
       }
     }
   }

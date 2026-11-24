@@ -65,7 +65,10 @@ import { TAILOR_SECTION_KINDS } from "../_shared/tailor/prompt.ts";
 import { canonicalSkillTerm } from "../_shared/tailor/jd-keywords.ts";
 // The ONE "did the owner name this?" matcher, shared with the web's auto-apply predicate (S5, 2026-11-21), so the
 // server and the browser can never disagree about whether "rm vs cod e" named VS Code.
-import { compactName, namedIn, withinOneEdit } from "../_shared/text/name-match.ts";
+import { compactName, namedIn, sameName, withinOneEdit } from "../_shared/text/name-match.ts";
+// S9k (2026-11-23): the AI-group floor (5, Teja 11-10) and the group it guards, the same constants the content rules enforce,
+// so a fit-to-lines trim stops exactly where the end-state check would refuse, and says so instead of failing the batch.
+import { PAGE_FIT_FLOORS } from "../_shared/tailor/page-trim.ts";
 // The one-skill-group-one-line width model (2026-11-12), the same one the tailor fills groups with.
 import { skillGroupLineCount, TYPOGRAPHY_LADDER } from "../../../packages/resume-template/src/index.ts";
 // S9a (2026-11-21): the tailor's line LIMIT, the same constant the web's edit gate reads (tailoredEdits skillGroupWrapReason).
@@ -77,7 +80,8 @@ export const MAX_OPS = 12;
 /* Op kinds the MODEL may write that never reach the browser (2026-11-21). add_group is expanded by parseAssistOps into
    ordinary add_skill ops from the owner's master, because the web's reader refuses a whole answer over one unknown kind.
    Exported so the web contract test can subtract them from the schema enum and still police every kind that IS sent. */
-export const MODEL_ONLY_OP_KINDS = ["add_group"] as const;
+// S9k (2026-11-23): fit_group joins it, expanded into remove_skill ops the web already reads.
+export const MODEL_ONLY_OP_KINDS = ["add_group", "fit_group"] as const;
 // The billed-output ceiling for one call, thinking included. Twelve ops of ~60 tokens is ~720;
 // the rest is headroom for "low" thinking. ponytail: fixed cap, measure usage before raising it.
 export const MAX_OUTPUT_TOKENS = 2048;
@@ -237,6 +241,9 @@ export type AssistOp =
   | { readonly op: "move_section"; readonly section: string; readonly place: number }
   // S9j: an entry (eN) to a place within its section (server-applied pages only).
   | { readonly op: "move_entry"; readonly entry: string; readonly place: number }
+  /* S9k (Teja 2026-11-23 21:22, "put harness eng at first place" in the AI group): a printed skill to a 1-based place
+     within its own group (server-applied pages only). `name` is the printed spelling; `category` only when sent. */
+  | { readonly op: "move_skill"; readonly name: string; readonly category?: string; readonly place: number }
   // An AVAILABLE item (mN bullet or nN entry) back onto the resume, in the master's own words.
   | { readonly op: "add_back"; readonly id: string }
   // 2026-11-11 (Teja: "it need to allow me to change the internship titles or roles too, by prompting it"): the job
@@ -664,6 +671,9 @@ const SYSTEM_INSTRUCTION = [
   /* S9j (Teja 2026-11-21 18:54: "my ai need to full autonomous able to do most of things except those personal details"). Live,
      "place applyy at first place" was refused for lacking up/down and "one on one at 2nd place" had no op at all. */
   'Places: {"op":"move_section","section":"projects","place":1} puts a section at that place; {"op":"move_entry","entry":"e2","place":1} puts entry eN at that place within its own section ("applyyy first, One-on-One second" is two move_entry ops); {"op":"move","id":"b3","place":1} puts a bullet at that place in its entry. Use "place" whenever the owner names a position (first, second, top, last as the count of that list). Every edit to this resume is possible with these ops: never answer that a section, entry, project, job or bullet cannot be moved, removed, added back or reworded.',
+  /* S9k (Teja 2026-11-23 21:21-21:22, live row 957991ec): "put harness eng at first place ... in ai skill grp" was sent as a
+     bullet move, and "rm some aim skills to fill it in one line only" was read as a personal-details ask. */
+  'Skills inside a group: {"op":"move_skill","name":"Harness Engineering","category":"AI","place":1} puts a printed skill at that place within its own group; a skill is never a bullet, so never send move with a skill. {"op":"fit_group","name":"AI","lines":1} makes a group fit that many printed lines: the app removes its least job-relevant skills and keeps the AI group at 5 or more. The owner types fast: read "aim skills", "ai skill grp", "harnes rng" as the closest SKILL GROUPS or SKILLS name; such a message is about the resume, never about personal details.',
   'Personal details (name, email, phone, links, location) are never changed in this chat: send no op, and the note says in one line that they change on the Master profile page.',
   /* What this page cannot do, and where it is done instead (2026-11-04), so a request no op covers gets
      a plain answer with a place to go, not an invented op or a claimed change. */
@@ -721,7 +731,7 @@ const RESPONSE_SCHEMA = {
         properties: {
           // The kind, closed to the seven the page can apply. Nine since 2026-11-04: remove_skill, remove_entry.
           // add_group joined 2026-11-21: model-only, expanded into add_skill ops before the browser sees the answer.
-          op: { type: "STRING", enum: ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "move_entry", "add_back", "new_bullet", "remove_entry", "set_role", "add_group"] },
+          op: { type: "STRING", enum: ["edit", "remove", "add_skill", "remove_skill", "move", "move_section", "move_entry", "add_back", "new_bullet", "remove_entry", "set_role", "add_group", "move_skill", "fit_group"] },
           // A bullet id or "summary"; an AVAILABLE id for add_back; an entry id (eN) for remove_entry.
           id: { type: "STRING" },
           // The new text, for edit and new_bullet.
@@ -740,6 +750,8 @@ const RESPONSE_SCHEMA = {
           n: { type: "INTEGER" },
           // S9j: a 1-based place, for move, move_section and move_entry; checked as a positive integer after parsing.
           place: { type: "INTEGER" },
+          // S9k: how many printed lines a skill group must fit in, for fit_group; checked as a whole number after parsing.
+          lines: { type: "INTEGER" },
         },
         // Only the kind is universal.
         required: ["op"],
@@ -952,6 +964,14 @@ function describeOp(raw: unknown, request: AssistRequest): string {
     case "move":
       // "Move bullet "Built the…" up".
       return `Move ${target}${direction}`;
+    // S9k: a skill to a place in its group.
+    case "move_skill":
+      // "Move skill "Harness Engineering" to place 1".
+      return `Move skill ${skill} to place ${typeof raw.place === "number" ? raw.place : "?"}`;
+    // S9k: a group trimmed to N lines; only reaches a label when it was refused.
+    case "fit_group":
+      // "Fit group "AI" in 1 line".
+      return `Fit group ${skill} in ${typeof raw.lines === "number" ? raw.lines : "?"} line${raw.lines === 1 ? "" : "s"}`;
     // Move a section, named as the AI wrote it.
     case "move_section": {
       // The section the AI named.
@@ -1057,6 +1077,97 @@ function removedAndNotAskedBack(name: string, request: AssistRequest): boolean {
 function groupFits(category: string, names: readonly string[]): boolean {
   // Every rung, like the web gate: a group that fits only at the largest type would wrap after a shrink.
   return TYPOGRAPHY_LADDER.every((_, index) => skillGroupLineCount(category, names, index) <= SKILL_GROUP_MAX_LINES);
+}
+
+/* S9k (Teja 2026-11-23 21:21, live row 957991ec "rm some aim skills to fill it in one line only" got an off-topic answer and
+   no change): how many printed lines a group takes, the WORST rung, because a group that fits only at the largest type
+   wraps after a shrink (groupFits reads every rung for the same reason). */
+function groupLines(category: string, names: readonly string[]): number {
+  // The most lines any typography rung gives it.
+  return Math.max(...TYPOGRAPHY_LADDER.map((_, index) => skillGroupLineCount(category, names, index)));
+}
+
+/* S9k: does the INSTRUCTION ask one printed group to fit N lines? "in one line", "into 2 lines", "on a single line". The group:
+   the one groupNamedIn finds, else a word right before "skills"/"skill"/"grp"/"group" within one edit of a printed group's
+   compact name, which is how "aim skills" names AI (a 2-letter name gets no typo allowance anywhere else, because one edit
+   from "AI" is any word; the "<word> skills" frame is what makes it safe here). Null: not a fit ask, or no single group. */
+export function fitGroupAsked(request: AssistRequest): { readonly category: string; readonly lines: number } | null {
+  // The count words a line ask uses.
+  const match = /\b(?:in|into|to|on|within)\s+(?:a\s+)?(one|1|single|two|2)\s+lines?\b/i.exec(request.instruction);
+  // Not a line ask.
+  if (match === null) return null;
+  // The count.
+  const lines = /^(?:one|1|single)$/i.test(match[1]!) ? 1 : 2;
+  // The printed groups.
+  const categories = [...new Set((request.printedSkills ?? []).map((skill) => skill.category))];
+  // A whole (or typo'd 5+ letter) group name first.
+  const named = groupNamedIn(request.instruction, categories);
+  // Found.
+  if (named !== undefined) return { category: named, lines };
+  // The words right before a group word.
+  const framed = [...request.instruction.toLowerCase().matchAll(/([a-z0-9+#]+)\s+(?:skills?|grp|group)\b/g)].map((hit) => hit[1]!);
+  // Printed groups one edit from such a word.
+  const hits = categories.filter((category) => framed.some((word) => withinOneEdit(word, compactName(category))));
+  // Exactly one, or no answer.
+  return hits.length === 1 ? { category: hits[0]!, lines } : null;
+}
+
+// What a fit-to-lines ask does: the printed skills to remove (in the group's own spelling), or the one reason it cannot.
+export type GroupFitPlan =
+  // Remove these, in this order; the group then fits.
+  | { readonly ok: true; readonly category: string; readonly remove: readonly string[] }
+  // Nothing changes, and this sentence says why (already fits, unknown group, or the floor stops it).
+  | { readonly ok: false; readonly why: string };
+
+/* S9k: trim one printed skill group until it fits `lines` printed lines. The least JD-relevant skill goes first: a skill the
+   JD (description, title or missing keywords) never names, from the END of the group (the tailor ranks the group by JD
+   relevance, so the end is the weakest), and only then a JD-named one, again from the end. The AI group never goes below its
+   floor (min(5, master AI skills), Teja 11-10, the content rule page-fit-edit enforces): when the group cannot fit above
+   it, NOTHING is removed and the reason says how many lines it needs at the floor, because a half-done trim that still
+   wraps is neither what was asked nor reversible in one step. Any other group keeps at least one skill: a fit never
+   empties a group (that is a remove). Pure, so the named tests drive it with the live row. */
+export function planGroupFit(request: AssistRequest, groupName: string, lines: number): GroupFitPlan {
+  // The printed groups, from the structured list only: the flat line has no groups to fit.
+  const printedSkills = request.printedSkills ?? [];
+  // The group as printed, matched by key, then by the shared typo rule ("AI skill grp" was already reduced to a name).
+  const category = [...new Set(printedSkills.map((skill) => skill.category))].find((candidate) => skillKey(candidate) === skillKey(groupName) || sameName(groupName, candidate));
+  // Not a printed group: say which name failed, never guess another group.
+  if (category === undefined) return { ok: false, why: `"${clip(groupName, 40)}" is not a skill group on this resume.` };
+  // The group's names in print order.
+  const names = printedSkills.filter((skill) => skill.category === category).map((skill) => skill.name);
+  // Already within the lines asked: nothing to remove, said plainly (never a silent no-op).
+  if (groupLines(category, names) <= lines) return { ok: false, why: `"${category}" already fits in ${lines} line${lines === 1 ? "" : "s"}.` };
+  // The AI group: the protected floor, capped by how many AI skills the master holds (the content rule's own formula).
+  const isAi = skillKey(category) === skillKey(PAGE_FIT_FLOORS.aiSkillsCategory);
+  // Master AI skills = printed + not printed, both under the AI group.
+  const masterAi = names.length + request.availableSkills.filter((skill) => skillKey(skill.category) === skillKey(category)).length;
+  // The floor this group may not go below.
+  const floor = isAi ? Math.min(PAGE_FIT_FLOORS.minAiSkills, masterAi) : 1;
+  // The JD's words a skill can be named in: description, title and the missing keywords.
+  const jdTexts = [request.job.description ?? "", request.job.title, ...request.job.missing];
+  // True when the JD names this skill (the shared matcher: whole word runs, typo rules by length).
+  const jdNamed = (name: string): boolean => namedIn(name, jdTexts);
+  // Removal order: JD-unnamed from the end first, then JD-named from the end.
+  const order = [...[...names].reverse().filter((name) => !jdNamed(name)), ...[...names].reverse().filter(jdNamed)];
+  // The ones taken so far.
+  const remove: string[] = [];
+  // Take the weakest one at a time until it fits or the floor stops it.
+  for (const name of order) {
+    // What is left now.
+    const left = names.filter((kept) => !remove.includes(kept));
+    // Fits: done.
+    if (groupLines(category, left) <= lines) break;
+    // At the floor: stop, the reason below says so.
+    if (left.length <= floor) break;
+    // Taken.
+    remove.push(name);
+  }
+  // What is left after the trim.
+  const left = names.filter((kept) => !remove.includes(kept));
+  // Still over: nothing is removed, and the sentence names the floor and the lines it needs there.
+  if (groupLines(category, left) > lines) return { ok: false, why: isAi ? `"${category}" cannot fit in ${lines} line${lines === 1 ? "" : "s"}: AI skills never go below ${floor}, and ${floor} of them still take ${groupLines(category, left)} lines. Remove or shorten a skill by name to choose which.` : `"${category}" cannot fit in ${lines} line${lines === 1 ? "" : "s"} even with one skill left.` };
+  // The plan.
+  return { ok: true, category, remove };
 }
 
 /* S9a (2026-11-21): the owner gave an explicit count ("add 7 tools", "add toools 7"). Like "all", that dictates how many,
@@ -1406,7 +1517,10 @@ function claimFreeSentences(text: string): string[] {
   return (oneLine(text).match(/[^.!?]+[.!?]*/g) ?? []).map((sentence) => sentence.trim()).filter((sentence) => sentence !== "" && !CHANGE_CLAIM.test(sentence) && !BARE_CLAIM.test(sentence));
 }
 
-function honestNote(raw: unknown, ops: readonly AssistOp[], rejected: readonly RejectedOp[]): string {
+/* S9k (live 21:22, row 942 "[Applied: Remove skill; Remove skill] Proposed 2 changes. See the list below."): on a
+   server-applied page there is no list below and nothing is "proposed": the outcome line in front already says what
+   landed. So the count fallback is empty there, and the server's outcome line is the whole reply. */
+function honestNote(raw: unknown, ops: readonly AssistOp[], rejected: readonly RejectedOp[], serverApply = false): string {
   // Sentences of the model's text, claims dropped; nothing when it sent no text.
   const kept = typeof raw === "string" ? claimFreeSentences(raw) : [];
   // Ops proposed but none survived: say so first, with the first reason.
@@ -1417,6 +1531,9 @@ function honestNote(raw: unknown, ops: readonly AssistOp[], rejected: readonly R
   if (body !== "") return body;
   // Nothing to read (the model said nothing, or only claims): a count of what the list below holds, never a
   // blank bubble above it (2026-11-06). No claim in it: "Proposed" is a fact about the answer, not the resume.
+  // Server-applied: the outcome line says it all (S9k), so nothing is added after it.
+  if (serverApply && ops.length > 0) return "";
+  // Browser-applied: the count of the cards below.
   return ops.length > 0 ? `Proposed ${ops.length} change${ops.length === 1 ? "" : "s"}. See the list below.` : "No changes proposed.";
 }
 
@@ -1684,6 +1801,33 @@ export function parseAssistOps(
       // Only a server-applied page applies it.
       return request.serverApply ? { op: "move_entry", entry, place } : WHY.needsServerApply;
     }
+    /* S9k: a printed skill to a place inside its group. Its own arm, so a skill is never checked as a bullet (live 21:22:
+       "Could not do: Move Harness Engineering (The AI named a bullet it was not shown.)"). */
+    if (raw.op === "move_skill") {
+      // The skill as the AI wrote it.
+      const name = textField(raw.name);
+      // The group, when the AI named one.
+      const group = textField(raw.category);
+      // The place.
+      const place = placeOf(raw.place);
+      // No name.
+      if (name === "") return WHY.noSkillName;
+      // No usable place.
+      if (place === null) return "The AI's answer did not say which place.";
+      // The printed copies of that name (typo-tolerant, the shared rule).
+      const copies = (request.printedSkills ?? []).filter((skill) => sameName(name, skill.name));
+      // Not printed: the real reason, never "a bullet".
+      if (copies.length === 0) return `"${clip(name, 40)}" is not on the resume.`;
+      // The named group's copy, else (no group named) the first copy.
+      const copy = group === "" ? copies[0] : copies.find((skill) => skillKey(skill.category) === skillKey(group) || sameName(group, skill.category));
+      // A group was named and the skill is not printed there (review 2026-11-24): refused like resolve-ops, never moved
+      // inside some other group the owner did not name.
+      if (copy === undefined) return `"${clip(name, 40)}" is not in group "${clip(group, 40)}".`;
+      // Only a server-applied page applies it; the printed spelling and group, so the server finds it exactly.
+      return request.serverApply ? { op: "move_skill", name: copy.name, category: copy.category, place } : WHY.needsServerApply;
+    }
+    // S9k: a fit_group still here is one planGroupFit refused; its reason was kept for exactly this.
+    if (raw.op === "fit_group") return fitRefusals.get(raw) ?? "The AI's answer did not say which group to fit.";
     // Restore a master item.
     if (raw.op === "add_back") {
       // The AVAILABLE id.
@@ -1864,8 +2008,50 @@ export function parseAssistOps(
     // Ordinary add_skill ops in the master's spelling and group: the browser already reads and auto-applies these.
     return picked.map((skill) => ({ op: "add_skill", name: skill.name, category: skill.category }));
   };
-  // The answer with every fillable add_group expanded.
-  const proposed = parsed.ops.flatMap(expandGroup);
+  /* FIT_GROUP EXPANSION (S9k, 2026-11-23). Each {"op":"fit_group","name","lines"} becomes the remove_skill ops planGroupFit
+     picks (least JD-relevant first, the AI floor kept), so the web only ever sees a kind it already reads. A refused fit
+     stays a fit_group, and check() refuses it with planGroupFit's own sentence (kept here by object identity). */
+  const fitRefusals = new Map<unknown, string>();
+  // One proposed op becomes its removals, or stays to be refused.
+  const expandFit = (raw: unknown): unknown[] => {
+    // Every other kind passes through untouched.
+    if (!isRecord(raw) || raw.op !== "fit_group") return [raw];
+    // How many lines: a whole number from 1 to the tailor's limit, never coerced (CLAUDE.md §6).
+    const lines = typeof raw.lines === "number" && Number.isInteger(raw.lines) && raw.lines >= 1 && raw.lines <= SKILL_GROUP_MAX_LINES ? raw.lines : null;
+    // No usable count: refused with the reason.
+    if (lines === null) {
+      // Kept for check().
+      fitRefusals.set(raw, `The AI's answer did not say how many lines (1 to ${SKILL_GROUP_MAX_LINES}).`);
+      // Stays, to be refused.
+      return [raw];
+    }
+    // The plan.
+    const plan = planGroupFit(request, textField(raw.name), lines);
+    // Refused: kept for check() with the plan's sentence.
+    if (!plan.ok) {
+      // Kept by identity.
+      fitRefusals.set(raw, plan.why);
+      // Stays, to be refused.
+      return [raw];
+    }
+    // Ordinary removals in the printed spelling and group.
+    return plan.remove.map((name) => ({ op: "remove_skill", name, category: plan.category }));
+  };
+  /* THE FIT FALLBACK (S9k). A prompt is not a control (CLAUDE.md §6): live, the model read "rm some aim skills to fill it
+     in one line only" as a personal-details ask and sent no op. When the INSTRUCTION asks for N line(s), names exactly one
+     printed group (fitGroupAsked), and the model sent NO op at all, the server sends the fit itself, and the model's note
+     (which answered some other question) is dropped. Review 2026-11-24: "any op" and not "no fit/remove", because a line
+     phrase also fits a bullet ("make the Testing bullet fit in one line" -> the model's edit) or rides an add ("add X to
+     Tools, keep it in one line"); a server trim behind that answer removed skills nobody asked to lose. */
+  const asked = fitGroupAsked(request);
+  // The model answered with something: its answer stands, whatever it is.
+  const modelActed = parsed.ops.length > 0;
+  // The fallback fires only on an empty answer.
+  const fallback = asked !== null && !modelActed;
+  // The ops to expand: the model's, plus the server's fit when the fallback fires.
+  const answered: unknown[] = fallback && asked !== null ? [...parsed.ops, { op: "fit_group", name: asked.category, lines: asked.lines }] : parsed.ops;
+  // The answer with every fillable add_group and fit_group expanded.
+  const proposed = answered.flatMap(expandFit).flatMap(expandGroup);
   // Requested ones first, only when the cap would cut (the MAX_OPS comment above this block says why).
   const ordered = proposed.length > MAX_OPS ? [...proposed.filter(ownerAsked), ...proposed.filter((raw) => !ownerAsked(raw))] : proposed;
   // Each proposed op's outcome, in order, and whether the cap (not a check) is what dropped it.
@@ -1955,7 +2141,8 @@ export function parseAssistOps(
   // The note is display text, never a made-up success: claim sentences dropped, and an all-failed answer
   // led by what happened (honestNote). A note with nothing to read gets a one-line count (honestNote).
   // S9e: the shortfall reasons follow the model's own note, so "add 6" giving 5 always says why.
-  const note = [honestNote(parsed.note, ops, rejected), ...shortfalls].join(" ");
+  // S9k: when the fit fallback fired, the model's own note answered a different question, so it is not shown.
+  const note = [honestNote(fallback ? "" : parsed.note, ops, rejected, request.serverApply), ...shortfalls].filter((part) => part !== "").join(" ");
   // The surviving ops, the drop count, the named drops and the note.
   return { ok: true, ops, dropped, rejected, note };
 }
