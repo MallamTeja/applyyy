@@ -26,6 +26,11 @@ import {
   emptyListMessage,
   OPENING_LANE,
   laneCountsFrom,
+  laneRead,
+  liveLaneTotal,
+  GONE_AFTER_READY_SELECT,
+  GONE_FILTER_COLUMN,
+  readGoneAfterReady,
 } from '../src/features/discovery/discoveredList.ts';
 // The engine's real step lists, so the mapping is compared against the source of truth, not a copy.
 import { DISCOVERED_STEPS, PASSED_FILTERS_STEPS } from '../src/features/pipeline/rowPipeline.ts';
@@ -312,5 +317,90 @@ describe('opening lane', () => {
       emptyListMessage('discovered', 'matched', 0, DRAINED),
       'Every discovered job has been screened: 2,511 are in "Ready to tailor", 19,047 filtered out.',
     );
+  });
+});
+
+describe('S40: gone postings leave Ready to tailor (a READ filter, never a status write)', () => {
+  it('laneRead(ready) inner-joins the job and filters job.disappeared_at is null', () => {
+    // !inner is what makes the embedded filter drop the APPLICATION row; without it PostgREST only nulls the embed.
+    assert.deepEqual(laneRead('ready'), {
+      // The same columns as the plain select, with the embed made an inner join.
+      select: DISCOVERED_LIST_SELECT.replace('job:job_id(', 'job:job_id!inner('),
+      // The one column the page passes to .is(col, null).
+      isNull: ['job.disappeared_at'],
+    });
+  });
+
+  it('laneRead(discovered) keeps the plain select and no filter (S40 is the ready lane only)', () => {
+    // The raw inventory is untouched: the ruling covers Ready to tailor.
+    assert.deepEqual(laneRead('discovered'), { select: DISCOVERED_LIST_SELECT, isNull: [] });
+  });
+
+  it('the gone section reads the opposite set: same inner join, the same column, not null', () => {
+    // The filter column is the one laneRead hides, so the lane and the section partition passed_filters.
+    assert.equal(GONE_FILTER_COLUMN, laneRead('ready').isNull[0]);
+    // Only what a section row shows, embedded as an inner join so the not-null filter drops applications.
+    assert.equal(GONE_AFTER_READY_SELECT, 'id, created_at, job:job_id!inner(id, title, company_name, apply_url, disappeared_at)');
+  });
+});
+
+describe('S40: the ready lane total subtracts the gone rows', () => {
+  it('rpc total minus gone count', () => {
+    // 113 passed_filters, 22 gone: the lane shows 91.
+    assert.equal(liveLaneTotal(113, 22), 91);
+  });
+
+  it('either read missing gives no number (missing data never becomes a count)', () => {
+    // The RPC has not answered.
+    assert.equal(liveLaneTotal(null, 22), null);
+    // The gone count read failed.
+    assert.equal(liveLaneTotal(113, null), null);
+  });
+
+  it('a gone count larger than the total (reads from two moments) is unknown, not a negative', () => {
+    // Two separate reads can straddle a write; a negative lane is not a number to show.
+    assert.equal(liveLaneTotal(3, 5), null);
+  });
+});
+
+/* A recording PostgREST builder double: every chained call is logged; awaiting it resolves to `answer`. */
+function fakeClient(answer: { data: unknown; error: unknown; count: unknown }) {
+  // The chain, in call order, so a test proves which filters were sent.
+  const calls: unknown[][] = [];
+  // One object answers every chained method and is itself thenable, like supabase-js's builder.
+  const builder: Record<string, unknown> = {};
+  // Each method records its arguments and returns the same builder.
+  for (const m of ['from', 'select', 'eq', 'not', 'order', 'limit']) builder[m] = (...args: unknown[]) => { calls.push([m, ...args]); return builder; };
+  // Awaiting the chain gives the canned answer, as supabase-js resolves (never throws).
+  builder['then'] = (ok: (v: unknown) => unknown) => Promise.resolve(answer).then(ok);
+  return { client: builder as never, calls };
+}
+
+describe('S40b: readGoneAfterReady, the section read', () => {
+  it('reads passed_filters rows whose job.disappeared_at is NOT null, with an exact count', async () => {
+    // A live answer: one gone row, count 1.
+    const row = { id: 'a1', created_at: '2026-11-06T10:00:00Z', job: { id: 'j1', title: 'T', company_name: 'C', apply_url: null, disappeared_at: '2026-11-05T00:00:00Z' } };
+    // The double.
+    const { client, calls } = fakeClient({ data: [row], error: null, count: 1 });
+    // The rows and the total come back.
+    assert.deepEqual(await readGoneAfterReady(client), { kind: 'rows', rows: [row], total: 1 });
+    // The exact chain: the table, the inner-join select with count, the lane, the NOT-null filter, the order, the cap.
+    assert.deepEqual(calls, [
+      ['from', 'applications'],
+      ['select', GONE_AFTER_READY_SELECT, { count: 'exact' }],
+      ['eq', 'status', 'passed_filters'],
+      ['not', 'job.disappeared_at', 'is', null],
+      ['order', 'created_at', { ascending: false }],
+      ['limit', PAGE_SIZE],
+    ]);
+  });
+
+  it('a missing count or list is an error, never 0 (the lane total would silently include gone rows)', async () => {
+    // Rows but no count.
+    assert.equal((await readGoneAfterReady(fakeClient({ data: [], error: null, count: null }).client)).kind, 'error');
+    // No list.
+    assert.equal((await readGoneAfterReady(fakeClient({ data: null, error: null, count: 0 }).client)).kind, 'error');
+    // A database error keeps its words.
+    assert.deepEqual(await readGoneAfterReady(fakeClient({ data: null, error: { message: 'boom' }, count: null }).client), { kind: 'error', message: 'boom' });
   });
 });

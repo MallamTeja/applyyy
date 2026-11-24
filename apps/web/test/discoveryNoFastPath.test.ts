@@ -147,7 +147,11 @@ describe('what the page must still do', () => {
     // The select's VALUE (id, status, created_at and the named job columns) is pinned in
     // discoveredLanes.test.ts; here the page must use that constant rather than an inline string,
     // and must type the rows with DiscoveredListRow rather than casting them.
-    assert.ok(source.includes('.select<string, DiscoveredListRow>(DISCOVERED_LIST_SELECT)'), 'the discovered query must use DISCOVERED_LIST_SELECT with its row type');
+    // Since S40 (2026-11-24) the select comes from laneRead(lane): the ready lane needs job:job_id!inner so its
+    // gone-posting filter drops the ROW, and laneRead builds that from DISCOVERED_LIST_SELECT (pinned by value there).
+    assert.ok(source.includes('.select<string, DiscoveredListRow>(read.select)'), 'the discovered query must use the lane read\'s select with its row type');
+    // The read must come from the tested helper, not an inline select string that could skip the filter.
+    assert.ok(source.includes('laneRead(lane)'), 'the discovered query must be built by laneRead(lane)');
   });
 });
 
@@ -194,7 +198,10 @@ describe('lane queries and paging', () => {
     assert.ok(head.includes('setItems([]);'), 'a full load must clear items before awaiting');
     // The total is no longer state a load must clear (2026-11-08): it is derived from the counts RPC
     // for the lane on screen, so the old lane's number cannot render under the new label at all.
-    assert.match(source, /const laneTotal = laneTotalFrom\(countsState\.kind, statusCounts, laneSpec\.status\);/, 'laneTotal must be derived per lane from the counts read');
+    assert.match(source, /const rpcLaneTotal = laneTotalFrom\(countsState\.kind, statusCounts, laneSpec\.status\);/, 'the RPC lane total must be derived per lane from the counts read');
+    // S40 (2026-11-24): the Ready lane hides gone postings, so its total is the RPC count minus the gone count
+    // (null when either read failed); without this the lane says "of 91" while listing 71.
+    assert.ok(source.includes('liveLaneTotal(rpcLaneTotal, goneCount)'), 'the ready lane total must subtract the gone count');
   });
 
   it('Load more renders only while hasMoreRows says rows remain', () => {

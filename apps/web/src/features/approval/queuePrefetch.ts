@@ -56,8 +56,17 @@ export function readQueue(client: SupabaseClient) {
     /* description_raw is NOT in this read any more (2026-11-09). It was 438 KB of the 1.67 MB this
        select returned for 86 rows, and nothing on the first paint shows it: only the pay-band chip
        and the AI chat read it. loadJobDescriptions fetches it once the queue is on screen. */
-    .select('id, status, status_changed_at, created_at, updated_at, master_version, tailored_profile, tailor_refs, selected_jd_keywords, match_score, audit_findings, cover_letter, jobs:job_id(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs, apply_url, location_raw)')
+    /* disappeared_at added 2026-11-23: Teja approved Commvault 5daf4908 a week after its posting left the board,
+       because this page never showed the mark the liveness sweep sets. The card now says so at its top. */
+    /* !inner added 2026-11-24 (S41b): the embed must be an inner join, or the disappeared_at filter below only
+       nulls the jobs embed and keeps the application row. Side effect: a row whose job the user cannot read now
+       drops too, instead of showing as "Job record missing". applications.job_id is NOT NULL with an on-delete-
+       cascade FK, so that needs a jobs RLS mismatch; the page's no_job refusal stays as the guard for it. */
+    .select('id, status, status_changed_at, created_at, updated_at, master_version, tailored_profile, tailor_refs, selected_jd_keywords, match_score, audit_findings, cover_letter, jobs:job_id!inner(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs, apply_url, location_raw, disappeared_at)')
     .eq('status', 'awaiting_approval')
+    /* Gone postings leave the queue on the next load (S41b, 2026-11-24): a posting the liveness sweep marked gone
+       cannot be applied to, so it is not review work. A row already on screen keeps its PostingGoneNotice. */
+    .is('jobs.disappeared_at', null)
     /* Newest entry into review first (2026-10-24): status_changed_at is when the row reached
        awaiting_approval, served by the (user_id, status, status_changed_at desc) index. Not
        created_at, which is the discovery date. See queueOrder.ts. */

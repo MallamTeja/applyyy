@@ -544,6 +544,25 @@
   font-weight: 600;
 }
 
+/* The posting-gone notice (2026-11-23): the stale-notice panel, made impossible to miss without a new colour (the
+   alarm tokens are reserved for fabrication, DiffView.css). The strong rule and weight carry it; Reject sits beside. */
+.queue__gone-notice {
+  /* The controls' strong edge instead of the accent hairline. */
+  border-color: var(--rule-strong);
+  /* Weight, the colour-free channel, as on the pay-band warning chip. */
+  font-weight: 600;
+  /* The sentence and its button on one line, wrapping on a narrow card. */
+  display: flex;
+  /* Wraps at phone width rather than overflowing. */
+  flex-wrap: wrap;
+  /* Button centred against the text. */
+  align-items: center;
+  /* Space between the words and the button, from the spacing scale. */
+  gap: var(--gap-2) var(--gap-3);
+  /* The button goes to the right edge, like the row toolbar. */
+  justify-content: space-between;
+}
+
 /* SPLIT VIEW (2026-11-06). A plain block while no chat is open, so the page is unchanged until one is;
    the queue column needs minmax(0, 1fr) or a wide diff would push the dock off screen. */
 .queue__split--docked {

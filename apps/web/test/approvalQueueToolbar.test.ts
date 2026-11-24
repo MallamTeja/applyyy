@@ -87,7 +87,8 @@ describe('approval queue row chips', () => {
     // The whole select, end to end: the jobs embed closes on location_raw (2026-11-07, the pay-band chip), so no raw_payload key
     // (one ->> de-TOASTs the whole board JSON per row, ~95% of executor time, 2026-11-05) can ride in.
     // No description_raw since 2026-11-09: 438 KB of 86 rows, read after the first paint (approvalJobDescriptionDeferredE2e).
-    assert.match(queueRead, /\.select\('id, status, status_changed_at, created_at, updated_at, master_version, tailored_profile, tailor_refs, selected_jd_keywords, match_score, audit_findings, cover_letter, jobs:job_id\(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs, apply_url, location_raw\)'\)/);
+    // disappeared_at closes the embed since 2026-11-23 (the posting-gone notice); !inner since 2026-11-24 (S41b).
+    assert.match(queueRead, /\.select\('id, status, status_changed_at, created_at, updated_at, master_version, tailored_profile, tailor_refs, selected_jd_keywords, match_score, audit_findings, cover_letter, jobs:job_id!inner\(title, company_name, employment_type, work_arrangement, locations, salary_min, salary_max, salary_currency, discovered_via, source_refs, apply_url, location_raw, disappeared_at\)'\)/);
   });
 
   it('labels the master fit "Fit" and the tailored coverage "ATS score", with dashes for unknown', () => {

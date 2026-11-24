@@ -26,6 +26,8 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
+// The drawer's shape-checked reading of jobs.disappeared_at, reused for the queue card's notice (never re-implemented).
+import { postingGoneNote } from '../pipeline/DrawerAppCard';
 
 import { PageHeader } from '../../app/PageHeader';
 import { StatusBadge } from '../../app/StatusBadge';
@@ -519,6 +521,8 @@ interface RowChipFacts {
   readonly location: string | null;
   // Finding N2's chip text, or null when the band is not UK/US only (or nothing could be read).
   readonly payBand: ReturnType<typeof payBandRegionWarning>;
+  // "This posting was taken down…" when jobs.disappeared_at is a real timestamp, else null (postingTakenDownNote).
+  readonly postingGone: string | null;
 }
 
 /* One stored row as the approval select returns it, narrowed to what the chips read. `unknown` columns:
@@ -527,7 +531,33 @@ interface ChipSourceRow {
   // applications.match_score.
   readonly match_score: unknown;
   // The jobs embed; null when the job row is missing (that row is refused before this is called).
-  readonly jobs: { readonly location_raw?: unknown; readonly description_raw?: unknown } | null;
+  readonly jobs: { readonly location_raw?: unknown; readonly description_raw?: unknown; readonly disappeared_at?: unknown } | null;
+}
+
+/* The posting-gone sentence for the TOP of a queue card (2026-11-23, ready-queue #8): Commvault 5daf4908 was approved
+   six days after its posting left the board, because /approvals never showed jobs.disappeared_at. Plain words, never a
+   second confirm on Approve (Teja 11-21 14:45, the one-click ruling); a one-click Reject sits beside it instead.
+   The timestamp's shape is proven by the drawer's own postingGoneNote, reused, so a junk value claims nothing. */
+export function postingTakenDownNote(disappearedAt: unknown): string | null {
+  // The drawer's shape-checked reading: "Posting gone (since YYYY-MM-DD)", or null.
+  const gone = postingGoneNote(disappearedAt);
+  // Its calendar day, the only part reworded here.
+  const day = gone === null ? null : /\(since (\d{4}-\d{2}-\d{2})\)$/.exec(gone)?.[1] ?? null;
+  // "Gone since": the sweep stamps when it SAW the posting gone, not the moment the company took it down.
+  return day === null ? null : `This posting was taken down: it has been gone from the company's job board since ${day}.`;
+}
+
+/* The notice itself, with its one-click Reject. Exported so a test renders it for real (react-dom/server). */
+export function PostingGoneNotice({ note, onReject }: { readonly note: string; readonly onReject: () => void }): ReactElement {
+  return (
+    // A status panel at the top of the card; role "note": nothing failed, it is a fact the owner must see first.
+    <div className="queue__stale-notice queue__gone-notice" role="note">
+      {/* The fact, in plain words. */}
+      <span>{note}</span>
+      {/* One click, no confirm: rejecting a dead posting is the expected answer (the orch, 2026-11-23). */}
+      <button type="button" className="button button--secondary button--reject queue__gone-reject" onClick={onReject}>Reject</button>
+    </div>
+  );
 }
 
 /* A column value as text, or null. A number or an object is not a location or a JD, and String() would
@@ -550,6 +580,8 @@ export function chipFactsFor(app: ChipSourceRow): RowChipFacts {
     location,
     // The screener's own rule over the same two columns it reads (d5247b4); null in, null out.
     payBand: payBandRegionWarning({ locationRaw: location, description: textOrNull(app.jobs?.description_raw) }),
+    // The liveness sweep's mark, as the card's top notice.
+    postingGone: postingTakenDownNote(app.jobs?.disappeared_at),
   };
 }
 
@@ -2445,6 +2477,8 @@ export function ApprovalQueuePage(): ReactElement {
                       {staleNotices.get(diff.applicationId)}
                     </p>
                   ) : null}
+                  {/* The posting is gone (ready-queue #8): said first, with a one-click Reject; Approve stays one click. */}
+                  {chipFacts.get(diff.applicationId)?.postingGone ? <PostingGoneNotice note={chipFacts.get(diff.applicationId)!.postingGone!} onReject={() => rejectReviewed(diff.applicationId, 'posting_closed')} /> : null}
                   {/* THE ROW HEAD (2026-11-07), the same shape in both buckets: who and where on the left,
                       the row's one toolbar on the right, so every row's buttons share one right edge.
                       The title stays when the row opens, so the toolbar never jumps sideways. */}
@@ -2615,6 +2649,8 @@ export function ApprovalQueuePage(): ReactElement {
                       {staleNotices.get(diff.applicationId)}
                     </p>
                   ) : null}
+                  {/* Same posting-gone notice as Bucket B, at the top so it shows with Review closed. */}
+                  {chipFacts.get(diff.applicationId)?.postingGone ? <PostingGoneNotice note={chipFacts.get(diff.applicationId)!.postingGone!} onReject={() => rejectReviewed(diff.applicationId, 'posting_closed')} /> : null}
                   {/* The same row head as Bucket B (2026-11-07). No source badge and no master-version tag any
                       more (Teja: slim cards); the audit badge stays, on the meta line, so it lines up
                       under the title instead of floating between buttons. */}

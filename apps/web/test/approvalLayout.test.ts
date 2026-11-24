@@ -104,7 +104,8 @@ describe('queue row wiring', () => {
   it('asks the database for jobs.location_raw', () => {
     // The chip reads it; without it in the select, payBandRegionWarning would always see null.
     // The select moved to queuePrefetch.ts on 2026-11-09 (shared with the shell-side prefetch).
-    assert.match(queueRead, /jobs:job_id\([^)]*\blocation_raw\b[^)]*\)/);
+    // !inner since 2026-11-24 (S41b: gone postings filtered through the embed).
+    assert.match(queueRead, /jobs:job_id!inner\([^)]*\blocation_raw\b[^)]*\)/);
   });
 
   it('draws no source badge, no master version and no queued-at chip on any row', () => {

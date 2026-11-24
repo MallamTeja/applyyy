@@ -1,0 +1,69 @@
+/* The gone-after-ready section (S40b). Semantic tokens only (docs/ui/theming-convention.md), so dark mode needs no rule. */
+.gone-after-ready {
+  /* The page's hairline, so the section reads as a panel beside the grid. */
+  border: 1px solid var(--rule);
+  /* Same rounding as the page's small surfaces. */
+  border-radius: var(--radius-sm);
+  /* The panel ground the page's cards use. */
+  background: var(--panel);
+  /* Breathing room inside the border. */
+  padding: var(--gap-2);
+}
+
+/* The always-visible line: clickable, so it gets the pointer. */
+.gone-after-ready__summary {
+  /* It toggles the section. */
+  cursor: pointer;
+  /* Reads as a heading over muted rows. */
+  color: var(--text-primary);
+  /* A heading's weight without a heading element. */
+  font-weight: 600;
+}
+
+/* Loading, failed and empty sentences. */
+.gone-after-ready__note {
+  /* The summary's own gap spaces it. */
+  margin: var(--gap-2) 0 0;
+  /* Secondary ink. */
+  color: var(--text-muted);
+}
+
+/* The rows: a plain list with no bullets. */
+.gone-after-ready__list {
+  /* No bullets: each row is a record, not prose. */
+  list-style: none;
+  /* Below the summary, flush left. */
+  margin: var(--gap-2) 0 0;
+  /* Flush left. */
+  padding: 0;
+  /* Rows stacked with an even gap. */
+  display: grid;
+  /* The page's rhythm. */
+  gap: var(--gap-2);
+}
+
+/* One row: name, date, link, Reject on one line, wrapping on a phone. */
+.gone-after-ready__row {
+  /* Side by side. */
+  display: flex;
+  /* A narrow screen wraps instead of scrolling sideways. */
+  flex-wrap: wrap;
+  /* Text and button share a line. */
+  align-items: baseline;
+  /* Same rhythm as the status line. */
+  gap: var(--gap-2);
+}
+
+/* The name takes the free space, so the date, link and Reject pack right. */
+.gone-after-ready__name {
+  /* Grows; the others keep their size. */
+  flex: 1 1 16rem;
+}
+
+/* The "Posting gone (since …)" text: muted, small. */
+.gone-after-ready__since {
+  /* Secondary ink. */
+  color: var(--text-muted);
+  /* The footer's text size. */
+  font-size: var(--size-sm);
+}

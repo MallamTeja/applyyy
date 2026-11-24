@@ -54,6 +54,18 @@ export function hasNoDescription(job: { readonly description_preview: string | n
   return isThinDescription(job.description_preview);
 }
 
+/* Moved here from DiscoveredJobsPage (S40b) so the gone-after-ready section names a job exactly as a card does.
+   The job's name for the send button's accessible name and the results strip. The page already
+   treats company_name as optional (getCompanyCooldownInfo, the search filter), and a template string
+   would print a missing one as "undefined — Engineer". Only the parts that are real, non-blank text;
+   neither part -> a stated placeholder, never an empty name. */
+export function jobLabel(job: { readonly company_name?: string | null; readonly title?: string | null }): string {
+  // Each part kept only when it is a string with visible characters.
+  const parts = [job.company_name, job.title].filter((p): p is string => typeof p === 'string' && p.trim() !== '');
+  // The joined name, or a placeholder that says the data was missing.
+  return parts.length > 0 ? parts.join(' — ') : 'Untitled job';
+}
+
 // Rows per fetch. The same cap the page always had; Load more fetches the next page of this size.
 export const PAGE_SIZE = 300;
 
@@ -175,6 +187,97 @@ export async function searchLoadedDescriptions(
 
 // The list query's PostgREST select, built from the tuple so the two cannot drift apart.
 export const DISCOVERED_LIST_SELECT = `id, status, created_at, job:job_id(${DISCOVERED_JOB_COLUMNS.join(', ')})`;
+
+/* The column that says a posting is gone (S40, 2026-11-24). One name for both reads, so the lane (is null) and the
+ * gone-after-ready section (not null) always partition passed_filters by the same test. */
+export const GONE_FILTER_COLUMN = 'job.disappeared_at';
+
+/* How a lane's list is read: the select, and the embedded columns that must be null (S40, Teja 11:08 IST: "hide gone
+ * jobs instead of moving them to dropped"). A READ filter, never a status write: a posting can come back
+ * (scout-ats clears disappeared_at on a repost), and a hidden row then reappears by itself.
+ * The ready lane's embed is an INNER join: on a plain embed, PostgREST's job.disappeared_at filter only nulls the
+ * embedded job and keeps the application row (it would arrive as "job record missing"). */
+export function laneRead(lane: Lane): { readonly select: string; readonly isNull: readonly string[] } {
+  // The raw inventory is out of the ruling's scope: plain embed, no filter.
+  if (lane === 'discovered') return { select: DISCOVERED_LIST_SELECT, isNull: [] };
+  // Ready to tailor: inner join, so the null filter drops the application itself.
+  return { select: DISCOVERED_LIST_SELECT.replace('job:job_id(', 'job:job_id!inner('), isNull: [GONE_FILTER_COLUMN] };
+}
+
+/* The gone-after-ready section's select (S40b): only what a row shows, inner-joined so the page's
+ * `.not(GONE_FILTER_COLUMN, 'is', null)` drops the live applications rather than nulling their embed. */
+export const GONE_AFTER_READY_SELECT = 'id, created_at, job:job_id!inner(id, title, company_name, apply_url, disappeared_at)';
+
+/* One section row, exactly as GONE_AFTER_READY_SELECT returns it. */
+export interface GoneRow {
+  // The application id: the Reject target and the React key.
+  readonly id: string;
+  // The application's created_at: the server's order.
+  readonly created_at: string;
+  // The inner-joined job, never null (the inner join drops rows without one).
+  readonly job: {
+    // The job id.
+    readonly id: string;
+    // Shown.
+    readonly title: string | null;
+    // Shown.
+    readonly company_name: string | null;
+    // The Apply link.
+    readonly apply_url: string | null;
+    // Not null by the query; read through postingGoneNote anyway, which checks its shape.
+    readonly disappeared_at: string | null;
+  };
+}
+
+/* What the section's read gave: three states, so "loading", "failed" and "none" never look alike. */
+export type GoneState =
+  // The read is in flight.
+  | { readonly kind: 'loading' }
+  // The read failed; its words are shown.
+  | { readonly kind: 'error'; readonly message: string }
+  // The rows (up to PAGE_SIZE) and the exact total.
+  | { readonly kind: 'rows'; readonly rows: readonly GoneRow[]; readonly total: number };
+
+/* The gone-after-ready read (S40b): the passed_filters rows whose posting is gone, and their exact count, which the
+ * ready lane's total subtracts. ONE GET: the count rides on the row read (count:'exact' adds a count to the same
+ * request), so it is not the separate HEAD round trip the page dropped on 2026-11-08. Client injected so a test
+ * records the filters. Never throws; a missing list or count is an error, never 0 (CLAUDE.md section 6). */
+export async function readGoneAfterReady(client: SupabaseClient): Promise<Exclude<GoneState, { kind: 'loading' }>> {
+  try {
+    // The opposite set to the lane's filter: same inner join, same column, NOT null.
+    const { data, error, count } = await client
+      .from('applications')
+      // Only what a section row shows, plus the exact total.
+      .select(GONE_AFTER_READY_SELECT, { count: 'exact' })
+      // Ready to tailor rows only.
+      .eq('status', LANES.ready.status)
+      // Gone: the board took the posting down.
+      .not(GONE_FILTER_COLUMN, 'is', null)
+      // Newest found first, like the lane.
+      .order('created_at', { ascending: false })
+      // Bounded like a lane page; the summary shows the exact total either way.
+      .limit(PAGE_SIZE);
+    // supabase-js returns errors as data.
+    if (error) return { kind: 'error', message: String(error.message ?? error) };
+    // Positive shape: a list AND a numeric count, or it is not an answer.
+    if (!Array.isArray(data) || typeof count !== 'number') return { kind: 'error', message: 'the gone-postings read returned no list or count' };
+    // The rows (typed by the select string, which supabase-js cannot parse at type level) and the total.
+    return { kind: 'rows', rows: data as unknown as GoneRow[], total: count };
+  } catch (e) {
+    // A thrown fetch reads like a returned error.
+    return { kind: 'error', message: e instanceof Error ? e.message : 'Failed to load gone postings.' };
+  }
+}
+
+/* The ready lane's exact total once gone rows are hidden: the status-count RPC knows nothing of jobs, so the page
+ * subtracts the section's exact count. Null when either read gave no answer (CLAUDE.md section 6: missing data never
+ * becomes a number), and null when the two reads disagree (gone > total: they straddled a write), never a negative. */
+export function liveLaneTotal(rpcTotal: number | null, goneCount: number | null): number | null {
+  // One read missing: no number.
+  if (rpcTotal === null || goneCount === null) return null;
+  // The difference, unless the two reads contradict each other.
+  return goneCount > rpcTotal ? null : rpcTotal - goneCount;
+}
 
 // How a load relates to what is on screen: replace (full), re-read the window (silent), or append (more).
 export type LoadMode = 'full' | 'silent' | 'more';

@@ -1147,7 +1147,9 @@ describe('Playwright E2E Operator Console Suite', () => {
   // a discovered_via that was not an array crashed the whole page ("e.map is not a function") because
   // SourceBadge trusted a truthiness test. Only a real render can show both: the page is not
   // importable in node (it imports the live client), so this drives it in Chromium.
-  it('17. Discovered: a gone posting says "Posting gone" instead of Send, and a non-array discovered_via renders without crashing', async () => {
+  // S40/S40b (2026-11-24): a gone posting now leaves the Ready lane (a read filter) and is listed in the collapsed
+  // "Gone after ready" section instead, with the same "Posting gone (since …)" reader and a one-click Reject.
+  it('17. Discovered: a gone posting leaves Ready to tailor for the "Gone after ready" section, and a non-array discovered_via renders without crashing', async () => {
     // Every column the list select names, so the card renders as it would for a real row.
     const job = (id: string, title: string, company: string, extra: Record<string, unknown>) => ({
       // The job key the card is keyed by.
@@ -1179,14 +1181,25 @@ describe('Playwright E2E Operator Console Suite', () => {
     const onError = (e: Error): void => { errors.push(e.message); };
     // Listening from here on; removed in finally.
     page.on('pageerror', onError);
-    // Page-level: wins over the catch-all [] for the list read only.
+    // Every value the Ready lane's list read sent for job.disappeared_at; the page must send is.null.
+    const listGoneFilters: (string | null)[] = [];
+    // Page-level: wins over the catch-all [] for the two reads under test only.
     await page.route('**/rest/v1/applications**', async (route) => {
-      // The list read is the one whose select embeds the job.
+      // The reads are told apart by their select and filters.
       const params = new URL(route.request().url()).searchParams;
-      // Only the Ready lane's list read gets the rows; everything else keeps the catch-all.
+      // The embed's filter value, if any.
+      const goneFilter = params.get('job.disappeared_at');
+      // Only GETs of passed_filters that embed the job are the reads under test.
       if (route.request().method() === 'GET' && (params.get('select') ?? '').includes('job:job_id') && params.get('status') === 'eq.passed_filters') {
-        // Both rows, newest first as the page orders them.
-        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([gone, live]) });
+        // The gone section's read: the opposite filter, with an exact count in Content-Range.
+        if (goneFilter === 'not.is.null') {
+          // One gone row; supabase-js reads the count from "0-0/1" (exposed, or the cross-origin browser hides it).
+          return route.fulfill({ status: 200, contentType: 'application/json', headers: { 'content-range': '0-0/1', 'access-control-expose-headers': 'content-range' }, body: JSON.stringify([gone]) });
+        }
+        // The lane's list read: recorded, so the test proves the filter was SENT.
+        listGoneFilters.push(goneFilter);
+        // Honours the filter like PostgREST would: with is.null only the live row; without it, both (the old bug).
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(goneFilter === 'is.null' ? [live] : [gone, live]) });
       }
       // The count read and every other table read.
       return route.fallback();
@@ -1200,10 +1213,22 @@ describe('Playwright E2E Operator Console Suite', () => {
       await card('Live Backend Engineer').waitFor({ timeout: 10_000 });
       // No uncaught error on the way.
       assert.deepEqual(errors, [], 'the page must not throw on a non-array discovered_via');
-      // The gone card says so, with the day its board dropped it.
-      assert.match((await card('Gone Backend Engineer').textContent()) ?? '', /Posting gone \(since 2026-11-05\)/, 'a gone posting must say "Posting gone"');
-      // ...and offers no Send: the tailor would only refuse it.
-      assert.equal(await card('Gone Backend Engineer').getByRole('button', { name: /^Send through pipeline/ }).count(), 0, 'a gone posting must not offer Send');
+      // The lane read carried the S40 filter (the mock above honours it, so a dropped filter shows the gone card).
+      assert.ok(listGoneFilters.length > 0 && listGoneFilters.every((f) => f === 'is.null'), `the Ready lane read must filter job.disappeared_at=is.null (sent: ${JSON.stringify(listGoneFilters)})`);
+      // The gone posting is no longer a card in the lane.
+      assert.equal(await card('Gone Backend Engineer').count(), 0, 'a gone posting must not be a card in Ready to tailor');
+      // The section, collapsed by default, counts it.
+      const section = page.getByTestId('gone-after-ready');
+      // Its summary carries the exact count from Content-Range.
+      await section.locator('summary', { hasText: 'Gone after ready (1)' }).waitFor({ timeout: 10_000 });
+      // Collapsed: a native <details> without the open attribute.
+      assert.equal(await section.getAttribute('open'), null, 'the section must start collapsed');
+      // Opened the way Teja would.
+      await section.locator('summary').click();
+      // The row names the company, the title and the day, via the card's own postingGoneNote reader.
+      assert.match((await section.textContent()) ?? '', /GoneCo[\s\S]*Gone Backend Engineer[\s\S]*Posting gone \(since 2026-11-05\)/, 'the section row must name the job and when it went');
+      // One-click Reject, named for the job.
+      assert.equal(await section.getByRole('button', { name: 'Reject: GoneCo — Gone Backend Engineer' }).count(), 1, 'the section row must offer Reject');
       // Non-vacuity: the live card still offers Send, so the button exists on this lane.
       assert.equal(await card('Live Backend Engineer').getByRole('button', { name: /^Send through pipeline/ }).count(), 1, 'a live posting must still offer Send');
       // And it carries no gone note.

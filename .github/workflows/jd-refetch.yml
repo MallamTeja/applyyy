@@ -12,17 +12,42 @@ name: applyy jd refetch (no-description jobs)
 
 on:
   schedule:
-    # Daily at 05:07 UTC = 10:37 IST, after the morning scouts, so their thin rows are in the queue.
-    # GitHub cron is best-effort; real start times run hours late (repo CLAUDE.md §4).
-    - cron: '7 5 * * *'
+    # Three slots a day (05:07, 13:07, 21:07 UTC = 10:37, 18:37, 02:37 IST), after the scouts, so their thin rows are
+    # in the queue. WHY THREE (orch round 4, 2026-11-23): GitHub cron is best-effort; it delays slots by many hours and
+    # drops some. The single 05:07 slot started 8 h late on 11-22 (13:14Z) and 10 h 45 m late on 11-23 (15:52Z, run
+    # 45210050904), and in the same days scout.yml ran 2-3 of its 10 daily slots. A run is idempotent
+    # (it reads only passed_filters rows whose JD is still thin; robots 429 rows stay for a later run), so a late or
+    # doubled slot costs ~10 s and no Gemini call, and a dropped slot no longer means a lost day.
+    - cron: '7 5,13,21 * * *'
+  # At the state change that creates thin rows: the ATS scout saves Workday rows with no JD (its list endpoint
+  # carries none and the detail fill is capped at 40 reads a run), so the drain starts when the scout ends
+  # instead of waiting for a cron slot (Teja 2026-10-24: "automate, don't hand-dispatch"). pg_cron is NOT the
+  # answer here: Teja ruled 2026-10-09 "no cron" in the database (docs/product/decisions-and-rulings.md:48).
+  workflow_run:
+    # Must equal scout.yml's `name:` exactly; GitHub matches workflow_run by name (pinned by workflow.test.ts).
+    workflows: ['applyy scout (ats discovery)']
+    # Any conclusion: a red scout run may still have saved thin rows.
+    types: [completed]
+  # By hand, or by this workflow's own redispatch job (the chain below).
   workflow_dispatch:
     inputs:
       max_rows:
         description: 'Rows to try this run (1-30)'
         required: false
         default: '30'
+      # How many links deep this run is in a self-dispatch chain; 0 for a fresh run. Capped in the script.
+      chain_depth:
+        description: 'Chain depth (set by the redispatch job; leave 0)'
+        required: false
+        default: '0'
+      # Comma-separated application ids the previous link tried without progress, so this link skips them.
+      carry_skip_ids:
+        description: 'Ids to skip (set by the redispatch job; leave blank)'
+        required: false
+        default: ''
 
-# Read-only token: the script talks only to Supabase, with the app user's session.
+# Read-only token: the script talks only to Supabase, with the app user's session. actions: write is granted
+# ONLY to the redispatch job, never here: the refetch job holds the app user's password (apply-kit.yml pattern).
 permissions:
   contents: read
 
@@ -36,8 +61,18 @@ jobs:
     runs-on: ubuntu-latest
     # 30 rows x (up to ~75 s per call + 45 s Gemini pacing after a pipeline start) is ~60 min; 75 is the backstop.
     timeout-minutes: 75
+    # The script's chain verdict, handed to the redispatch job that holds actions: write.
+    outputs:
+      # 'true' or 'false'.
+      redispatch: ${{ steps.refetch.outputs.redispatch }}
+      # The next link's chain_depth.
+      next_depth: ${{ steps.refetch.outputs.next_depth }}
+      # The next link's carry_skip_ids.
+      carry_skip_ids: ${{ steps.refetch.outputs.carry_skip_ids }}
     steps:
       - name: Re-fetch no-description jobs
+        # Named so the job's outputs can read this step's GITHUB_OUTPUT.
+        id: refetch
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
@@ -45,6 +80,10 @@ jobs:
           APPLYY_APP_USER_PASSWORD: ${{ secrets.APPLYY_APP_USER_PASSWORD }}
           # Empty on a schedule; the script defaults it.
           MAX_ROWS: ${{ inputs.max_rows }}
+          # Empty on a schedule or workflow_run (a fresh chain); the script defaults it to 0.
+          CHAIN_DEPTH: ${{ inputs.chain_depth }}
+          # Empty unless the previous link carried ids; validated in the script, never trusted.
+          CARRY_SKIP_IDS: ${{ inputs.carry_skip_ids }}
         run: |
           node --input-type=module <<'EOF'
           // A missing secret stops the run loudly instead of signing in as nobody.
@@ -59,6 +98,25 @@ jobs:
           const rawMax = (process.env.MAX_ROWS ?? '').trim() || '30';
           const maxRows = /^\d+$/.test(rawMax) ? Number(rawMax) : NaN;
           if (!(maxRows >= 1 && maxRows <= 30)) { console.log(`::error::max_rows must be 1-30, got ${rawMax}`); process.exit(1); }
+          // The chain backstop: 8 links x 30 rows = 240 tries per trigger, past any backlog seen so far (111 on 11-23).
+          const MAX_CHAIN_DEPTH = 8;
+          // This run's depth: a whole number 0-8; blank (schedule, workflow_run) is a fresh chain.
+          const rawDepth = (process.env.CHAIN_DEPTH ?? '').trim() || '0';
+          const depth = /^\d+$/.test(rawDepth) ? Number(rawDepth) : NaN;
+          if (!(depth >= 0 && depth <= MAX_CHAIN_DEPTH)) { console.log(`::error::chain_depth must be 0-${MAX_CHAIN_DEPTH}, got ${rawDepth}`); process.exit(1); }
+          // jd-refetch's own skip_ids limit (index.ts MAX_SKIP_IDS); a longer list would be refused on the first call.
+          const MAX_SKIP_IDS = 200;
+          // The uuid shape index.ts accepts; checked here too so a bad carry fails before any call.
+          const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+          // Ids the previous link tried without progress; blank is none.
+          const rawCarry = (process.env.CARRY_SKIP_IDS ?? '').trim();
+          const carried = rawCarry === '' ? [] : rawCarry.split(',');
+          if (carried.length > MAX_SKIP_IDS || !carried.every((id) => UUID.test(id))) { console.log('::error::carry_skip_ids must be up to 200 comma-separated uuids'); process.exit(1); }
+          // The pause after a pipeline start; the env override exists for workflow.test.ts only (digits only, else 45 s).
+          const rawPace = (process.env.JD_REFETCH_PACE_MS ?? '').trim();
+          const paceMs = /^\d+$/.test(rawPace) ? Number(rawPace) : 45_000;
+          // Kinds that moved the row OUT of passed_filters: only these shrink the backlog, so only these earn a next link.
+          const PROGRESS = new Set(['closed', 'dropped', 'pipeline_started']);
           // The seven outcome kinds handler.ts returns, plus 'none'. An unknown kind is a contract break.
           const KINDS = new Set(['closed', 'retry_later', 'still_thin', 'dropped', 'pipeline_started', 'skipped_stale', 'error', 'none']);
           // A fresh session per call: a run can outlive a one-hour token.
@@ -73,7 +131,12 @@ jobs:
           // RPM window measured 2026-11-01.
           const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
           // The ids tried this run, sent back so the function moves on to the next row.
-          const tried = [];
+          // Starts with the previous link's carry, so this link begins past rows it already knows stay thin.
+          const tried = [...carried];
+          // This run's tries that left the row at passed_filters: the next link's carry.
+          const noProgress = [];
+          // True only when the loop stopped on its cap, never on 'none' (an empty backlog).
+          let capHit = true;
           // Per-kind counts for the summary.
           const counts = Object.fromEntries([...KINDS].map((k) => [k, 0]));
           for (let i = 0; i < maxRows; i += 1) {
@@ -90,13 +153,63 @@ jobs:
             counts[kind] += 1;
             console.log(`${body.application_id ?? '-'} ${kind} ${JSON.stringify(body.outcome)}`);
             // Nothing thin left.
-            if (kind === 'none') break;
+            if (kind === 'none') { capHit = false; break; }
             if (kind === 'error') console.log(`::warning::row ${body.application_id}: ${body.outcome.message}`);
             tried.push(body.application_id);
+            // A row still at passed_filters rides along to the next link's skip list.
+            if (!PROGRESS.has(kind)) noProgress.push(body.application_id);
             // Pace only after Gemini work started.
-            if (kind === 'pipeline_started') await sleep(45_000);
+            if (kind === 'pipeline_started') await sleep(paceMs);
           }
           console.log(`summary: ${JSON.stringify(counts)}`);
+          // The next link's skip list: everything carried in plus this run's no-progress rows.
+          const carry = [...carried, ...noProgress];
+          // How many rows this run moved out of passed_filters.
+          const progress = [...PROGRESS].reduce((n, k) => n + counts[k], 0);
+          // Chain only when rows may remain (cap hit), this run shrank the backlog (so the chain always ends),
+          // the depth backstop allows it, and the carry still fits the function's skip limit WITH the next link's
+          // own tries on top: it sends carry + up to 29 tried ids (max_rows defaults to 30 there), and a list
+          // over 200 is refused with HTTP 400 mid-run, which ends that link red with no verdict.
+          const NEXT_LINK_ROWS = 30;
+          const redispatch = capHit && progress > 0 && depth < MAX_CHAIN_DEPTH && carry.length + NEXT_LINK_ROWS <= MAX_SKIP_IDS;
+          console.log(`chain: depth=${depth} progress=${progress} capHit=${capHit} carry=${carry.length} redispatch=${redispatch}`);
+          // Written BEFORE any red exit, so a row error never cuts the chain (a row error is per-row).
+          const { appendFileSync } = await import('node:fs');
+          // Read by the job's outputs: block and handed to the redispatch job.
+          appendFileSync(process.env.GITHUB_OUTPUT, `redispatch=${redispatch}\nnext_depth=${depth + 1}\ncarry_skip_ids=${carry.join(',')}\n`);
           // Row errors make the run red, so they are seen; every other kind is a normal day.
-          if (counts.error > 0) process.exit(1);
+          // exitCode, not process.exit(): the run ends red once open sockets close, so stdout and GITHUB_OUTPUT
+          // are flushed (process.exit with live keep-alive sockets crashed Node 24 on Windows, 0xC0000409).
+          if (counts.error > 0) process.exitCode = 1;
           EOF
+
+  # The next link of the chain: the script says redispatch=true only when it hit its row cap, moved at least
+  # one row out of passed_filters, is under the depth cap, and its carry fits the function's skip limit, so
+  # the chain always shrinks the backlog and ends. Its own job, so actions: write never reaches the job that
+  # holds the app user's password. Runs after a red refetch too (a row error is per-row), never after a
+  # cancel. The new run queues in the concurrency group behind this one.
+  redispatch:
+    # After the refetch, reading its verdict.
+    needs: refetch
+    # Exactly 'true'; anything else (a missing output included) means no next link.
+    if: ${{ !cancelled() && needs.refetch.outputs.redispatch == 'true' }}
+    # gh is preinstalled on the runner; nothing to set up.
+    runs-on: ubuntu-latest
+    # One API call.
+    timeout-minutes: 5
+    # The one job allowed to start a workflow; no repository access at all.
+    permissions:
+      actions: write
+    steps:
+      # The next link from main, with the depth and the carried ids.
+      - name: Re-dispatch for the rows this run left
+        run: gh workflow run jd-refetch.yml --ref main --repo "$REPO" -f chain_depth="$NEXT_DEPTH" -f carry_skip_ids="$CARRY"
+        env:
+          # gh reads the token from here.
+          GH_TOKEN: ${{ github.token }}
+          # Passed as data, never interpolated into the shell line.
+          REPO: ${{ github.repository }}
+          # The script's own outputs, validated again by the next link's script.
+          NEXT_DEPTH: ${{ needs.refetch.outputs.next_depth }}
+          # Same.
+          CARRY: ${{ needs.refetch.outputs.carry_skip_ids }}

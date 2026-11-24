@@ -84,7 +84,7 @@ import type { PipelineStep } from '../pipeline/rowPipeline.ts';
 // The real invoke/read deps, or null on an unconfigured machine (the button then explains itself).
 import { liveRowPipelineDeps } from '../pipeline/rowPipelineDeps.ts';
 // The tested list logic: lanes, paging, sort, the date marker and the honest counter text.
-import { DISCOVERED_LIST_SELECT, LANES, searchLoadedDescriptions, SORT_OPTIONS, appendUnique, emptyListMessage, hasMoreRows, hasNoDescription, OPENING_LANE, isCurrentLane, keysetFilter, laneCountsFrom, laneTotalFrom, loadedOfText, pageLimit, postedDate, sortItems } from './discoveredList.ts';
+import { LANES, readGoneAfterReady, jobLabel, laneRead, liveLaneTotal, searchLoadedDescriptions, SORT_OPTIONS, appendUnique, emptyListMessage, hasMoreRows, hasNoDescription, OPENING_LANE, isCurrentLane, keysetFilter, laneCountsFrom, laneTotalFrom, loadedOfText, pageLimit, postedDate, sortItems } from './discoveredList.ts';
 // Every status's count in one RPC (application_status_counts), reused rather than a new per-lane query.
 import { useApplicationCounts } from '../../data/useApplicationCounts.ts';
 // Type only: the job row as the narrowed select delivers it, derived from DISCOVERED_JOB_COLUMNS.
@@ -92,18 +92,12 @@ import type { DiscoveredJob, DiscoveredListRow } from './discoveredList.ts';
 // Types for the lane switch, the load modes and the sort select.
 import type { Lane, LoadMode, SortKey } from './discoveredList.ts';
 
-import './DiscoveredJobsPage.css';
+// S40b: the collapsed list of Ready-to-tailor rows whose posting is gone, and its read's three states.
+import { GoneAfterReady } from './GoneAfterReady.tsx';
+// Type only: the section read's three states.
+import type { GoneState } from './discoveredList.ts';
 
-/* The job's name for the send button's accessible name and the results strip. The page already
-   treats company_name as optional (getCompanyCooldownInfo, the search filter), and a template string
-   would print a missing one as "undefined — Engineer". Only the parts that are real, non-blank text;
-   neither part -> a stated placeholder, never an empty name. */
-function jobLabel(job: DiscoveredJob): string {
-  // Each part kept only when it is a string with visible characters.
-  const parts = [job.company_name, job.title].filter((p): p is string => typeof p === 'string' && p.trim() !== '');
-  // The joined name, or a placeholder that says the data was missing.
-  return parts.length > 0 ? parts.join(' — ') : 'Untitled job';
-}
+import './DiscoveredJobsPage.css';
 
 interface DiscoveredItem {
   readonly applicationId?: string;
@@ -173,14 +167,30 @@ export function DiscoveredJobsPage(): ReactElement {
   // refetch too: a write on this page (Send, Reject, Undo) moves rows between lanes, so the totals must re-read.
   const { state: countsState, counts: statusCounts, refetch: refetchCounts } = useApplicationCounts();
   // Lane-shaped counts, or null until the read actually answers (the tested rule in discoveredList.ts).
-  const laneCounts = useMemo(() => laneCountsFrom(countsState.kind, statusCounts), [countsState.kind, statusCounts]);
+  /* S40b: the gone-after-ready section's read. Its exact count is also what the ready lane's total subtracts. */
+  const [gone, setGone] = useState<GoneState>({ kind: 'loading' });
+  // The gone count, or null while unknown (loading or failed): never a 0 that would leave the lane total unchanged.
+  const goneCount = gone.kind === 'rows' ? gone.total : null;
+  /* Lane-shaped counts, or null until the read actually answers (the tested rule in discoveredList.ts). Ready is the
+     LIVE count (S40): passed_filters minus gone postings, so "N are in Ready to tailor" matches that lane's own total. */
+  const laneCounts = useMemo(() => {
+    // The RPC's raw per-lane counts.
+    const base = laneCountsFrom(countsState.kind, statusCounts);
+    // The ready lane as it is listed.
+    const ready = base === null ? null : liveLaneTotal(base.ready, goneCount);
+    // Either unknown: no numbers at all, the sentence falls back to words.
+    return base === null || ready === null ? null : { ...base, ready };
+  }, [countsState.kind, statusCounts, goneCount]);
   // The lane's status and step list, from the one tested mapping.
   const laneSpec = LANES[lane];
   /* The exact number of rows at the lane's status. The list holds only the loaded pages, so its length
      undercounts; this is the honest total. From the counts RPC above, not a second HEAD count (2026-11-08,
      one Sydney round trip fewer per load); null while that read is loading or failed, never 0. Derived
      per render from the lane, so the old lane's total can never sit under the new lane's label. */
-  const laneTotal = laneTotalFrom(countsState.kind, statusCounts, laneSpec.status);
+  const rpcLaneTotal = laneTotalFrom(countsState.kind, statusCounts, laneSpec.status);
+  /* S40: the ready lane hides gone postings, so its total is the RPC's minus the section's exact count (null if
+     either is unknown). The RPC counts statuses only; a jobs join there would need a migration for one subtraction. */
+  const laneTotal = lane === 'ready' ? liveLaneTotal(rpcLaneTotal, goneCount) : rpcLaneTotal;
   /* The refetch, readable inside loadData without becoming a dependency: if the hook ever hands out a new
      function per render, a dependency would rebuild loadData and rerun the full load on every render. */
   const refetchCountsRef = useRef(refetchCounts);
@@ -261,6 +271,25 @@ export function DiscoveredJobsPage(): ReactElement {
      flight) and can resolve out of order; a stale response applied last would re-show a row that has
      already advanced as `discovered`, with a live button. Only the newest call writes state. */
   const loadSeq = useRef(0);
+  // The same "only the newest call writes" guard, for the gone section's own read.
+  const goneSeq = useRef(0);
+
+  /* S40b: reads the passed_filters rows whose posting is gone, with an exact count (the lane total subtracts it). */
+  const loadGone = useCallback(async (): Promise<void> => {
+    // Claims "latest".
+    const seq = ++goneSeq.current;
+    // No backend: said, not shown as "none gone".
+    if (supabase === null) {
+      // The reason.
+      setGone({ kind: 'error', message: 'Supabase is not configured.' });
+      // Nothing to read.
+      return;
+    }
+    // The tested read (discoveredList.ts); it never throws and never turns a missing count into 0.
+    const answer = await readGoneAfterReady(supabase);
+    // Only the newest read writes, so an older answer cannot overwrite a newer one.
+    if (seq === goneSeq.current) setGone(answer);
+  }, []);
 
   /* Load discovered jobs & filter rules. silent=true is the settle path after a per-card send: it
      skips the loading swap, which would replace the whole grid (scroll jumps to the top). It does not
@@ -284,6 +313,8 @@ export function DiscoveredJobsPage(): ReactElement {
     /* The lane total now comes from the counts RPC, so a reload re-reads it there, in parallel with the
        list below. Not on Load more: paging moves no rows, so the total it shows is still the answer. */
     if (mode !== 'more') {
+      // The gone section and its count re-read with the totals: a reject or a scout can move gone rows too.
+      void loadGone();
       // Every load after the first: a Send/Reject/Undo settle or a lane switch, where counts may have moved.
       if (countsPrimedRef.current) refetchCountsRef.current();
       // The first load rides on the read the store already has.
@@ -318,12 +349,16 @@ export function DiscoveredJobsPage(): ReactElement {
       }
 
       // The list read, built in two steps so Load more can add its cursor.
+      // The lane's select and its null filters (S40: Ready to tailor hides gone postings), from the tested helper.
+      const read = laneRead(lane);
       let query = supabase
         .from('applications')
         // Only the job columns the page reads (DISCOVERED_JOB_COLUMNS); created_at is the keyset cursor.
-        .select<string, DiscoveredListRow>(DISCOVERED_LIST_SELECT)
+        .select<string, DiscoveredListRow>(read.select)
         // The selected lane's inventory, and only that.
         .eq('status', laneSpec.status);
+      // Each embedded column that must be null; the inner join in read.select makes it drop the application row.
+      for (const column of read.isNull) query = query.is(column, null);
       // Load more: only rows after the last loaded one, so rows that left the lane cannot shift a page.
       if (cursor !== null) query = query.or(cursor);
       // Both reads in parallel (2026-10-24): the rules were awaited alone first, adding a full
@@ -387,6 +422,7 @@ export function DiscoveredJobsPage(): ReactElement {
       // Same rule for the Load more button: a superseding load ends it in its own finally.
       if (!stale()) setLoadingMore(false);
     }
+    // loadGone is not a dependency: a useCallback with [] deps, its identity never changes.
   }, [lane]);
 
   // First visit and every lane switch: loadData is rebuilt per lane, so this reruns a full load.
@@ -400,15 +436,17 @@ export function DiscoveredJobsPage(): ReactElement {
 
   /* One card's Reject: one click, no confirm (reversible; see rejectJob.ts). Runs under the card's row
      lock, so its Send is disabled meanwhile and a running Send refuses it. */
-  const rejectCard = async (applicationId: string, label: string): Promise<void> => {
+  const rejectCard = async (applicationId: string, label: string, kind: 'reject' | 'reject_closed' = 'reject'): Promise<void> => {
     // Narrowed once; the button is only rendered with a client, so null here is a forced call.
     const client = supabase;
     // Nothing to call without a client.
     if (client === null) return;
-    // The lane NOW: Undo returns the row here, and its sentence names it.
-    const from = laneSpec.status;
+    // The lane the row is in: the gone section's rows are always Ready to tailor; a card's is the lane NOW.
+    const fromSpec = kind === 'reject_closed' ? LANES.ready : laneSpec;
+    // Undo returns the row here, and its sentence names it.
+    const from = fromSpec.status;
     // Same moment, so the sentence and the target cannot disagree.
-    const laneLabel = laneSpec.label;
+    const laneLabel = fromSpec.label;
     // The same lock Send takes; released in its finally before the state writes below.
     const run = await withRowLock(applicationId, async () => {
       // Re-render with the lock held: this card's Reject and Send now read as in flight.
@@ -416,7 +454,7 @@ export function DiscoveredJobsPage(): ReactElement {
       // A previous failure is not this attempt's.
       setRejectErrors((prev) => ({ ...prev, [applicationId]: null }));
       // The one write; never throws.
-      return moveRejectedJob(client, { kind: 'reject', applicationId, from });
+      return moveRejectedJob(client, { kind, applicationId, from });
     });
     // A Send holds the row. Its button disables Reject, so only a click racing the re-render lands here.
     if (!run.started) {
@@ -429,15 +467,17 @@ export function DiscoveredJobsPage(): ReactElement {
     if (run.value.kind === 'moved') {
       // Gone at once, so triaging hundreds stays one click per card.
       setItems((prev) => prev.filter((item) => item.applicationId !== applicationId));
+      // Same for a gone-section row, with its total, until the silent reload re-reads both.
+      setGone((g) => (g.kind === 'rows' && g.rows.some((r) => r.id === applicationId) ? { kind: 'rows', rows: g.rows.filter((r) => r.id !== applicationId), total: g.total - 1 } : g));
       // The latest reject owns the status line and its Undo.
-      setRejectNote({ text: describeReject(run.value, 'reject', label, laneLabel), undo: { applicationId, from, label, laneLabel } });
+      setRejectNote({ text: describeReject(run.value, kind, label, laneLabel), undo: { applicationId, from, label, laneLabel } });
       // The loaded window and the exact lane total re-read, the same settle a Send gets.
       void loadData('silent');
       // Done; the failure path below is for every other outcome.
       return;
     }
     // Refused or no answer: the card stays, with the database's reason on it.
-    setRejectErrors((prev) => ({ ...prev, [applicationId]: describeReject(run.value, 'reject', label, laneLabel) }));
+    setRejectErrors((prev) => ({ ...prev, [applicationId]: describeReject(run.value, kind, label, laneLabel) }));
   };
 
   /* Undo for the status line's reject: dropped_filter back to the lane it came from, as 'human'. */
@@ -1060,6 +1100,20 @@ export function DiscoveredJobsPage(): ReactElement {
           </>
         )}
       </div>
+
+      {/* S40b: the Ready-to-tailor rows hidden because their posting is gone, collapsed, each with one-click Reject. */}
+      {lane === 'ready' && (
+        <GoneAfterReady
+          /* The section read's state. */
+          state={gone}
+          /* The same Reject the cards use, logged as posting_closed; Undo comes from the status line. */
+          onReject={(id, label) => void rejectCard(id, label, 'reject_closed')}
+          /* The shared row lock. */
+          isBusy={isRowInFlight}
+          /* Per-row failure sentences, shared with the cards (ids never collide). */
+          errors={rejectErrors}
+        />
+      )}
 
       {/* Grid of Job Cards */}
       {loading ? (

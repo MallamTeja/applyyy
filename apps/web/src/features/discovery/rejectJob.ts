@@ -44,25 +44,36 @@ export function canReject(status: ApplicationStatus): boolean {
 /* One requested move. A CLOSED union, so this helper can only ever reject or undo a reject: the page
    cannot reuse it to push a row anywhere else, which is the fast-path forgery this page once had. */
 export interface RejectMove {
-  // Reject sends the row to dropped_filter; undo sends it back to `from`.
-  readonly kind: 'reject' | 'undo';
+  // Reject sends the row to dropped_filter; undo sends it back to `from`. reject_closed (S40b, 2026-11-24) is the
+  // same move from the gone-after-ready section, logged as posting_closed instead of a taste call.
+  readonly kind: 'reject' | 'reject_closed' | 'undo';
   // The row.
   readonly applicationId: string;
   // The lane status the card was rejected FROM; the place Undo returns it to.
   readonly from: ApplicationStatus;
 }
 
+/* The event detail per kind. A Record over the closed union, so a new kind without a detail fails to compile. */
+const REJECT_DETAIL: Readonly<Record<RejectMove['kind'], Readonly<Record<string, string>>>> = {
+  // The card's Reject: Teja's taste call on a live posting.
+  reject: { reason: 'human_rejected', screen: 'discovered' },
+  // The section's Reject: the posting closed; drop_reason names it the way the screener's drops are named.
+  reject_closed: { reason: 'posting_closed', drop_reason: 'posting_closed', screen: 'discovered_gone' },
+  // Undo of either: back to the lane.
+  undo: { reason: 'human_undo_reject', screen: 'discovered' },
+};
+
 /* The RPC arguments, built in ONE pure place so a test can pin the target, the agent and the detail. */
 export function buildRejectArgs(move: RejectMove): Record<string, unknown> {
   return {
     // The row being moved.
     p_application_id: move.applicationId,
-    // Reject drops it; undo returns it to the lane it was rejected from.
-    p_to_status: move.kind === 'reject' ? REJECTED_STATUS : move.from,
+    // Both rejects drop it; undo returns it to the lane it was rejected from.
+    p_to_status: move.kind === 'undo' ? move.from : REJECTED_STATUS,
     // 'human' is the only agent a browser may honestly claim, and needs no agent key.
     p_agent: 'human',
-    // Written as a 'note' event (the RPC sets no drop_reason column), so the log says who and where.
-    p_detail: { reason: move.kind === 'reject' ? 'human_rejected' : 'human_undo_reject', screen: 'discovered' },
+    // Written as a 'note' event (the RPC sets no drop_reason column), so the log says who, why and where.
+    p_detail: REJECT_DETAIL[move.kind],
   };
 }
 
@@ -105,16 +116,18 @@ export async function moveRejectedJob(client: Pick<RecoveryClient, 'rpc'>, move:
 
 /* The sentence each outcome shows. One table, so every message is reviewable in one place. */
 export function describeReject(outcome: RejectOutcome, kind: RejectMove['kind'], label: string, laneLabel: string): string {
+  // Both reject kinds read as a reject; only undo reads as a restore.
+  const isUndo = kind === 'undo';
   // Exhaustive: a new outcome kind fails to compile here.
   switch (outcome.kind) {
     // Confirmed by the database, so stated as done.
     case 'moved':
-      return kind === 'reject' ? `Rejected ${label}.` : `Undone: ${label} is back in ${laneLabel}.`;
+      return isUndo ? `Undone: ${label} is back in ${laneLabel}.` : `Rejected ${label}.`;
     // Unknown, said as unknown; a retry is safe because a same-status call is a no-op.
     case 'no_answer':
-      return `No answer from the database, so ${label} may not be ${kind === 'reject' ? 'rejected' : 'restored'}. Reload to see where it is; trying again is safe.`;
+      return `No answer from the database, so ${label} may not be ${isUndo ? 'restored' : 'rejected'}. Reload to see where it is; trying again is safe.`;
     // The database's own reason, with its code for diagnosis.
     case 'refused':
-      return `Could not ${kind === 'reject' ? 'reject' : 'undo the reject of'} ${label} (${outcome.code || 'error'}): ${outcome.message}`;
+      return `Could not ${isUndo ? 'undo the reject of' : 'reject'} ${label} (${outcome.code || 'error'}): ${outcome.message}`;
   }
 }

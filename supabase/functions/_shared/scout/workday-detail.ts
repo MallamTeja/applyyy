@@ -26,10 +26,16 @@ import type { JobInsert } from "../contracts/shared-types.ts";
 import type { TechGateVerdict } from "../screen/tech-gate.ts";
 
 // ponytail: a fixed per-run cap and a fixed pause, not a per-host rate limiter. Ceiling: a
-// posting past the cap is saved with no description, the screener drops it as
-// missing_description, and only the back-fill can recover it. Raise the cap, or carry the rest
-// to the next run, if the cap is often reached. Measured 2026-11-05: 459 title-passing Workday
-// postings over 4 days of first sightings, about 115 a day; steady state is lower.
+// posting past the cap is saved with no description. Since 2026-11-18 the screener does NOT drop
+// it: a blank row that no title/work-auth rule rejects is born at passed_filters as "No
+// description" (screen-batch.ts NO DESCRIPTION), where the worker's stored-row backfill
+// (worker/src/scout/persist-jobs.ts) and the jd-refetch drain (jd-refetch.yml) read it later.
+// So past-cap is "later", never a silent drop. Raise the cap only if `skipped` is often > 0.
+// Measured 2026-11-05: 459 title-passing Workday postings over 4 days of first sightings, about
+// 115 a day. Re-measured 2026-11-24 over the 12 scout.yml runs 11-20..11-23 ("workday detail:"
+// log line): skipped 0 in every run, at most 20 reads a run. Since 11-21, 56-64 of 64 Workday
+// boards per run were deferred by a robots.txt 429 before any detail read: that is the binding
+// limit (ruling S16: never dodge it), not this cap.
 // The pause between two detail reads, so one run never bursts at one Workday host.
 export const WORKDAY_DETAIL_PAUSE_MS = 500;
 
@@ -64,7 +70,7 @@ export interface WorkdayDetailRun extends WorkdayDetailDeps {
   fetched: number;
   // Reads that produced a description.
   filled: number;
-  // Title-passing postings not read because the cap or the deadline came first.
+  // Title-passing postings not read because the cap or the deadline came first (saved blank, read later).
   skipped: number;
 }
 
@@ -103,7 +109,7 @@ export async function fillWorkdayDescriptions(rows: readonly JobInsert[], run: W
     if (url === null) continue;
     // Out of reads or out of time: counted, so the run log shows what the cap cost.
     if (run.left <= 0 || run.deadline.remainingMs() < WORKDAY_DETAIL_MIN_REMAINING_MS) {
-      // The posting is saved without a description and dropped as missing_description.
+      // The posting is saved without a description; it waits at passed_filters for the backfill or jd-refetch.
       run.skipped += 1;
       // Next row; it is skipped the same way, and counted.
       continue;

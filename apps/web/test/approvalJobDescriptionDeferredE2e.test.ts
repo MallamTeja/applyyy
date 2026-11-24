@@ -162,8 +162,8 @@ describe('Approval queue reads job descriptions after the first paint (2026-11-0
     await page.getByText(CHIP, { exact: true }).first().waitFor();
     // The queue read was sent and did NOT ask for the description (the property that cuts the bytes).
     assert.ok(queueSelect !== null, 'the queue read was never sent');
-    // Positive shape: the jobs embed ends on location_raw, the column list the first paint needs.
-    assert.match(queueSelect, /jobs:job_id\(title,company_name,employment_type,work_arrangement,locations,salary_min,salary_max,salary_currency,discovered_via,source_refs,apply_url,location_raw\)$/);
+    // Positive shape: the jobs embed lists the columns the first paint needs (disappeared_at since 2026-11-23, !inner since 2026-11-24).
+    assert.match(queueSelect, /jobs:job_id!inner\(title,company_name,employment_type,work_arrangement,locations,salary_min,salary_max,salary_currency,discovered_via,source_refs,apply_url,location_raw,disappeared_at\)$/);
     // Exactly one deferred read, so the description is not fetched per card.
     assert.equal(descriptionReads.length, 1, `expected 1 deferred description read, saw ${descriptionReads.length}`);
     // Its select is the id plus the one embedded column.

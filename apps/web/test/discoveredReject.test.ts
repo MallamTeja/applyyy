@@ -109,6 +109,29 @@ describe('buildRejectArgs: the one write', () => {
   });
 });
 
+describe('reject_closed: the gone-after-ready section (S40b)', () => {
+  it('sends passed_filters to dropped_filter as human, naming posting_closed and the section', () => {
+    // The whole object, so the reason, drop_reason and screen are each pinned.
+    assert.deepEqual(mod.buildRejectArgs({ kind: 'reject_closed', applicationId: ID, from: 'passed_filters' }), {
+      // The row.
+      p_application_id: ID,
+      // The same human discard edge the card Reject uses, so Undo works the same way.
+      p_to_status: 'dropped_filter',
+      // The only agent a browser may claim.
+      p_agent: 'human',
+      // Why: the posting closed, not a taste call; and where: the section, not the card.
+      p_detail: { reason: 'posting_closed', drop_reason: 'posting_closed', screen: 'discovered_gone' },
+    });
+  });
+
+  it('reads as a reject in every sentence', () => {
+    // Confirmed.
+    assert.equal(mod.describeReject({ kind: 'moved' }, 'reject_closed', 'Acme — Engineer', 'Ready to tailor'), 'Rejected Acme — Engineer.');
+    // Lost answer says rejected, not restored.
+    assert.match(mod.describeReject({ kind: 'no_answer' }, 'reject_closed', 'Acme — Engineer', 'Ready to tailor'), /may not be rejected/);
+  });
+});
+
 describe('rejectOutcome: only a confirmed move removes the card', () => {
   it('no error and a 2xx is moved', () => {
     // The RPC returns the row: 200.
