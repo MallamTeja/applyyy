@@ -935,3 +935,98 @@ describe('createSupabaseGateway.fetchDailyCap (W10)', () => {
     }
   });
 });
+
+// RUN 45160947946 (2026-11-23 10:59 UTC): the first Storage call of the run answered HTTP 544 "The connection
+// to the database timed out". Supabase's logs show why: Storage had no warm Postgres connection after ~25 h
+// idle (pgbouncer: supabase_storage_admin login at 10:59:28, "client unexpected eof (age=6s)"), and the next
+// upload 13 s later answered 200. storage-js 2.7.1 upload() does NOT throw on an HTTP error: it RETURNS the
+// server's raw JSON body as `error` (StorageFileApi.js:85-87), whose status is the STRING `statusCode`, not
+// a StorageApiError `status` number. These fakes reproduce that exact body; a fake with `status: 544` would
+// certify a branch upload() never reaches (the first version of this fix did exactly that). In a live run the
+// old one-shot upload threw, the claim loop's breaker tripped on "any throw", and nothing was submitted.
+describe('artifact uploads: transient Storage answers are retried, refusals are not', () => {
+  // The exact error value upload() returns for that 544: Storage's JSON body, status as a STRING.
+  const coldStorage = { statusCode: '544', error: 'DatabaseTimeout', message: 'The connection to the database timed out' };
+  // A refusal (an RLS or bucket-policy 403), same raw-body shape: retrying cannot change its answer.
+  const refused = { statusCode: '403', error: 'Unauthorized', message: 'new row violates row-level security policy' };
+  // No JSON answer at all: upload() THROWS (fetch TypeError on a network drop, SyntaxError on an HTML 502).
+  const noAnswer = new TypeError('fetch failed');
+
+  // One scripted answer: a returned error body, a thrown error, or null for success.
+  type Answer = { statusCode: string; error: string; message: string } | Error | null;
+  // A fake whose upload answers from a script, one entry per call, recording every path it was asked for.
+  function scriptedStorage(answers: ReadonlyArray<Answer>) {
+    // Every path asked for, in order, so a test can see the retry and its fresh path.
+    const paths: string[] = [];
+    // Index into the script; past its end every call succeeds.
+    let call = 0;
+    // The storage leg only; every other leg is the shared fake's.
+    const { client } = fakeClient({
+      // Shaped like supabase-js: an error is a returned value, never a throw.
+      // A thrown entry throws, as upload() does with no JSON answer; a body entry is returned.
+      storage: { from: () => ({ upload: async (path: string) => { paths.push(path); const answer = answers[call++] ?? null; if (answer instanceof Error) throw answer; return answer ? { data: null, error: answer } : { data: { path }, error: null }; } }) },
+    });
+    // Zero delays: the retry rule is under test, not the clock.
+    return { gateway: createSupabaseGateway(client, { userId: 'u1', storageRetryDelaysMs: [0, 0] }), paths };
+  }
+
+  it('uploadScreenshot retries a Storage 544 (cold Storage->Postgres connect) and returns the path that landed', async () => {
+    // First answer 544, second 200: exactly run 45160947946's pair of uploads.
+    const { gateway, paths } = scriptedStorage([coldStorage, null]);
+    // Resolves instead of throwing into the claim loop's breaker.
+    const path = await gateway.uploadScreenshot('app-1', new Uint8Array([1]));
+    // Two attempts were made.
+    expect(paths).toHaveLength(2);
+    // The returned path is the one whose upload succeeded, never the failed attempt's.
+    expect(path).toBe(paths[1]);
+  });
+
+  it('uploadResume retries the same way (it is the FIRST Storage call of a live run)', async () => {
+    // Same cold-start answer on the resume, which a live run uploads before any screenshot.
+    const { gateway, paths } = scriptedStorage([coldStorage, null]);
+    // Resolves: the submit path is not lost to a cold pool.
+    const path = await gateway.uploadResume('app-1', new Uint8Array([1]));
+    // Retried once.
+    expect(paths).toHaveLength(2);
+    // The landed attempt's path.
+    expect(path).toBe(paths[1]);
+  });
+
+  it('uploadResume retries when upload() throws with no JSON answer (network drop / HTML 502)', async () => {
+    // First call throws, second lands.
+    const { gateway, paths } = scriptedStorage([noAnswer, null]);
+    // Resolves: a dropped connection is not a refusal.
+    const path = await gateway.uploadResume('app-1', new Uint8Array([1]));
+    // Retried once.
+    expect(paths).toHaveLength(2);
+    // The landed attempt's path.
+    expect(path).toBe(paths[1]);
+  });
+
+  it('a throw that persists past the schedule is rethrown unchanged', async () => {
+    // Every call throws.
+    const { gateway, paths } = scriptedStorage([noAnswer, noAnswer, noAnswer]);
+    // The original error surfaces, so a real bug is not masked.
+    await expect(gateway.uploadScreenshot('app-1', new Uint8Array([1]))).rejects.toBe(noAnswer);
+    // 1 attempt + 2 retries.
+    expect(paths).toHaveLength(3);
+  });
+
+  it('a refusal (403) is not retried and still throws with the operation named', async () => {
+    // A policy refusal answers the same every time.
+    const { gateway, paths } = scriptedStorage([refused]);
+    // Throws on the first answer, as before.
+    await expect(gateway.uploadScreenshot('app-1', new Uint8Array([1]))).rejects.toThrow(/uploadScreenshot failed: new row violates/);
+    // One attempt only.
+    expect(paths).toHaveLength(1);
+  });
+
+  it('retries are bounded: a Storage outage still throws after the configured attempts', async () => {
+    // Every answer cold: a real outage, not a cold start.
+    const { gateway, paths } = scriptedStorage([coldStorage, coldStorage, coldStorage, coldStorage]);
+    // Throws after giving up, naming the operation and the last answer.
+    await expect(gateway.uploadResume('app-1', new Uint8Array([1]))).rejects.toThrow(/uploadResume failed: The connection to the database timed out/);
+    // 1 attempt + 2 retries (two configured delays), never unbounded.
+    expect(paths).toHaveLength(3);
+  });
+});

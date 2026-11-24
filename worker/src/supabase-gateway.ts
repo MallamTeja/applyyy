@@ -49,7 +49,11 @@ export interface SupabaseLike {
   // until those aliases land and can be imported.
   rpc(fn: string, args?: Record<string, unknown>): Promise<{ data: unknown; error: { message: string } | null }>;
   from(table: string): any;
-  storage: { from(bucket: string): { upload(path: string, body: unknown, opts?: unknown): Promise<{ data: unknown; error: { message: string } | null }> } };
+  // storage-js 2.7.1 upload() RETURNS the Storage server's raw JSON body as `error` on a non-2xx answer:
+  // `{ statusCode: "544", error: "DatabaseTimeout", message }`, the status a STRING (StorageFileApi.js:85-87).
+  // `status` (a number) is the StorageApiError shape other storage-js calls use. Both optional: the
+  // transient-answer rule reads them by SHAPE.
+  storage: { from(bucket: string): { upload(path: string, body: unknown, opts?: unknown): Promise<{ data: unknown; error: { message: string; status?: unknown; statusCode?: unknown } | null }> } };
   auth: {
     signInWithPassword(credentials: { email: string; password: string }): Promise<{
       data: { session: { expires_at?: number; access_token: string } | null };
@@ -77,6 +81,38 @@ export interface GatewayConfig {
   // a resume is Teja's personal data and the artifact an employer received, so
   // they want their own access policy.
   readonly resumeBucket?: string;
+  // Waits before each retry of a TRANSIENT Storage answer; its length is the retry count. Injectable so
+  // tests pass zeros. Default below: enough for Storage to open a cold Postgres connection (~6 s on 11-23).
+  readonly storageRetryDelaysMs?: readonly number[];
+}
+
+// Storage answers that mean "ask again in a moment", not "no". 544 is Storage's own "database timed out"
+// (run 45160947946: its Postgres pool was cold after ~25 h idle); 502/503/504 are the gateway in front of it.
+// A closed set: a 4xx refusal (policy, size, bucket) answers the same every time, so it is never retried.
+const TRANSIENT_STORAGE_STATUSES: ReadonlySet<number> = new Set([502, 503, 504, 544]);
+// Default waits: 2 s, then 5 s. Worst case 7 s added to one row, far inside the job's timeout.
+const DEFAULT_STORAGE_RETRY_DELAYS_MS: readonly number[] = [2_000, 5_000];
+
+// The HTTP status a returned Storage error carries, or null when it carries none we can trust. Read by SHAPE
+// (§6): `statusCode` must be exactly three digits, never Number("") = 0 or a parseInt of "544abc".
+function storageErrorStatus(error: { status?: unknown; statusCode?: unknown }): number | null {
+  // The StorageApiError shape: a real integer status.
+  if (typeof error.status === 'number' && Number.isInteger(error.status)) return error.status;
+  // The raw-body shape upload() returns in 2.7.1: a three-digit string (a number is accepted too).
+  if (typeof error.statusCode === 'string' && /^[0-9]{3}$/.test(error.statusCode)) return Number(error.statusCode);
+  // Some Storage builds send the code as a number; accept that, still integer-checked.
+  if (typeof error.statusCode === 'number' && Number.isInteger(error.statusCode)) return error.statusCode;
+  // No recognisable status: the caller treats it as a refusal.
+  return null;
+}
+
+// Whether a returned Storage error is worth one more attempt: only a status in the closed set. Anything
+// unrecognised is treated as a refusal and thrown at once, never retried.
+export function isTransientStorageError(error: { status?: unknown; statusCode?: unknown }): boolean {
+  // Read the status by shape; null (unknown shape) is never transient.
+  const status = storageErrorStatus(error);
+  // Transient only when the status is one of the listed ones.
+  return status !== null && TRANSIENT_STORAGE_STATUSES.has(status);
 }
 
 /**
@@ -104,6 +140,49 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
   let expiresAtEpochSeconds = 0;
   const bucket = config.screenshotBucket ?? 'screenshots';
   const resumeBucket = config.resumeBucket ?? 'resumes';
+  // The retry schedule for artifact uploads; tests inject zeros.
+  const storageRetryDelaysMs = config.storageRetryDelaysMs ?? DEFAULT_STORAGE_RETRY_DELAYS_MS;
+
+  // One artifact upload with bounded retries of TRANSIENT answers (2026-11-23, run 45160947946). Both
+  // uploads sit on the submit path, and a throw there trips the claim loop's circuit breaker for the whole
+  // run, so a cold Storage pool must not read as a failure. A fresh timestamped path per attempt: if a
+  // "failed" attempt did land, the retry cannot collide with it (an orphan object is the worst case).
+  const uploadArtifact = async (bucketName: string, applicationId: string, extension: string, bytes: Uint8Array, contentType: string, operation: string): Promise<string> => {
+    // Counts retries taken; the schedule's length bounds it.
+    for (let retry = 0; ; retry++) {
+      // User, application, timestamp: the path shape both buckets' storage policies are written for.
+      const path = `${config.userId}/${applicationId}/${Date.now()}.${extension}`;
+      // The wait before the next attempt, or undefined once the schedule is spent.
+      const delay = storageRetryDelaysMs[retry];
+      // The answer: a returned { error } for an HTTP refusal or timeout, or a throw when no JSON answer came.
+      let answer: Awaited<ReturnType<ReturnType<SupabaseLike['storage']['from']>['upload']>>;
+      try {
+        // supabase-js returns { error } for an HTTP answer rather than throwing; the error is read below.
+        answer = await client.storage.from(bucketName).upload(path, bytes, { contentType });
+      } catch (thrown) {
+        // upload() THROWS when there was no JSON answer at all: a network drop (fetch TypeError) or a gateway's
+        // HTML 502 page (res.json() SyntaxError). Nothing was refused, so it is transient; the original
+        // error is rethrown once the schedule is spent, so a real bug still surfaces.
+        if (delay === undefined) throw thrown;
+        // Logged so a run log shows the retry.
+        console.warn(`[applyy] ${operation} for ${applicationId}: Storage gave no answer (${thrown instanceof Error ? thrown.message : String(thrown)}); retrying in ${delay} ms`);
+        // Wait, then try a fresh path.
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        // Next attempt.
+        continue;
+      }
+      // The returned error, if any.
+      const { error } = answer;
+      // Landed: this attempt's path is the one recorded on the application.
+      if (!error) return path;
+      // A refusal, or the retries are spent: the same throw unwrap() gives, so callers see no new shape.
+      if (delay === undefined || !isTransientStorageError(error)) throw new Error(`${operation} failed: ${error.message}`);
+      // Logged so a run log shows the cold start instead of hiding it.
+      console.warn(`[applyy] ${operation} for ${applicationId}: transient Storage answer (${String(storageErrorStatus(error))}: ${error.message}); retrying in ${delay} ms`);
+      // Give Storage time to open its Postgres connection.
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  };
 
   // A local function rather than a method reached through `this`, because the
   // claim needs it too and `this` inside an object literal breaks the moment a
@@ -559,12 +638,8 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
       // Path includes the application id so the dashboard can find it, and a
       // timestamp so a re-run during the dry-run period does not overwrite the
       // evidence Teja has not reviewed yet.
-      const path = `${config.userId}/${applicationId}/${Date.now()}.png`;
-      unwrap(
-        await client.storage.from(bucket).upload(path, bytes, { contentType: 'image/png' }),
-        'uploadScreenshot',
-      );
-      return path;
+      // A transient Storage answer is retried (uploadArtifact); the returned path is the attempt that landed.
+      return uploadArtifact(bucket, applicationId, 'png', bytes, 'image/png', 'uploadScreenshot');
     },
 
     async uploadResume(applicationId, bytes) {
@@ -577,17 +652,11 @@ export function createSupabaseGateway(client: SupabaseLike, config: GatewayConfi
       // is the wrong trade here: two applications sending the identical resume
       // to different employers would share one object, and deleting one row's
       // artifact would silently remove the other's evidence of what it sent.
-      const path = `${config.userId}/${applicationId}/${Date.now()}.pdf`;
-      unwrap(
-        await client.storage
-          .from(resumeBucket)
-          // Declared explicitly: Supabase Storage infers from the extension but
-          // an object served as octet-stream downloads instead of previewing,
-          // and Teja opens these from the dashboard to check what went out.
-          .upload(path, bytes, { contentType: 'application/pdf' }),
-        'uploadResume',
-      );
-      return path;
+      // The content type is declared explicitly: Supabase Storage infers from the extension but an object
+      // served as octet-stream downloads instead of previewing, and Teja opens these from the dashboard to
+      // check what went out. Retried like the screenshot: this is the FIRST Storage call of a live run, so it
+      // is the one a cold Storage pool hits.
+      return uploadArtifact(resumeBucket, applicationId, 'pdf', bytes, 'application/pdf', 'uploadResume');
     },
 
     async setArtifactPaths(applicationId, paths) {
