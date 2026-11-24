@@ -50,6 +50,14 @@ Rule changes today: peers run 3 parallel tracks via subagents (Teja 11:31, memor
 - Not yet verified live: the `!inner` + embedded filter via PostgREST on /approvals and the Ready lane (check row dbc3a424).
 - Peer 4 told "bundle landed" 14:18.
 
+## 5b. Teja rulings 14:55 (answer the two open questions)
+1. **Headline never shows a role title Teja never held** ("Site Reliability Engineer"? → "nope"). Peer 3's S46 `groundRoleTitle`
+   only strips tech ("Software Engineer", "Python Software Engineer"), which is still a never-held title: extend it so the
+   headline comes from held roles (master experience, e.g. "AI Engineer Intern") before shipping S46. Re-check all 27 queue rows.
+2. **Skills per group = min 6, then fill the line**: add the most JD-relevant master skills until the group's line is full
+   (6–8+ depending on width). Replaces the 11-11 "4–6" rule AND the 11-21 cap of 10. AI floor ≥5 and one page still hold.
+   Implement in the tailor skill floor/page-fit width model (`_shared/tailor/`).
+
 ## 6a. Peer 2 retire (bridge `2026-11-24-peer-2-r2.md`, STATE AT RETIRE has exact files): GATED, NOT committed
 - **S30**: fn 2444/2444, deno 122=122. The pending row was wrong: GEMINI_FALLBACK_MODEL IS set (3.6-flash). The bug was a
   one-way switch onto the weaker model (live: 3.6-flash 2 ok/35 vs flash-lite 127/183); fix = the models alternate. No secret
