@@ -50,6 +50,11 @@ Rule changes today: peers run 3 parallel tracks via subagents (Teja 11:31, memor
 - Not yet verified live: the `!inner` + embedded filter via PostgREST on /approvals and the Ready lane (check row dbc3a424).
 - Peer 4 told "bundle landed" 14:18.
 
+## 5a. Peer 2 re-briefed 14:58 (applyyy-94, fresh after /clear)
+Tracks: S24 DiffView.tsx + S43 detector bullet.sources fix; S46 headline from HELD roles only; skill line-fill (min 6, fill line).
+Owns _shared/audit/**, _shared/tailor/**, approval/DiffView.{tsx,css}, diffModel.ts, diffAdapter.ts. Bridge: 2026-11-24-peer-2-r3.md.
+Parked for the orch to ship from the r2 bridges: S30 (Gemini alternate), grad-year (migration first; worker vitest).
+
 ## 5b. Teja rulings 14:55 (answer the two open questions)
 1. **Headline never shows a role title Teja never held** ("Site Reliability Engineer"? → "nope"). Peer 3's S46 `groundRoleTitle`
    only strips tech ("Software Engineer", "Python Software Engineer"), which is still a never-held title: extend it so the
